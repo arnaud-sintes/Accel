@@ -1,0 +1,14 @@
+<Application x:Class="Glaude.App.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <!--
+        Deliberately NOT an ApplicationDefinition in the build sense (see Glaude.csproj's
+        ItemGroup for App/App.xaml, and the comment on the Glaude.App.App partial class):
+        Program.cs's top-level-statements Main is the one and only process entry point. If this
+        file compiled with the SDK's default ApplicationDefinition build action, the WPF SDK
+        would generate a second Main (from this file's StartupUri/Main-generation logic),
+        colliding with the existing one and failing the build. It is compiled as Page instead,
+        and Glaude.App.App is constructed manually (see Program.cs's `ui-preview` throwaway verb)
+        whenever this shell needs to actually run.
+    -->
+</Application>

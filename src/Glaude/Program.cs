@@ -2,6 +2,59 @@ using System.Windows.Forms;
 using Glaude.Cli;
 using Glaude.Server;
 
+// Throwaway, hidden dev-only verb for P1-T1b's own visual verification of the WPF shell
+// scaffolding (App/App.xaml + App/MainWindow.xaml) - NOT part of ArgParser's documented surface
+// and not wired into the real combined-start path. Deliberately checked before ArgParser.Parse
+// so it can never collide with or affect the real Verb dispatch/tests. Scope decision: kept
+// minimal and undocumented on purpose; wiring the WPF shell into the actual `glaude` startup is
+// a later task (P1-T2+), not this one.
+if (args.Length > 0 && string.Equals(args[0], "ui-preview", StringComparison.Ordinal))
+{
+    var verify = args.Length > 1 && string.Equals(args[1], "--verify", StringComparison.Ordinal);
+    var uiPreviewThread = new Thread(() => RunUiPreview(verify));
+    uiPreviewThread.SetApartmentState(ApartmentState.STA);
+    uiPreviewThread.Start();
+    uiPreviewThread.Join();
+    return 0;
+}
+
+// Runs the WPF shell scaffolding standalone, on its own STA thread (mirrors RunCombinedAsync's
+// existing WinForms STA thread below - this process's real Main is not STA, since the combined
+// app already needed WinForms on a dedicated thread rather than the process's own). Dev-only,
+// see the `ui-preview` check above for why this exists.
+static void RunUiPreview(bool verify)
+{
+    var wpfApp = new Glaude.App.App();
+    var mainWindow = new Glaude.App.MainWindow();
+
+    if (verify)
+    {
+        // Non-interactive layout check (P1-T1b verification): once the window has laid out,
+        // measure every placeholder panel's actual rendered size and print it, then close the
+        // window so this can run unattended (e.g. from a CI/manual verification shell) instead
+        // of requiring a human to eyeball a live window. A build success alone doesn't prove the
+        // splitters/rows/columns didn't collapse to zero, so this is a real measurement, not a
+        // guess.
+        mainWindow.ContentRendered += (_, _) =>
+        {
+            mainWindow.Dispatcher.BeginInvoke(new Action(() =>
+            {
+                void Report(string name, System.Windows.FrameworkElement element) =>
+                    Console.WriteLine($"{name}: {element.ActualWidth:0.#} x {element.ActualHeight:0.#}");
+
+                Report("PanelA", mainWindow.PanelA);
+                Report("PanelB", mainWindow.PanelB);
+                Report("PanelC", mainWindow.PanelC);
+                Report("PanelD", mainWindow.PanelD);
+                Report("PanelE", mainWindow.PanelE);
+                mainWindow.Close();
+            }), System.Windows.Threading.DispatcherPriority.ContextIdle);
+        };
+    }
+
+    wpfApp.Run(mainWindow);
+}
+
 // Combined-app entry point (post "one combined app" refactor): running `glaude` with no
 // arguments installs the hooks (best-effort - a refusal is printed but never aborts startup),
 // starts the Kestrel event server in-process, and opens the WinForms monitor window on its own
