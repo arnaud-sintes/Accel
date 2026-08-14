@@ -199,28 +199,50 @@
                                                       Command="{Binding PlacementTarget.Tag.RemoveRootCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
                                                       CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
                                             <!--
-                                                P4-T2: only meaningful for a session row with a live tab
-                                                open (MainWindow.RenameSession_Click no-ops otherwise, same
-                                                guard-clause convention as RemoveRootCommand above), so this
-                                                is shown for every row rather than adding a Kind-based
-                                                visibility converter for this task. Click (not Command) is
-                                                used because the handler needs to open a modal dialog and
-                                                await a PTY round-trip, which a plain ICommand on a
-                                                WPF-free ViewModel cannot do.
+                                                P4-T2/T4: only meaningful for a session row with a live tab
+                                                open (the code-behind handlers no-op otherwise, same
+                                                guard-clause convention as RemoveRootCommand above), so
+                                                these are shown for every row rather than adding a
+                                                Kind-based visibility converter for this task.
+
+                                                An inline Click="..." attribute directly on a MenuItem
+                                                nested this deep (ContextMenu inside a Style's Setter.Value)
+                                                miscompiles under the WPF markup compiler here - the
+                                                generated IComponentConnector.Connect ends up casting the
+                                                target to the unrelated sibling GridSplitter instead of
+                                                MenuItem (reproduced twice against a fully clean obj/bin,
+                                                so it is a real compiler defect for this specific nesting
+                                                shape, not a stale-build artifact). Each item below uses a
+                                                per-MenuItem Style + EventSetter instead - the exact
+                                                pattern already proven working for the tab strip's
+                                                double-click gesture - which sidesteps whatever in the
+                                                compiler's connectionId numbering trips on the inline
+                                                attribute form.
                                             -->
-                                            <MenuItem Header="Rename…" Click="RenameSession_Click"
-                                                      Tag="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
-                                            <!--
-                                                P4-T4: same guard-clause convention as Rename/Stop monitoring
-                                                above - MainWindow.ResumeSession_Click no-ops for anything
-                                                other than a session row, and for a session that already has
-                                                a live tab open it just selects that tab instead of spawning
-                                                a second "claude resume" call against the same id.
-                                            -->
-                                            <MenuItem Header="Resume" Click="ResumeSession_Click"
-                                                      Tag="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
-                                            <MenuItem Header="Resume as fork…" Click="ResumeSessionAsFork_Click"
-                                                      Tag="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
+                                            <MenuItem Header="Rename…">
+                                                <MenuItem.Style>
+                                                    <Style TargetType="MenuItem">
+                                                        <Setter Property="Tag" Value="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
+                                                        <EventSetter Event="MenuItem.Click" Handler="RenameSession_Click" />
+                                                    </Style>
+                                                </MenuItem.Style>
+                                            </MenuItem>
+                                            <MenuItem Header="Resume">
+                                                <MenuItem.Style>
+                                                    <Style TargetType="MenuItem">
+                                                        <Setter Property="Tag" Value="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
+                                                        <EventSetter Event="MenuItem.Click" Handler="ResumeSession_Click" />
+                                                    </Style>
+                                                </MenuItem.Style>
+                                            </MenuItem>
+                                            <MenuItem Header="Resume as fork…">
+                                                <MenuItem.Style>
+                                                    <Style TargetType="MenuItem">
+                                                        <Setter Property="Tag" Value="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
+                                                        <EventSetter Event="MenuItem.Click" Handler="ResumeSessionAsFork_Click" />
+                                                    </Style>
+                                                </MenuItem.Style>
+                                            </MenuItem>
                                         </ContextMenu>
                                     </Setter.Value>
                                 </Setter>
