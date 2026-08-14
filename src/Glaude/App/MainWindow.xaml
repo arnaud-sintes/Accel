@@ -355,6 +355,16 @@
                                             TabViewModel.AutomationDescription.
                                         -->
                                         <Setter Property="AutomationProperties.Name" Value="{Binding AutomationDescription}" />
+                                        <!--
+                                            P4-T5: double-click a tab to stop its session - distinct
+                                            from the close (✕) button, which removes the tab outright.
+                                            MainWindow.TabItem_MouseDoubleClick confirms, then calls
+                                            TabsViewModel.StopTabCommand, which kills the session but
+                                            keeps the tab (frozen scrollback + exit banner - see that
+                                            command's own remarks). Control.MouseDoubleClick is a real
+                                            routed event on every Control, ListBoxItem included.
+                                        -->
+                                        <EventSetter Event="Control.MouseDoubleClick" Handler="TabItem_MouseDoubleClick" />
                                     </Style>
                                 </ListBox.ItemContainerStyle>
                                 <ListBox.ItemTemplate>

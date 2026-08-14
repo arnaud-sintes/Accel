@@ -249,6 +249,76 @@ public class TabsViewModelTests
         Assert.Empty(tabs.Tabs);
     }
 
+    // ---------------------------------------------------------------------------------------------
+    // P4-T5: StopTabAsync - the same registry teardown as CloseTabAsync, but the tab must survive.
+    // ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task StopTab_RoutesThroughTheRegistry_ButKeepsTheTab_FlaggedAsEnded()
+    {
+        var (tabs, host, _, _) = Build();
+        var tab = tabs.AddTab("tab-a", "first");
+
+        await tabs.StopTabAsync(tab);
+
+        Assert.Equal(new[] { "tab-a" }, host.Closed); // same teardown path as Close
+        Assert.Single(tabs.Tabs); // but the tab itself is never removed
+        Assert.True(tab.HasEnded);
+        Assert.Equal("(exited 0)", tab.StatusSuffix);
+    }
+
+    [Fact]
+    public async Task StopTab_MovesFocusAwayFromTheStoppedTab_WhenItWasFocused()
+    {
+        var (tabs, _, selection, _) = Build();
+        var tabA = tabs.AddTab("tab-a");
+        tabs.AddTab("tab-b");
+        tabs.SelectTab("tab-a");
+
+        await tabs.StopTabAsync(tabA);
+
+        Assert.NotEqual("tab-a", selection.FocusedSessionId);
+        Assert.Equal("tab-b", selection.FocusedSessionId);
+    }
+
+    [Fact]
+    public async Task StopTab_IsANoOp_ForATabThatAlreadyEnded()
+    {
+        var (tabs, host, _, _) = Build();
+        var tab = tabs.AddTab("tab-a");
+        host.RaiseChildExited("tab-a");
+        Assert.True(tab.HasEnded);
+
+        await tabs.StopTabAsync(tab);
+
+        Assert.Empty(host.Closed); // never even asked the registry to close an already-ended tab
+    }
+
+    [Fact]
+    public async Task StopTab_IsANoOp_ForNull()
+    {
+        var (tabs, host, _, _) = Build();
+
+        await tabs.StopTabAsync(null);
+
+        Assert.Empty(host.Closed);
+    }
+
+    [Fact]
+    public async Task StopTabCommand_IsTheBoundCommandTheDoubleClickGestureUses()
+    {
+        var (tabs, host, _, _) = Build();
+        var tab = tabs.AddTab("tab-a");
+
+        Assert.True(tabs.StopTabCommand.CanExecute(tab));
+        tabs.StopTabCommand.Execute(tab);
+        await tabs.StopTabCommand.ExecutionTask!;
+
+        Assert.Equal(new[] { "tab-a" }, host.Closed);
+        Assert.Single(tabs.Tabs);
+        Assert.True(tab.HasEnded);
+    }
+
     [Fact]
     public void ASessionThatExitsOnItsOwn_KeepsItsTab_FlaggedAsEnded()
     {

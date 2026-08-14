@@ -379,6 +379,36 @@ public partial class MainWindow : Window
         Tabs?.AddTab(tabId, string.IsNullOrWhiteSpace(node.Text) ? null : node.Text);
     }
 
+    /// <summary>
+    /// P4-T5: the tab strip's double-click-to-stop gesture (MainWindow.xaml's <c>EventSetter</c> on
+    /// <c>TabsList</c>'s <c>ListBoxItem</c> style). Confirms, then delegates the actual teardown to
+    /// <see cref="TabsViewModel.StopTabCommand"/> - this handler's only job is the gesture and the
+    /// confirmation; see that command's remarks for why "stop" keeps the tab (frozen scrollback + exit
+    /// banner) instead of removing it like the ✕ close button does.
+    /// </summary>
+    private void TabItem_MouseDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if ((sender as ListBoxItem)?.DataContext is not TabViewModel tab || tab.HasEnded)
+        {
+            return;
+        }
+
+        var confirmResult = MessageBox.Show(
+            this,
+            $"Stop \"{tab.Title}\"? The session's process will be terminated. The tab stays open so you can still see its output.",
+            "Stop session",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Warning,
+            MessageBoxResult.No);
+
+        if (confirmResult != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        Tabs?.StopTabCommand.Execute(tab);
+    }
+
     private DispatcherTimer? _transientWarningTimer;
 
     /// <summary>

@@ -118,6 +118,20 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
     private readonly IUiThreadDispatcher _dispatcher;
     private bool _disposed;
 
+    /// <summary>
+    /// TabIds currently being torn down via <see cref="StopTabAsync"/> rather than
+    /// <see cref="CloseTabAsync(TabViewModel?)"/> - both routes end up producing the exact same
+    /// <see cref="PtySessionExitReason.TornDown"/> notification from <see cref="_host"/>, so this is the
+    /// only way <see cref="OnSessionEnded"/> can tell "the user asked to stop this (keep the tab, show an
+    /// exit banner)" apart from "the user closed this (remove the tab)" once that notification arrives.
+    /// A tabId is only ever removed by <see cref="OnSessionEnded"/> itself (never proactively after the
+    /// awaited close, which would race the event's own independently-dispatched delivery) - except for
+    /// the one case where no such event will ever come: <see cref="StopTabAsync"/> removes it itself when
+    /// <see cref="_host"/> reports <see cref="PtyCloseOutcome.NotFound"/>, since a no-op close raises
+    /// nothing for <see cref="OnSessionEnded"/> to consume.
+    /// </summary>
+    private readonly HashSet<string> _stopping = new(StringComparer.OrdinalIgnoreCase);
+
     public TabsViewModel(IPtySessionHost host, ISessionSelectionWriter selection, IUiThreadDispatcher dispatcher)
     {
         _host = host ?? throw new ArgumentNullException(nameof(host));
@@ -239,6 +253,34 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
     public Task CloseTabAsync(string tabId) => CloseTabAsync(Find(tabId));
 
     /// <summary>
+    /// P4-T5: kills the tab's session (through <see cref="IPtySessionHost.CloseAsync"/>, exactly the same
+    /// graceful-then-forced teardown <see cref="CloseTabAsync(TabViewModel?)"/> uses - P3-T2/P3-T4's
+    /// mechanism is reused verbatim, nothing about it is reimplemented here) but, unlike
+    /// <see cref="CloseTabAsync(TabViewModel?)"/>, deliberately does <b>not</b> remove the tab: it stays in
+    /// the strip with its scrollback frozen and an exit banner, indistinguishable from a session that
+    /// happened to end on its own (see <see cref="MarkEnded"/>) - "stopped by the user" and "ended by
+    /// itself" are the same state as far as the rest of this app is concerned. A no-op for a tab that has
+    /// already ended, or whose session is not (or no longer) registered.
+    /// </summary>
+    [RelayCommand]
+    public async Task StopTabAsync(TabViewModel? tab)
+    {
+        if (tab is null || tab.HasEnded)
+        {
+            return;
+        }
+
+        _stopping.Add(tab.TabId);
+        var result = await _host.CloseAsync(tab.TabId).ConfigureAwait(true);
+        if (result.Outcome == PtyCloseOutcome.NotFound)
+        {
+            // Nothing was actually closed, so no SessionEnded notification will ever arrive to consume
+            // this flag - leaving it would leak it forever (harmlessly, but pointlessly).
+            _stopping.Remove(tab.TabId);
+        }
+    }
+
+    /// <summary>
     /// Reconciles the strip against the registry: adds a tab for any registered tabId that has none (e.g.
     /// a session registered by another code path, or one that existed before this ViewModel was built),
     /// and marks as ended any running tab whose session is no longer registered. Never invents registry
@@ -302,7 +344,18 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
 
         if (e.Reason == PtySessionExitReason.TornDown)
         {
-            RemoveTab(tab);
+            // Both CloseTabAsync and StopTabAsync produce this same reason - _stopping is the only signal
+            // that distinguishes "the user asked to stop this one (keep it, mark it ended)" from "the
+            // user closed this one (remove it)"; see _stopping's own remarks.
+            if (_stopping.Remove(e.TabId))
+            {
+                MarkEnded(tab, e.ExitCode);
+            }
+            else
+            {
+                RemoveTab(tab);
+            }
+
             return;
         }
 
