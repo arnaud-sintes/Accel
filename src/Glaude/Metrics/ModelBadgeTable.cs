@@ -48,6 +48,14 @@ public static class ModelBadgeTable
         ("claude-fable", "F", "#FFD97706"),
     };
 
+    /// <summary>
+    /// The model-family vocabulary this table knows, in the order above (opus, sonnet, haiku,
+    /// fable) - the canonical list P2-T6's "Create session" dialog picks a <c>--model</c> value
+    /// from, so that dialog and panel A's badges are provably reading the same table rather than
+    /// maintaining two independently-typed lists of model family names.
+    /// </summary>
+    public static readonly IReadOnlyList<string> Families = Array.ConvertAll(Table, entry => entry.Prefix);
+
     /// <summary>Case-insensitive keyword fallback for the rendered <c>ModelDisplayName</c> form
     /// (e.g. "Sonnet 5", "Opus 4.5") that <c>MonitorTreeBuilder.BuildSessionNode</c> prefers over
     /// the raw model id for live sessions - the raw id (<c>claude-sonnet-5</c>) the exact/prefix

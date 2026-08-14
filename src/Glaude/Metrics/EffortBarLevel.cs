@@ -16,6 +16,15 @@ public static class EffortBarLevel
     /// <summary>Highest bar count this resolver ever returns.</summary>
     public const int MaxBars = 4;
 
+    /// <summary>
+    /// The canonical effort-level vocabulary this resolver recognizes, one representative spelling
+    /// per tier (lowest to highest bar count) - the list P2-T6's "Create session" dialog picks a
+    /// <c>--effort</c> value from, so that dialog and panel A's effort bars are provably reading the
+    /// same tiers rather than maintaining two independently-typed effort vocabularies. Each entry
+    /// here must resolve to a strictly increasing bar count via <see cref="Resolve"/>.
+    /// </summary>
+    public static readonly IReadOnlyList<string> Levels = new[] { "low", "medium", "high", "max" };
+
     public static int Resolve(string? effortLevel)
     {
         if (string.IsNullOrWhiteSpace(effortLevel))

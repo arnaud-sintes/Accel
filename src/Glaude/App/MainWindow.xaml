@@ -93,6 +93,16 @@
             <MenuItem Header="_File">
                 <MenuItem Header="_Exit" />
             </MenuItem>
+            <!--
+                P2-T6: reachable, currently inert-beyond-launch affordance for the "Create session"
+                popup. Deliberately its own top-level menu rather than a "_File" item: creating a
+                session is the primary action of this app, and it will eventually gain a toolbar
+                button once Phase 3's tab strip (panel C) exists to receive the new session - see
+                CreateSession_Click's doc comment for the current, temporary ownership story.
+            -->
+            <MenuItem Header="_Session">
+                <MenuItem Header="_Create session…" Click="CreateSession_Click" />
+            </MenuItem>
             <MenuItem Header="_View" />
             <MenuItem Header="_Help" />
         </Menu>

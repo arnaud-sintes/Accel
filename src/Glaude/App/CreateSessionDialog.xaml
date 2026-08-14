@@ -1,0 +1,76 @@
+<Window x:Class="Glaude.App.CreateSessionDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Create session" Height="420" Width="480"
+        WindowStartupLocation="CenterOwner" ResizeMode="NoResize"
+        ShowInTaskbar="False"
+        Language="">
+    <!--
+        P2-T6: the "Create session" popup. Same Language="" workaround as MainWindow.xaml (see its
+        comment) - InvariantGlobalization strips the culture tables WPF's default
+        FrameworkElement.Language resolution needs, and this dialog's ComboBox/TextBox bindings
+        would otherwise throw the same XamlParseException the first time they activate.
+    -->
+    <Grid Margin="14">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" Text="Display name" FontWeight="Bold" Margin="0,0,0,2" />
+        <TextBox x:Name="DisplayNameBox" Grid.Row="1"
+                 Text="{Binding DisplayName, UpdateSourceTrigger=PropertyChanged}"
+                 Margin="0,0,0,10" />
+
+        <TextBlock Grid.Row="2" Text="Model" FontWeight="Bold" Margin="0,0,0,2" />
+        <ComboBox x:Name="ModelComboBox" Grid.Row="3"
+                  ItemsSource="{Binding ModelFamilies}"
+                  SelectedItem="{Binding SelectedModelFamily}"
+                  Margin="0,0,0,10" />
+
+        <TextBlock Grid.Row="4" Text="Effort" FontWeight="Bold" Margin="0,0,0,2" />
+        <ComboBox x:Name="EffortComboBox" Grid.Row="5"
+                  ItemsSource="{Binding EffortLevels}"
+                  SelectedItem="{Binding SelectedEffortLevel}"
+                  Margin="0,0,0,10" />
+
+        <!--
+            Advanced/trusted-input flagging (plan requirement): bold, a distinct warning colour, AND
+            the word "Advanced" plus the actual warning sentence - text carries the meaning, not
+            colour alone, so this still reads correctly under a high-contrast theme. Text is set from
+            code-behind to CreateSessionDialogViewModel.AdvancedArgsWarning (the single source of
+            truth for the wording) rather than duplicated as a XAML literal.
+        -->
+        <TextBlock Grid.Row="6" Text="Extra CLI arguments (advanced)" FontWeight="Bold" Margin="0,0,0,2" />
+        <TextBlock x:Name="ExtraArgsWarningText" Grid.Row="7"
+                   Foreground="#FFB00020" FontWeight="Bold" TextWrapping="Wrap"
+                   Margin="0,0,0,4" />
+        <TextBox x:Name="ExtraArgsBox" Grid.Row="8"
+                 Text="{Binding ExtraArgsText, UpdateSourceTrigger=PropertyChanged}"
+                 AcceptsReturn="False"
+                 ToolTip="e.g. --permission-mode bypassPermissions"
+                 Margin="0,0,0,10" />
+
+        <TextBlock x:Name="ErrorText" Grid.Row="9"
+                   Text="{Binding ErrorMessage}"
+                   Foreground="#FFB00020" TextWrapping="Wrap"
+                   Visibility="Collapsed" />
+
+        <StackPanel Grid.Row="11" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,10,0,0">
+            <Button x:Name="CancelButton" Content="Cancel" Command="{Binding CancelCommand}"
+                    Padding="12,4" Margin="0,0,8,0" IsCancel="True" />
+            <Button x:Name="CreateButton" Content="Create" Command="{Binding ConfirmCommand}"
+                    Padding="12,4" IsDefault="True" />
+        </StackPanel>
+    </Grid>
+</Window>
