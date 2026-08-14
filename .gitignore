@@ -1,0 +1,25 @@
+# Build results
+bin/
+obj/
+publish/
+
+# Visual Studio
+.vs/
+*.user
+*.sln.docstates
+*.suo
+
+# Test results
+TestResults/
+
+# Code coverage
+coverage/
+*.coverage
+
+# User-specific files
+.vscode/
+.idea/
+
+# OS files
+Thumbs.db
+.DS_Store
