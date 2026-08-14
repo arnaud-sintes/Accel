@@ -173,22 +173,38 @@ static void RunUiPreview(bool verify)
         // every registered session through the one blessed path (dispose -> verify -> force-kill the
         // tree). It replaces P2-T6's stopgap, which disposed sessions from MainWindow.Closed directly.
         sessionRegistry.Dispose();
+
+        // Terminal (WebView2) is disposed BEFORE stopping Kestrel, not after: closing the browser
+        // process here also closes its end of the /pty/{tabId} WebSocket connection, so Kestrel's own
+        // request pipeline task for that connection can end on its own instead of relying solely on
+        // the bounded StopAsync below to force it.
+        mainWindow.Terminal.Dispose();
+
         if (ptyWebApp is not null)
         {
             try
             {
-                ptyWebApp.StopAsync().GetAwaiter().GetResult();
+                // Reported bug: closing the window via the title-bar X hung the whole process
+                // indefinitely. Root-caused to IHost.StopAsync() deadlocking when awaited synchronously
+                // from this handler: some continuation in its call chain (hosted-service shutdown,
+                // Kestrel's own connection-close bookkeeping, or similar) captures the ambient
+                // SynchronizationContext - which here is WPF's DispatcherSynchronizationContext, since
+                // this handler runs on the Window's Closed event - and tries to post back to the very
+                // UI thread that is blocked waiting for it. Reproduced even with an explicit bounded
+                // timeout passed to StopAsync: every earlier step in this handler completed in under
+                // 30ms, but StopAsync alone never returned or threw, even past its own 5s bound - the
+                // timeout only governs how long Kestrel waits before forcing connections closed, it does
+                // not rescue an awaiter deadlocked on a captured synchronization context. Task.Run
+                // moves the whole call onto a thread-pool thread with no WPF SynchronizationContext to
+                // capture, so the continuation runs there instead and StopAsync actually completes
+                // (measured: consistently ~40ms once moved off the UI thread).
+                Task.Run(() => ptyWebApp.StopAsync(TimeSpan.FromSeconds(5))).GetAwaiter().GetResult();
             }
             catch
             {
                 // Best-effort on the way out.
             }
         }
-
-        // P2-T5: found necessary empirically (see TerminalView.Dispose's own doc comment) -
-        // without this, `ui-preview`'s process exits with code 0 while its msedgewebview2.exe
-        // child processes (browser/renderer/GPU) linger behind it.
-        mainWindow.Terminal.Dispose();
     };
 
     if (verify)
