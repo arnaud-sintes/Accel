@@ -123,10 +123,29 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
 
     private bool _disposed;
 
-    public RootsPanelViewModel(ITelemetryFeed feed, IUiThreadDispatcher dispatcher)
+    private readonly IFolderPickerService _folderPicker;
+    private readonly IUserConfirmationService _confirmation;
+    private readonly string _configPath;
+
+    /// <summary>
+    /// P1-T3b's root add/remove commands need a folder picker, a confirmation prompt, and the
+    /// <c>glaude-folders.json</c> path to mutate - all three are optional constructor parameters
+    /// (defaulting to the real dialogs / the real durable-home config path) so every existing
+    /// call site, including <c>RootsPanelViewModelTests</c>'s two-argument construction, keeps
+    /// compiling unchanged.
+    /// </summary>
+    public RootsPanelViewModel(
+        ITelemetryFeed feed,
+        IUiThreadDispatcher dispatcher,
+        IFolderPickerService? folderPicker = null,
+        IUserConfirmationService? confirmation = null,
+        string? configPath = null)
     {
         _feed = feed ?? throw new ArgumentNullException(nameof(feed));
         _dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
+        _folderPicker = folderPicker ?? new WinFormsFolderPickerService();
+        _confirmation = confirmation ?? new MessageBoxConfirmationService();
+        _configPath = configPath ?? Glaude.Server.RootFoldersConfig.DefaultCandidatePaths()[0];
 
         _feed.SnapshotAvailable += OnSnapshotAvailable;
         _feed.SnapshotFailed += OnSnapshotFailed;
@@ -190,6 +209,50 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
         {
             node.IsExpanded = false;
         }
+    }
+
+    /// <summary>
+    /// P1-T3b: prompts for a folder, creates it on disk if it doesn't already exist, appends it
+    /// to <c>glaude-folders.json</c> (via <see cref="RootFolderEditor.AddRoot"/>), then triggers a
+    /// refresh through the existing <see cref="ITelemetryFeed.RequestRefresh"/> path - the same
+    /// single refresh mechanism <see cref="Refresh"/> uses, never a second one.
+    /// </summary>
+    [RelayCommand]
+    private void AddRoot()
+    {
+        string? folder = _folderPicker.PickFolder("Select a folder to monitor");
+        if (string.IsNullOrWhiteSpace(folder))
+        {
+            return; // user cancelled
+        }
+
+        RootFolderEditor.AddRoot(_configPath, folder);
+        _feed.RequestRefresh();
+    }
+
+    /// <summary>
+    /// P1-T3b: scoped to a selected root node (<paramref name="node"/> is the tree row the user
+    /// right-clicked / the context menu was invoked on). Confirms with "stop monitoring" copy
+    /// (never "delete" - nothing is being deleted), then dereferences the root from
+    /// <c>glaude-folders.json</c> ONLY. This must never touch the folder or its contents on disk -
+    /// see <see cref="RootFolderEditor.RemoveRoot"/>'s doc comment for the invariant and
+    /// <c>RootFolderEditorTests</c> for the test that pins it down.
+    /// </summary>
+    [RelayCommand]
+    private void RemoveRoot(RootsPanelNodeViewModel? node)
+    {
+        if (node is null || node.Kind != RootsPanelNodeKind.Root || string.IsNullOrEmpty(node.Key))
+        {
+            return; // only meaningful for a root row
+        }
+
+        if (!_confirmation.Confirm(RootFolderEditor.StopMonitoringConfirmationText, RootFolderEditor.StopMonitoringConfirmationTitle))
+        {
+            return;
+        }
+
+        RootFolderEditor.RemoveRoot(_configPath, node.Key);
+        _feed.RequestRefresh();
     }
 
     private void OnSnapshotAvailable(RootsTreeDto snapshot) => _dispatcher.Post(() =>

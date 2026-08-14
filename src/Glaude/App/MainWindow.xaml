@@ -48,6 +48,17 @@
                 <DockPanel LastChildFill="True">
                     <TextBlock DockPanel.Dock="Top" Text="Panel A — Sessions" Margin="8,6,8,2" FontWeight="Bold" />
 
+                    <!--
+                        P1-T3b: minimal add/remove toolbar. "Add root…" prompts for a folder,
+                        creates it on disk if missing, and appends it to glaude-folders.json.
+                        Remove is scoped to a selected root node via the tree's context menu below
+                        (right-click a root row) rather than a toolbar button, since it needs a
+                        target node - see RootsPanelViewModel.RemoveRootCommand.
+                    -->
+                    <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="8,0,8,4">
+                        <Button Content="Add root…" Command="{Binding AddRootCommand}" Padding="6,2" />
+                    </StackPanel>
+
                     <!-- Feed status / counts: makes "working but empty" visibly different from "broken". -->
                     <TextBlock x:Name="PanelAStatus" DockPanel.Dock="Bottom" Margin="8,2,8,6" TextWrapping="Wrap"
                                FontSize="10" Foreground="#FF505050" Text="{Binding StatusText}" />
@@ -60,10 +71,32 @@
                                 root-path / session-id / agent-id), and the user's own
                                 expand/collapse/select gestures flow back into it through these
                                 bindings - so the next rebuild preserves them.
+
+                                Tag is stashed with the panel's own DataContext (the
+                                RootsPanelViewModel) purely so the per-item ContextMenu below - a
+                                separate visual tree that can't see this TreeViewItem's ancestors -
+                                can still reach RemoveRootCommand via PlacementTarget.Tag.
                             -->
                             <Style TargetType="TreeViewItem">
                                 <Setter Property="IsExpanded" Value="{Binding IsExpanded, Mode=TwoWay}" />
                                 <Setter Property="IsSelected" Value="{Binding IsSelected, Mode=TwoWay}" />
+                                <Setter Property="Tag" Value="{Binding RelativeSource={RelativeSource AncestorType=TreeView}, Path=DataContext}" />
+                                <Setter Property="ContextMenu">
+                                    <Setter.Value>
+                                        <ContextMenu>
+                                            <!--
+                                                Only meaningful for a root row; RemoveRootCommand
+                                                itself is a no-op for session/agent/placeholder
+                                                nodes (see its guard clause), so this is shown for
+                                                every row rather than adding a Kind-based converter
+                                                for this minimal, non-visual-polish task.
+                                            -->
+                                            <MenuItem Header="Stop monitoring this folder…"
+                                                      Command="{Binding PlacementTarget.Tag.RemoveRootCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                      CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
+                                        </ContextMenu>
+                                    </Setter.Value>
+                                </Setter>
                             </Style>
                         </TreeView.ItemContainerStyle>
                         <TreeView.ItemTemplate>
