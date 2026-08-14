@@ -2,8 +2,9 @@ using System.Windows.Forms;
 using Glaude.Cli;
 using Glaude.Server;
 
-// Throwaway, hidden dev-only verb for P1-T1b's own visual verification of the WPF shell
-// scaffolding (App/App.xaml + App/MainWindow.xaml) - NOT part of ArgParser's documented surface
+// Throwaway, hidden dev-only verb for P1-T1b's/P1-T2's own visual verification of the WPF shell
+// (App/App.xaml + App/MainWindow.xaml + panel A's live RootsPanelViewModel) - NOT part of
+// ArgParser's documented surface
 // and not wired into the real combined-start path. Deliberately checked before ArgParser.Parse
 // so it can never collide with or affect the real Verb dispatch/tests. Scope decision: kept
 // minimal and undocumented on purpose; wiring the WPF shell into the actual `glaude` startup is
@@ -25,7 +26,27 @@ if (args.Length > 0 && string.Equals(args[0], "ui-preview", StringComparison.Ord
 static void RunUiPreview(bool verify)
 {
     var wpfApp = new Glaude.App.App();
-    var mainWindow = new Glaude.App.MainWindow();
+
+    // P1-T2's composition point (dev-only): the panel-A object graph, wired the same way the real
+    // startup path eventually will be, but WITHOUT touching RunCombinedAsync and without starting
+    // Kestrel - an EventServer instance is constructed purely for its in-process State/Roots/
+    // RootsTree, which is exactly what the telemetry feed reads (no HTTP, no /roots/tree polling).
+    var server = new EventServer();
+    var dispatcher = new Glaude.App.Services.WpfUiThreadDispatcher(
+        System.Windows.Threading.Dispatcher.CurrentDispatcher);
+    var feed = new Glaude.App.Services.TelemetryFeed(
+        new Glaude.App.Services.EventServerTelemetrySource(server),
+        dispatcher,
+        new Glaude.App.Services.DispatcherDebounceTimer(System.Windows.Threading.Dispatcher.CurrentDispatcher));
+    var rootsPanel = new Glaude.App.ViewModels.RootsPanelViewModel(feed, dispatcher);
+
+    var mainWindow = new Glaude.App.MainWindow(rootsPanel);
+    mainWindow.Loaded += (_, _) => rootsPanel.Start();
+    mainWindow.Closed += (_, _) =>
+    {
+        rootsPanel.Dispose();
+        feed.Dispose();
+    };
 
     if (verify)
     {
@@ -43,6 +64,38 @@ static void RunUiPreview(bool verify)
                     Console.WriteLine($"{name}: {element.ActualWidth:0.#} x {element.ActualHeight:0.#}");
 
                 Report("PanelA", mainWindow.PanelA);
+
+                // P1-T2 verification: prove the data path (feed -> ViewModel -> bound TreeView)
+                // actually produced rows, and make "works but empty" (a snapshot arrived, it just
+                // has no roots/sessions on this machine) distinguishable from "broken" (no snapshot
+                // at all / an exception surfaced in StatusText).
+                Console.WriteLine($"PanelA.HasSnapshot: {rootsPanel.HasSnapshot}");
+                Console.WriteLine($"PanelA.Status: {rootsPanel.StatusText}");
+                Console.WriteLine($"PanelA.Counts: roots={rootsPanel.RootCount} sessions={rootsPanel.SessionCount} live={rootsPanel.LiveSessionCount}");
+                Console.WriteLine($"PanelA.TreeViewItems: {mainWindow.RootsTreeView.Items.Count}");
+
+                // Prove the HierarchicalDataTemplate + two-way IsExpanded binding really work at
+                // runtime (not just that the ViewModel holds rows): expand the first root through
+                // the ViewModel and count the child containers WPF then generates.
+                if (rootsPanel.Roots.Count > 0)
+                {
+                    rootsPanel.Roots[0].IsExpanded = true;
+                    mainWindow.RootsTreeView.UpdateLayout();
+                    var firstContainer = mainWindow.RootsTreeView.ItemContainerGenerator.ContainerFromIndex(0)
+                        as System.Windows.Controls.TreeViewItem;
+                    Console.WriteLine($"PanelA.FirstRootContainer.IsExpanded: {firstContainer?.IsExpanded}");
+                    Console.WriteLine($"PanelA.FirstRootContainer.ChildItems: {firstContainer?.Items.Count}");
+                }
+
+                foreach (var rootNode in rootsPanel.Roots)
+                {
+                    Console.WriteLine($"  [{rootNode.Kind}] {rootNode.Text} (expanded={rootNode.IsExpanded}, children={rootNode.Children.Count})");
+                    foreach (var child in rootNode.Children)
+                    {
+                        Console.WriteLine($"    [{child.Kind}] {child.Text}");
+                    }
+                }
+
                 Report("PanelB", mainWindow.PanelB);
                 Report("PanelC", mainWindow.PanelC);
                 Report("PanelD", mainWindow.PanelD);
