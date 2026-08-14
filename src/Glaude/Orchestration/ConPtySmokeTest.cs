@@ -23,7 +23,10 @@ using System.Text;
 /// <item>suspended launch + <see cref="ConPtySession.ResumeMainThread"/>;</item>
 /// <item>failure path: a nonexistent image, repeated, to prove a successful
 /// <c>CreatePseudoConsole</c> followed by a failing <c>CreateProcessW</c> leaks nothing;</item>
-/// <item>leak trend: N full open/close cycles, comparing process handle count before/after.</item>
+/// <item>leak trend: N full open/close cycles, comparing process handle count before/after;</item>
+/// <item><see cref="ConPtySession.TryGetExitCode"/> against a child whose real exit code is 259,
+/// i.e. numerically equal to <c>STILL_ACTIVE</c> - the one exit code GetExitCodeProcess cannot
+/// report unaided.</item>
 /// </list></para>
 /// </summary>
 public static class ConPtySmokeTest
@@ -43,6 +46,7 @@ public static class ConPtySmokeTest
         failures += RunSuspendedCheck(output) ? 0 : 1;
         failures += RunFailurePathLeakCheck(output) ? 0 : 1;
         failures += RunLeakCheck(output, leakIterations) ? 0 : 1;
+        failures += RunStillActiveExitCodeCheck(output) ? 0 : 1;
 
         output.WriteLine();
         output.WriteLine(failures == 0 ? "pty-smoke-test: ALL CHECKS PASSED" : $"pty-smoke-test: {failures} CHECK(S) FAILED");
@@ -51,7 +55,7 @@ public static class ConPtySmokeTest
 
     private static bool RunInteractiveCheck(TextWriter output)
     {
-        output.WriteLine("== check 1/5: interactive cmd.exe (write -> read back), resize, clean exit ==");
+        output.WriteLine("== check 1/6: interactive cmd.exe (write -> read back), resize, clean exit ==");
 
         var session = ConPtySession.Start(new ConPtyLaunchSpec
         {
@@ -122,7 +126,7 @@ public static class ConPtySmokeTest
     private static bool RunDisposeWhileChildAliveCheck(TextWriter output)
     {
         output.WriteLine();
-        output.WriteLine("== check 2/5: Dispose() while the child is still alive (tab-close path) ==");
+        output.WriteLine("== check 2/6: Dispose() while the child is still alive (tab-close path) ==");
 
         var session = ConPtySession.Start(new ConPtyLaunchSpec
         {
@@ -152,7 +156,7 @@ public static class ConPtySmokeTest
     private static bool RunSuspendedCheck(TextWriter output)
     {
         output.WriteLine();
-        output.WriteLine("== check 3/5: CREATE_SUSPENDED + ResumeMainThread (P2-T3's job-assignment window) ==");
+        output.WriteLine("== check 3/6: CREATE_SUSPENDED + ResumeMainThread (P2-T3's job-assignment window) ==");
 
         using var session = ConPtySession.Start(new ConPtyLaunchSpec
         {
@@ -183,7 +187,7 @@ public static class ConPtySmokeTest
     {
         const int iterations = 20;
         output.WriteLine();
-        output.WriteLine($"== check 4/5: failure path x{iterations} (CreatePseudoConsole succeeds, CreateProcessW fails) ==");
+        output.WriteLine($"== check 4/6: failure path x{iterations} (CreatePseudoConsole succeeds, CreateProcessW fails) ==");
 
         var before = StableHandleCount();
         var errors = 0;
@@ -215,7 +219,7 @@ public static class ConPtySmokeTest
     private static bool RunLeakCheck(TextWriter output, int iterations)
     {
         output.WriteLine();
-        output.WriteLine($"== check 5/5: {iterations}x open/launch/drain/dispose leak check ==");
+        output.WriteLine($"== check 5/6: {iterations}x open/launch/drain/dispose leak check ==");
 
         // One warm-up cycle first: the very first pseudoconsole in a process loads conhost/OpenConsole
         // and its dependencies, which legitimately and permanently adds a few handles. Counting that as
@@ -262,6 +266,36 @@ public static class ConPtySmokeTest
         var ok = handleDelta < threshold && childDelta < threshold && cyclesWithCleanExit == iterations;
         output.WriteLine($"  [{(ok ? "PASS" : "FAIL")}] no handle-count trend, no pty-host trend, every child reaped");
         return ok;
+    }
+
+    /// <summary>Regression check for the one exit code <c>GetExitCodeProcess</c> cannot report on its
+    /// own: 259 is both a legal exit code and the value of <c>STILL_ACTIVE</c>, so a child that really
+    /// exits with 259 used to be reported as "still running" forever - which on the P3-T2 teardown path
+    /// (wait gracefully, then force) would mean always waiting out the timeout and then killing an
+    /// already-dead process. Only reachable with a real child, hence here rather than in xUnit.</summary>
+    private static bool RunStillActiveExitCodeCheck(TextWriter output)
+    {
+        output.WriteLine();
+        output.WriteLine("== check 6/6: exit code 259 (== STILL_ACTIVE) is reported as an exit, not as 'running' ==");
+
+        var session = ConPtySession.Start(new ConPtyLaunchSpec
+        {
+            CommandLine = "cmd.exe /c exit 259",
+        });
+        var pump = OutputPump.Start(session);
+        try
+        {
+            var exited = session.WaitForExit(TimeSpan.FromSeconds(10));
+            var exitCode = session.TryGetExitCode();
+            var ok = exited && exitCode == 259;
+            output.WriteLine($"  [{(ok ? "PASS" : "FAIL")}] WaitForExit={exited}, TryGetExitCode={exitCode?.ToString() ?? "null (still running)"}, expected 259");
+            return ok;
+        }
+        finally
+        {
+            session.Dispose();
+            pump.Join(TimeSpan.FromSeconds(5));
+        }
     }
 
     /// <summary>One full lifecycle: create pipes + pseudoconsole + child, drain its output on a

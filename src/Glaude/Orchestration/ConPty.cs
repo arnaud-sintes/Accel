@@ -360,7 +360,17 @@ public sealed class ConPtySession : IDisposable
             throw ConPtyException.FromLastError("GetExitCodeProcess", Marshal.GetLastWin32Error());
         }
 
-        return exitCode == Native.STILL_ACTIVE ? null : exitCode;
+        if (exitCode != Native.STILL_ACTIVE)
+        {
+            return exitCode;
+        }
+
+        // STILL_ACTIVE (259) is ambiguous: it is also a perfectly legal exit code, so
+        // GetExitCodeProcess alone cannot tell "running" from "exited with 259" - measured, a child
+        // run as `cmd.exe /c exit 259` reports exited from WaitForExit while this method reported
+        // null forever. The process handle itself is the authoritative liveness signal (it becomes
+        // signalled at exit and never un-signals), so disambiguate with a zero-timeout wait.
+        return Native.WaitForSingleObject(_processHandle, 0) == Native.WAIT_OBJECT_0 ? exitCode : null;
     }
 
     /// <summary>Idempotent, non-throwing teardown. See <see cref="DisposeCore"/> for the ordering
