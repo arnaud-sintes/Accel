@@ -2,16 +2,17 @@ namespace Glaude.App.Controls;
 
 using System;
 using System.IO;
+using System.Text.Json;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using Microsoft.Web.WebView2.Core;
 
 /// <summary>
-/// P2-T5: WebView2-hosted xterm.js terminal SHELL — renders an inert (no PTY) xterm.js instance
-/// with nothing behind it. Wiring this up to a live `claude` session over the future
-/// <c>/pty/{tabId}</c> WebSocket route (attach, resize, Ctrl+C, paste) is the separate task
-/// P2-T5b, deliberately NOT done here — see the project plan's split of P2-T5/P2-T5b.
+/// P2-T5: WebView2-hosted xterm.js terminal shell. P2-T5b (this class's <see cref="AttachPtyAsync"/>)
+/// wires the rendered xterm.js instance up to a live <c>PtySession</c> over the <c>/pty/{tabId}</c>
+/// WebSocket route — see <c>wwwroot/xterm/terminal.js</c> for the actual attach/onData/resize glue
+/// and <c>Server/PtyRoutes.cs</c> for the binary-vs-text framing convention it matches.
 ///
 /// <para><b>Vendoring / serving choice:</b> xterm.js + the FitAddon are vendored on disk under
 /// <c>App/Controls/wwwroot/xterm/</c> (Content-copied to the build/publish output — see
@@ -103,6 +104,62 @@ public partial class TerminalView : UserControl, IDisposable
         Browser.CoreWebView2.NavigationCompleted += OnNavigationCompleted;
         Browser.CoreWebView2.Navigate($"https://{VirtualHostName}/index.html");
         await navigationCompletion.Task;
+    }
+
+    /// <summary>
+    /// P2-T5b: attaches the already-rendered xterm.js instance to a live pty over
+    /// <c>/pty/{tabId}</c>, by calling <c>window.glaudeAttachPty(tabId, port)</c> in
+    /// <c>terminal.js</c> once <see cref="Initialization"/> has completed (i.e. xterm.js already
+    /// exists in the page).
+    ///
+    /// <para><b>tabId/port-passing mechanism (this task's stopgap).</b> Rather than encoding the
+    /// tabId/port in the navigation URL (which would force a fresh <c>Navigate</c>/page reload for
+    /// every new session and lose the whole point of having a single hosted xterm.js instance),
+    /// the values are pushed into the already-loaded page via
+    /// <see cref="CoreWebView2.ExecuteScriptAsync(string)"/> — the same mechanism
+    /// <c>ui-preview --verify</c> already uses to read <c>document.title</c> back out. The caller
+    /// (currently <c>MainWindow.CreateSession_Click</c>, itself explicitly marked as a stopgap
+    /// pending Phase 3's real tab/registry) is responsible for actually registering the session
+    /// under <paramref name="tabId"/> in the server's <c>PtyRouteRegistry</c> before calling this,
+    /// and for the WebSocket port matching whatever <c>EventServer</c>/Kestrel instance owns that
+    /// registry.</para>
+    ///
+    /// <para><b>Why <c>ws://</c> and a real loopback address, not <c>wss://glaude-terminal</c>.</b>
+    /// <see cref="CoreWebView2.SetVirtualHostNameToFolderMapping"/> only intercepts document/
+    /// subresource GET requests for the folder it maps — it does not proxy a WebSocket upgrade to
+    /// an arbitrary local TCP listener, and the virtual host name is not a real, resolvable
+    /// address. See <c>terminal.js</c>'s <c>glaudeAttachPty</c> for the client-side connection
+    /// logic and rationale in full, and this task's report for what was actually observed running
+    /// it end to end (there is no real TLS listener on the loopback PTY port, so <c>ws://</c>, not
+    /// <c>wss://</c>, is correct — not merely "likely", per the task's own framing).</para>
+    /// </summary>
+    /// <param name="tabId">The tabId the session is registered under in the server's
+    /// <c>PtyRouteRegistry</c>. Passed through JSON string encoding so it is safe even if it ever
+    /// contained characters that would otherwise break out of the generated script (it is expected
+    /// to always be a GUID in practice).</param>
+    /// <param name="webSocketPort">The port the owning <c>EventServer</c>'s Kestrel instance is
+    /// bound to (loopback only — see <c>EventServer</c>'s class doc).</param>
+    public async Task AttachPtyAsync(string tabId, int webSocketPort)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(tabId);
+        await Initialization;
+        await Browser.CoreWebView2.ExecuteScriptAsync(BuildAttachScript(tabId, webSocketPort));
+    }
+
+    /// <summary>
+    /// Builds the <c>window.glaudeAttachPty(tabId, port)</c> call, JSON-encoding
+    /// <paramref name="tabId"/> so it cannot break out of the generated script regardless of its
+    /// contents. Pure and side-effect-free — split out from <see cref="AttachPtyAsync"/> purely so
+    /// it is unit-testable without a real WebView2 (the JS side itself is not unit-testable in
+    /// this stack, per the task's own note — this is the closest C#-side seam to it).
+    /// </summary>
+    internal static string BuildAttachScript(string tabId, int webSocketPort)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(tabId);
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(webSocketPort, 0);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(webSocketPort, 65535);
+
+        return $"window.glaudeAttachPty({JsonSerializer.Serialize(tabId)}, {webSocketPort.ToString(System.Globalization.CultureInfo.InvariantCulture)});";
     }
 
     /// <summary>

@@ -11,28 +11,17 @@
 </head>
 <body>
 <!--
-  P2-T5: renders an inert xterm.js terminal - no PTY behind it yet (that is P2-T5b: attach,
-  resize-over-the-wire, Ctrl+C, paste). document.title is set on success/failure below purely so
-  a host (Program.cs's `ui-preview --verify`) can prove via CoreWebView2.ExecuteScriptAsync that
-  this page actually loaded and xterm.js initialized without a JS error, without needing a live
-  screenshot or an attached devtools session.
+  P2-T5b: xterm.js wired to a live PtySession over /pty/{tabId}. All the attach/onData/resize
+  glue lives in terminal.js (Glaude's own script, not vendored - see THIRD_PARTY_NOTICES.txt for
+  what is) so it can match Server/PtyRoutes.cs's binary-vs-text framing convention exactly.
+  document.title is set by terminal.js on success/failure purely so a host (Program.cs's
+  `ui-preview --verify` / `terminal-e2e-smoke-test`) can prove via
+  CoreWebView2.ExecuteScriptAsync that this page loaded and xterm.js initialized without a JS
+  error, without needing a live screenshot or an attached devtools session.
 -->
 <div id="term"></div>
 <script src="https://glaude-terminal/xterm.js"></script>
 <script src="https://glaude-terminal/addon-fit.js"></script>
-<script>
-  try {
-    var term = new Terminal({ convertEol: true, fontFamily: "Cascadia Mono, Consolas, monospace" });
-    var fitAddon = new FitAddon.FitAddon();
-    term.loadAddon(fitAddon);
-    term.open(document.getElementById("term"));
-    term.write("Glaude terminal (P2-T5: rendering only, no PTY attached yet)\r\n");
-    fitAddon.fit();
-    window.addEventListener("resize", function () { fitAddon.fit(); });
-    document.title = "glaude-terminal-ready";
-  } catch (e) {
-    document.title = "glaude-terminal-error:" + e.message;
-  }
-</script>
+<script src="https://glaude-terminal/terminal.js"></script>
 </body>
 </html>

@@ -1,6 +1,8 @@
+using System.Linq;
 using System.Windows.Forms;
 using Glaude.Cli;
 using Glaude.Server;
+using Microsoft.Extensions.DependencyInjection;
 
 // Throwaway, hidden dev-only verb for P1-T1b's/P1-T2's own visual verification of the WPF shell
 // (App/App.xaml + App/MainWindow.xaml + panel A's live RootsPanelViewModel) - NOT part of
@@ -40,6 +42,15 @@ if (args.Length > 0 && string.Equals(args[0], "pty-session-smoke-test", StringCo
     return Glaude.Orchestration.PtySessionSmokeTest.Run(Console.Out, cycles);
 }
 
+// P2-T5b: hidden dev-only verb, same rationale and placement rules as the smoke tests above -
+// proves xterm.js (WebView2, panel D) is actually wired to a live PtySession over a real
+// /pty/{tabId} WebSocket route on a real EventServer/Kestrel instance, end to end. No unit test
+// can establish this (it needs a real WebView2 + a real loopback socket + a real cmd.exe child).
+if (args.Length > 0 && string.Equals(args[0], "terminal-e2e-smoke-test", StringComparison.Ordinal))
+{
+    return Glaude.App.TerminalE2ESmokeTest.Run(Console.Out);
+}
+
 // Runs the WPF shell scaffolding standalone, on its own STA thread (mirrors RunCombinedAsync's
 // existing WinForms STA thread below - this process's real Main is not STA, since the combined
 // app already needed WinForms on a dedicated thread rather than the process's own). Dev-only,
@@ -60,10 +71,32 @@ static void RunUiPreview(bool verify)
     var wpfApp = new Glaude.App.App();
 
     // P1-T2's composition point (dev-only): the panel-A object graph, wired the same way the real
-    // startup path eventually will be, but WITHOUT touching RunCombinedAsync and without starting
-    // Kestrel - an EventServer instance is constructed purely for its in-process State/Roots/
-    // RootsTree, which is exactly what the telemetry feed reads (no HTTP, no /roots/tree polling).
+    // startup path eventually will be, but WITHOUT touching RunCombinedAsync - an EventServer
+    // instance is constructed for its in-process State/Roots/RootsTree (which is exactly what the
+    // telemetry feed reads - no HTTP, no /roots/tree polling), AND (P2-T5b addition) its Kestrel
+    // host is actually started on an ephemeral loopback port so the "Create session" menu item
+    // (panel D's terminal) has a real /pty/{tabId} route to attach to when clicked interactively -
+    // see MainWindow.CreateSession_Click. Best-effort: a failure to start the listener degrades to
+    // "terminal wiring unavailable" (ptyRegistry stays null below) rather than aborting the whole
+    // preview.
     var server = new EventServer();
+    Microsoft.AspNetCore.Builder.WebApplication? ptyWebApp = null;
+    int ptyPort = 0;
+    try
+    {
+        ptyWebApp = server.BuildApp(0);
+        ptyWebApp.StartAsync().GetAwaiter().GetResult();
+        var addressesFeature = ptyWebApp.Services
+            .GetRequiredService<Microsoft.AspNetCore.Hosting.Server.IServer>()
+            .Features
+            .Get<Microsoft.AspNetCore.Hosting.Server.Features.IServerAddressesFeature>();
+        ptyPort = new Uri(addressesFeature!.Addresses.First()).Port;
+    }
+    catch
+    {
+        ptyWebApp = null;
+    }
+
     var dispatcher = new Glaude.App.Services.WpfUiThreadDispatcher(
         System.Windows.Threading.Dispatcher.CurrentDispatcher);
     var feed = new Glaude.App.Services.TelemetryFeed(
@@ -72,12 +105,26 @@ static void RunUiPreview(bool verify)
         new Glaude.App.Services.DispatcherDebounceTimer(System.Windows.Threading.Dispatcher.CurrentDispatcher));
     var rootsPanel = new Glaude.App.ViewModels.RootsPanelViewModel(feed, dispatcher);
 
-    var mainWindow = new Glaude.App.MainWindow(rootsPanel);
+    var mainWindow = new Glaude.App.MainWindow(
+        rootsPanel,
+        ptyWebApp is not null ? server.PtySessions : null,
+        ptyPort);
     mainWindow.Loaded += (_, _) => rootsPanel.Start();
     mainWindow.Closed += (_, _) =>
     {
         rootsPanel.Dispose();
         feed.Dispose();
+        if (ptyWebApp is not null)
+        {
+            try
+            {
+                ptyWebApp.StopAsync().GetAwaiter().GetResult();
+            }
+            catch
+            {
+                // Best-effort on the way out.
+            }
+        }
 
         // P2-T5: found necessary empirically (see TerminalView.Dispose's own doc comment) -
         // without this, `ui-preview`'s process exits with code 0 while its msedgewebview2.exe
