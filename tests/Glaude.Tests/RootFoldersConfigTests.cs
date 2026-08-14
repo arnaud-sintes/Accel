@@ -145,4 +145,85 @@ public class RootFoldersConfigTests : IDisposable
 
         Assert.NotNull(result);
     }
+
+    // --- P1-T3: v2 schema (JsonValueKind-polymorphic load, atomic v2 save, sparse-map prune) ---
+
+    [Fact]
+    public void V1FlatArray_StillLoadsCorrectly_ViaLoadFull()
+    {
+        string candidate1 = NewTempPath();
+        File.WriteAllText(candidate1, "[\"C:/projects\", \"C:/other\"]");
+
+        var full = RootFoldersConfig.LoadFull(new[] { candidate1 });
+
+        Assert.Equal(new[] { "C:/projects", "C:/other" }, full.Roots);
+        Assert.Empty(full.Sessions);
+
+        // The public string[]-returning surface is unchanged for v1 files too.
+        var roots = RootFoldersConfig.Load(new[] { candidate1 });
+        Assert.Equal(new[] { "C:/projects", "C:/other" }, roots);
+    }
+
+    [Fact]
+    public void V2File_RoundTrips_RootsAndSessions()
+    {
+        string path = NewTempPath();
+        File.Delete(path); // Save() must handle a not-yet-existing file.
+
+        var roots = new[] { "C:/projects", "C:/other" };
+        var lastOpened = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var sessions = new Dictionary<string, SessionOverride>
+        {
+            ["session-a"] = new SessionOverride("My Session", Pinned: true, Hidden: false, LastOpenedUtc: lastOpened),
+        };
+        var keepSet = new HashSet<string> { "session-a" };
+
+        RootFoldersConfig.Save(path, roots, sessions, keepSet);
+
+        var loaded = RootFoldersConfig.LoadFull(new[] { path });
+
+        Assert.Equal(roots, loaded.Roots);
+        var sessionOverride = Assert.Single(loaded.Sessions);
+        Assert.Equal("session-a", sessionOverride.Key);
+        Assert.Equal("My Session", sessionOverride.Value.DisplayName);
+        Assert.True(sessionOverride.Value.Pinned);
+        Assert.False(sessionOverride.Value.Hidden);
+        Assert.Equal(lastOpened, sessionOverride.Value.LastOpenedUtc);
+
+        // The public string[] surface still works unchanged against a v2 file.
+        Assert.Equal(roots, RootFoldersConfig.Load(new[] { path }));
+    }
+
+    [Fact]
+    public void MalformedJson_LoadsAsEmptyConfig_DoesNotThrow()
+    {
+        string path = NewTempPath();
+        File.WriteAllText(path, "{ not valid json at all");
+
+        var full = RootFoldersConfig.LoadFull(new[] { path });
+
+        Assert.Empty(full.Roots);
+        Assert.Empty(full.Sessions);
+    }
+
+    [Fact]
+    public void Save_PrunesSessionOverrides_NotInKeepSet()
+    {
+        string path = NewTempPath();
+        File.Delete(path);
+
+        var sessions = new Dictionary<string, SessionOverride>
+        {
+            ["still-alive"] = new SessionOverride("Alive", Pinned: false, Hidden: false, LastOpenedUtc: null),
+            ["long-gone"] = new SessionOverride("Gone", Pinned: true, Hidden: true, LastOpenedUtc: null),
+        };
+        var keepSet = new HashSet<string> { "still-alive" };
+
+        RootFoldersConfig.Save(path, Array.Empty<string>(), sessions, keepSet);
+
+        var loaded = RootFoldersConfig.LoadFull(new[] { path });
+
+        var kept = Assert.Single(loaded.Sessions);
+        Assert.Equal("still-alive", kept.Key);
+    }
 }
