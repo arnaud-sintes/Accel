@@ -19,6 +19,17 @@ if (args.Length > 0 && string.Equals(args[0], "ui-preview", StringComparison.Ord
     return 0;
 }
 
+// P2-T2: hidden dev-only verb, same rationale and same placement rules as `ui-preview` above -
+// ConPtySession's whole point is real OS resource lifecycle (a real pseudoconsole, a real child
+// process, real kernel handles), which no unit test with fakes can prove. Checked before
+// ArgParser.Parse so it cannot collide with the documented verb surface or its tests. Optional
+// iteration count for the handle-leak loop: `pty-smoke-test [iterations]` (default 50).
+if (args.Length > 0 && string.Equals(args[0], "pty-smoke-test", StringComparison.Ordinal))
+{
+    var iterations = args.Length > 1 && int.TryParse(args[1], out var parsedIterations) ? parsedIterations : 50;
+    return Glaude.Orchestration.ConPtySmokeTest.Run(Console.Out, iterations);
+}
+
 // Runs the WPF shell scaffolding standalone, on its own STA thread (mirrors RunCombinedAsync's
 // existing WinForms STA thread below - this process's real Main is not STA, since the combined
 // app already needed WinForms on a dedicated thread rather than the process's own). Dev-only,
@@ -57,6 +68,11 @@ static void RunUiPreview(bool verify)
     {
         rootsPanel.Dispose();
         feed.Dispose();
+
+        // P2-T5: found necessary empirically (see TerminalView.Dispose's own doc comment) -
+        // without this, `ui-preview`'s process exits with code 0 while its msedgewebview2.exe
+        // child processes (browser/renderer/GPU) linger behind it.
+        mainWindow.Terminal.Dispose();
     };
 
     if (verify)
@@ -69,7 +85,7 @@ static void RunUiPreview(bool verify)
         // guess.
         mainWindow.ContentRendered += (_, _) =>
         {
-            mainWindow.Dispatcher.BeginInvoke(new Action(() =>
+            mainWindow.Dispatcher.BeginInvoke(new Action(async () =>
             {
                 void Report(string name, System.Windows.FrameworkElement element) =>
                     Console.WriteLine($"{name}: {element.ActualWidth:0.#} x {element.ActualHeight:0.#}");
@@ -111,6 +127,24 @@ static void RunUiPreview(bool verify)
                 Report("PanelC", mainWindow.PanelC);
                 Report("PanelD", mainWindow.PanelD);
                 Report("PanelE", mainWindow.PanelE);
+
+                // P2-T5 verification: no live screenshot is available in this environment, so
+                // prove panel D's WebView2-hosted xterm.js page actually loaded and initialized
+                // without a JS error by awaiting TerminalView.Initialization (CoreWebView2 ready
+                // + navigated) and then reading back document.title via ExecuteScriptAsync -
+                // index.html sets it to "glaude-terminal-ready" on success or
+                // "glaude-terminal-error:<message>" if the xterm.js/FitAddon script threw.
+                try
+                {
+                    await mainWindow.Terminal.Initialization;
+                    var titleJson = await mainWindow.Terminal.Browser.CoreWebView2.ExecuteScriptAsync("document.title");
+                    Console.WriteLine($"Terminal.document.title: {titleJson}");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Terminal.Initialization: FAILED - {ex}");
+                }
+
                 mainWindow.Close();
             }), System.Windows.Threading.DispatcherPriority.ContextIdle);
         };
