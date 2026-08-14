@@ -464,12 +464,58 @@ public sealed class PtySession : IDisposable
             ExecutablePath = resolved.Path!,
             Arguments = arguments,
             WorkingDirectory = workingDirectory,
-            EnvironmentOverrides = environmentOverrides,
+            EnvironmentOverrides = MergeWithChildSessionMarkersStripped(environmentOverrides),
         };
 
         // Belt and braces: the resolution said NativeExe, but validate the path itself too.
         spec.Validate();
         return spec;
+    }
+
+    /// <summary>
+    /// Reported bug: a session created through Glaude's "Create session" dialog never appeared in
+    /// panel A. Root-caused via a real launch: `claude` printed
+    /// "Transcript saving is off — inherited CLAUDE_CODE_CHILD_SESSION marker" and never wrote a
+    /// transcript file at all - not delayed, not misattributed, simply never written - so panel A's
+    /// disk-scan had nothing to discover, no matter how long it waited.
+    ///
+    /// <para>Every session Glaude launches is meant to be an independent, top-level `claude` session,
+    /// never a sub-agent/child of anything - but <see cref="ConPtySession"/> inherits the whole parent
+    /// process environment by default (locked-in decision: <see cref="PtyLaunchSpec.EnvironmentOverrides"/>
+    /// null means "use the real environment verbatim"). If Glaude.exe itself is ever run from a shell
+    /// that descends from a `claude` process (a Claude Code integrated terminal, a nested dev
+    /// workflow, or - as observed while diagnosing this exact bug - an agent's own tool shell), that
+    /// parent's <c>CLAUDE_CODE_CHILD_SESSION</c>/<c>CLAUDE_CODE_SESSION_ID</c>/<c>CLAUDECODE</c>
+    /// markers leak straight into the new session's environment and make `claude` believe it is a
+    /// nested child session, disabling transcript saving as a result.</para>
+    ///
+    /// <para>Stripped unconditionally (removed via a null override - see
+    /// <see cref="ConPtySession.BuildEnvironmentBlock(IReadOnlyDictionary{string, string?}?)"/>'s "null
+    /// removes" contract), regardless of whether a caller passed any <paramref name="callerOverrides"/>
+    /// - a caller's own explicit value for one of these three names still wins, since it is deliberate
+    /// rather than incidental inheritance. <c>CLAUDE_CODE_ENTRYPOINT</c>/<c>CLAUDE_CODE_EXECPATH</c> are
+    /// left untouched: they describe how/where `claude` itself was invoked, not session nesting, and
+    /// the observed failure message named only the child-session marker.</para>
+    /// </summary>
+    private static IReadOnlyDictionary<string, string?> MergeWithChildSessionMarkersStripped(
+        IReadOnlyDictionary<string, string?>? callerOverrides)
+    {
+        var merged = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["CLAUDE_CODE_CHILD_SESSION"] = null,
+            ["CLAUDE_CODE_SESSION_ID"] = null,
+            ["CLAUDECODE"] = null,
+        };
+
+        if (callerOverrides is not null)
+        {
+            foreach (var (name, value) in callerOverrides)
+            {
+                merged[name] = value;
+            }
+        }
+
+        return merged;
     }
 
     /// <summary>

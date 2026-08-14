@@ -624,6 +624,98 @@ public class PtySessionTests
         Assert.Equal(@"C:\bin\claude.exe --session-id abc", spec.BuildCommandLine());
     }
 
+    // ---------------------------------------------------------------------------------------------
+    // Reported bug: a session created through Glaude never appeared in panel A. Root cause: `claude`
+    // inherited CLAUDE_CODE_CHILD_SESSION (and friends) from Glaude's own process environment - which
+    // is itself sometimes a descendant of a `claude` process - and disabled transcript saving as a
+    // result, so panel A's disk-scan had nothing to ever discover. CreateClaudeSpec must strip these
+    // markers unconditionally, since every session Glaude launches is meant to be an independent,
+    // top-level session, never a child/sub-agent of anything.
+    // ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void CreateClaudeSpec_StripsChildSessionMarkers_ByDefault()
+    {
+        var resolution = new ClaudeCliResolution(ClaudeCliResolutionKind.NativeExe, @"C:\bin\claude.exe");
+
+        var spec = PtySession.CreateClaudeSpec(new[] { "--session-id", "abc" }, resolution: resolution);
+
+        Assert.NotNull(spec.EnvironmentOverrides);
+        Assert.Null(spec.EnvironmentOverrides!["CLAUDE_CODE_CHILD_SESSION"]);
+        Assert.Null(spec.EnvironmentOverrides!["CLAUDE_CODE_SESSION_ID"]);
+        Assert.Null(spec.EnvironmentOverrides!["CLAUDECODE"]);
+    }
+
+    [Fact]
+    public void CreateClaudeSpec_StripsChildSessionMarkers_EvenWhenCallerPassesUnrelatedOverrides()
+    {
+        var resolution = new ClaudeCliResolution(ClaudeCliResolutionKind.NativeExe, @"C:\bin\claude.exe");
+
+        var spec = PtySession.CreateClaudeSpec(
+            new[] { "--session-id", "abc" },
+            environmentOverrides: new Dictionary<string, string?> { ["SOME_OTHER_VAR"] = "value" },
+            resolution: resolution);
+
+        Assert.Equal("value", spec.EnvironmentOverrides!["SOME_OTHER_VAR"]);
+        Assert.Null(spec.EnvironmentOverrides!["CLAUDE_CODE_CHILD_SESSION"]);
+        Assert.Null(spec.EnvironmentOverrides!["CLAUDE_CODE_SESSION_ID"]);
+        Assert.Null(spec.EnvironmentOverrides!["CLAUDECODE"]);
+    }
+
+    [Fact]
+    public void CreateClaudeSpec_CallerCanStillOverrideAChildSessionMarkerExplicitly()
+    {
+        // A caller's own explicit value is deliberate, not incidental inheritance - it wins.
+        var resolution = new ClaudeCliResolution(ClaudeCliResolutionKind.NativeExe, @"C:\bin\claude.exe");
+
+        var spec = PtySession.CreateClaudeSpec(
+            new[] { "--session-id", "abc" },
+            environmentOverrides: new Dictionary<string, string?> { ["CLAUDE_CODE_CHILD_SESSION"] = "1" },
+            resolution: resolution);
+
+        Assert.Equal("1", spec.EnvironmentOverrides!["CLAUDE_CODE_CHILD_SESSION"]);
+    }
+
+    [Fact]
+    public void CreateClaudeSpec_DoesNotStripEntrypointOrExecPath()
+    {
+        // Only session-nesting identity markers are stripped - CLAUDE_CODE_ENTRYPOINT/EXECPATH
+        // describe how/where `claude` was invoked, not session nesting, and are left to inherit
+        // normally (absent from the overrides dictionary, not explicitly nulled).
+        var resolution = new ClaudeCliResolution(ClaudeCliResolutionKind.NativeExe, @"C:\bin\claude.exe");
+
+        var spec = PtySession.CreateClaudeSpec(new[] { "--session-id", "abc" }, resolution: resolution);
+
+        Assert.False(spec.EnvironmentOverrides!.ContainsKey("CLAUDE_CODE_ENTRYPOINT"));
+        Assert.False(spec.EnvironmentOverrides!.ContainsKey("CLAUDE_CODE_EXECPATH"));
+    }
+
+    [Fact]
+    public void CreateClaudeSpec_ChildSessionMarkerActuallyDisappearsFromTheRealEnvironmentBlock()
+    {
+        // End-to-end through the same block builder ConPtySession.Start uses: simulate a base
+        // environment (standing in for a real inherited one) that has the marker set, and confirm the
+        // built block does not contain it.
+        var resolution = new ClaudeCliResolution(ClaudeCliResolutionKind.NativeExe, @"C:\bin\claude.exe");
+        var spec = PtySession.CreateClaudeSpec(new[] { "--session-id", "abc" }, resolution: resolution);
+
+        var baseEnvironment = new[]
+        {
+            new KeyValuePair<string, string>("CLAUDE_CODE_CHILD_SESSION", "1"),
+            new KeyValuePair<string, string>("CLAUDE_CODE_SESSION_ID", "parent-session-guid"),
+            new KeyValuePair<string, string>("CLAUDECODE", "1"),
+            new KeyValuePair<string, string>("PATH", @"C:\Windows"),
+        };
+
+        var block = ConPtySession.BuildEnvironmentBlock(spec.EnvironmentOverrides, baseEnvironment);
+        var blockText = new string(block!);
+
+        Assert.DoesNotContain("CLAUDE_CODE_CHILD_SESSION", blockText, StringComparison.Ordinal);
+        Assert.DoesNotContain("CLAUDE_CODE_SESSION_ID", blockText, StringComparison.Ordinal);
+        Assert.DoesNotContain("CLAUDECODE=", blockText, StringComparison.Ordinal);
+        Assert.Contains(@"PATH=C:\Windows", blockText, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void CreateClaudeSpecFailsLoudlyForAShimResolution()
     {
