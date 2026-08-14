@@ -311,30 +311,36 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
     /// directory to whichever root the user currently has selected in this panel, rather than
     /// making them re-pick a folder that's already visible on screen.</para>
     /// </summary>
-    public string? SelectedRootPath
+    public string? SelectedRootPath => RootPathFor(SelectedKey);
+
+    /// <summary>
+    /// The filesystem path of the root that owns <paramref name="key"/> - the general form
+    /// <see cref="SelectedRootPath"/> is built on, exposed separately so a caller acting on a specific
+    /// row (e.g. P4-T4's "Resume" action, which needs a session row's cwd regardless of whether that
+    /// row happens to be the panel's current tree selection) never has to first force a selection change
+    /// just to reuse this resolution.
+    /// </summary>
+    public string? RootPathFor(string? key)
     {
-        get
+        if (string.IsNullOrEmpty(key))
         {
-            if (string.IsNullOrEmpty(SelectedKey))
-            {
-                return null;
-            }
-
-            foreach (var root in Roots)
-            {
-                if (root.Key == SelectedKey)
-                {
-                    return root.Key;
-                }
-
-                if (EnumerateAll(root.Children).Any(n => n.Key == SelectedKey))
-                {
-                    return root.Key;
-                }
-            }
-
             return null;
         }
+
+        foreach (var root in Roots)
+        {
+            if (root.Key == key)
+            {
+                return root.Key;
+            }
+
+            if (EnumerateAll(root.Children).Any(n => n.Key == key))
+            {
+                return root.Key;
+            }
+        }
+
+        return null;
     }
 
     /// <summary>

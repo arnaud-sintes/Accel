@@ -297,6 +297,88 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>
+    /// P4-T4: resumes a session in place - <c>claude --resume &lt;id&gt;</c>, reusing P2-T6's exact launch
+    /// path (<see cref="PtySession.CreateClaudeSpec"/> then <see cref="PtySession.Start"/>). The tabId is
+    /// the session's own id (<paramref name="sender"/>'s <see cref="MenuItem.Tag"/> carries the row's
+    /// <see cref="RootsPanelNodeViewModel"/>, whose <see cref="RootsPanelNodeViewModel.Key"/> already is
+    /// that dashed GUID - see <see cref="CreateSession_Click"/>'s remarks on why that equality matters):
+    /// resuming the same session must never produce a second, differently-keyed tab for it, so panel A's
+    /// row and the tab strip agree on identity exactly the way a freshly created session's do.
+    /// </summary>
+    private void ResumeSession_Click(object sender, RoutedEventArgs e) => ResumeSessionCore(sender, fork: false);
+
+    /// <summary>
+    /// P4-T4's fork variant - <c>claude --resume &lt;id&gt; --fork-session</c>. Claude Code itself chooses
+    /// the forked copy's session id (there is no flag to pass one in alongside <c>--resume</c>), so unlike
+    /// the plain resume above, this tab's id <b>cannot</b> be made to equal the eventual forked
+    /// transcript's session id - a fresh GUID is used as the tabId instead, purely so the tab strip and
+    /// <see cref="PtyRegistry"/> have something to key on immediately. The practical consequence: panel
+    /// A's row for the new, forked transcript (once the disk scan picks it up) will not visually light up
+    /// as "focused" while this tab is selected, the way every other tab in this app does - a real,
+    /// documented gap rather than a silently wrong equality, and the one piece of this task the plan's own
+    /// wording ("decide tab identity... so the registry and panel A don't show duplicates") leaves
+    /// genuinely unresolved without Claude Code offering a way to assign the forked session's id.
+    /// </summary>
+    private void ResumeSessionAsFork_Click(object sender, RoutedEventArgs e) => ResumeSessionCore(sender, fork: true);
+
+    private void ResumeSessionCore(object sender, bool fork)
+    {
+        if ((sender as MenuItem)?.Tag is not RootsPanelNodeViewModel node || node.Kind != RootsPanelNodeKind.Session)
+        {
+            return;
+        }
+
+        string sessionId = node.Key;
+
+        // Already open: select the existing tab rather than launching a second `claude --resume` against
+        // the same session id (which claude itself would likely refuse, but there is no reason to even
+        // attempt it) - AddTab's own idempotency (TabsViewModel.AddTab) would do the same for a plain
+        // resume, but a fork always wants a fresh tab, so this guard is the one place that actually needs
+        // to distinguish the two rather than relying on that idempotency.
+        if (!fork && _sessionRegistry is not null && _sessionRegistry.TryGet(sessionId, out var existing) && existing is not null)
+        {
+            Tabs?.SelectTab(sessionId);
+            return;
+        }
+
+        string? workingDirectory = RootsPanel?.RootPathFor(sessionId) ?? RootsPanel?.FirstAvailableRootPath;
+
+        var arguments = fork
+            ? new[] { "--resume", sessionId, "--fork-session" }
+            : new[] { "--resume", sessionId };
+
+        PtySession session;
+        try
+        {
+            var spec = PtySession.CreateClaudeSpec(arguments, workingDirectory);
+            session = PtySession.Start(spec);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"Could not resume this session: {ex.Message}", "Resume session",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+            return;
+        }
+
+        string tabId = fork ? Guid.NewGuid().ToString() : sessionId;
+
+        try
+        {
+            _sessionRegistry?.Register(tabId, session);
+        }
+        catch (Exception)
+        {
+            // Same rationale as CreateSession_Click: Register only throws for a duplicate tabId (not
+            // possible for the ids constructed above within one run) or a disposed registry (app is
+            // shutting down) - nothing useful to add to the UI, and the session must not be disposed here.
+            return;
+        }
+
+        _ptyRouteRegistry?.RegisterSession(tabId, session);
+        Tabs?.AddTab(tabId, string.IsNullOrWhiteSpace(node.Text) ? null : node.Text);
+    }
+
     private DispatcherTimer? _transientWarningTimer;
 
     /// <summary>

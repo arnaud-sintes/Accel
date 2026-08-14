@@ -373,6 +373,32 @@ public class RootsPanelViewModelTests
     }
 
     [Fact]
+    public void RootPathFor_ResolvesAnySessionKey_RegardlessOfWhatIsCurrentlySelected()
+    {
+        var (vm, feed, _) = Build();
+        feed.Publish(TelemetryFixtures.Tree(new[]
+        {
+            TelemetryFixtures.Root(RootPath, TelemetryFixtures.Session("s-1")),
+            TelemetryFixtures.Root(OtherRootPath, TelemetryFixtures.Session("s-2")),
+        }));
+
+        // Nothing is selected in the tree at all - RootPathFor must not depend on SelectedKey.
+        Assert.Null(vm.SelectedKey);
+        Assert.Equal(RootPath, vm.RootPathFor("s-1"));
+        Assert.Equal(OtherRootPath, vm.RootPathFor("s-2"));
+    }
+
+    [Fact]
+    public void RootPathFor_IsNull_ForAnUnknownKeyOrNull()
+    {
+        var (vm, feed, _) = Build();
+        feed.Publish(TelemetryFixtures.Tree(new[] { TelemetryFixtures.Root(RootPath, TelemetryFixtures.Session("s-1")) }));
+
+        Assert.Null(vm.RootPathFor("no-such-key"));
+        Assert.Null(vm.RootPathFor(null));
+    }
+
+    [Fact]
     public void FirstAvailableRootPath_ReturnsTheFirstRootThatExistsOnDisk()
     {
         var (vm, feed, _) = Build();

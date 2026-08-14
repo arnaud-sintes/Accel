@@ -210,6 +210,17 @@
                                             -->
                                             <MenuItem Header="Rename…" Click="RenameSession_Click"
                                                       Tag="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
+                                            <!--
+                                                P4-T4: same guard-clause convention as Rename/Stop monitoring
+                                                above - MainWindow.ResumeSession_Click no-ops for anything
+                                                other than a session row, and for a session that already has
+                                                a live tab open it just selects that tab instead of spawning
+                                                a second "claude resume" call against the same id.
+                                            -->
+                                            <MenuItem Header="Resume" Click="ResumeSession_Click"
+                                                      Tag="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
+                                            <MenuItem Header="Resume as fork…" Click="ResumeSessionAsFork_Click"
+                                                      Tag="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
                                         </ContextMenu>
                                     </Setter.Value>
                                 </Setter>
