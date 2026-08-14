@@ -1,6 +1,8 @@
 namespace Glaude.App;
 
 using System;
+using System.Linq;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Threading;
@@ -407,6 +409,103 @@ public partial class MainWindow : Window
         }
 
         Tabs?.StopTabCommand.Execute(tab);
+    }
+
+    /// <summary>
+    /// P4-T3/T3b's UI surface: removes a session's on-disk data via <see cref="SessionRemover.Plan"/> +
+    /// <see cref="SessionRemoverExecutor.Execute"/>, recycle-bin only - there is no UI path to
+    /// <see cref="SessionRemovalMode.PermanentDelete"/> from this menu.
+    ///
+    /// <para><b>Fails closed while the session is live</b>, checked twice: once here before even
+    /// building a plan or showing the confirmation dialog (via <paramref name="sender"/>'s row -
+    /// <see cref="RootsPanelNodeViewModel.IsRunning"/>, the disk-derived signal, OR-ed with whether this
+    /// Glaude instance has an open tab for it), and again by <see cref="SessionRemoverExecutor.Execute"/>'s
+    /// own <c>isSessionLive</c> re-checks immediately before every delete. Neither check can see a
+    /// `claude` process resuming this session id from a source entirely outside this Glaude instance
+    /// (a different terminal, a different machine) - the disk-derived <c>IsRunning</c> signal only
+    /// updates on <see cref="Glaude.App.Services.ITelemetryFeed"/>'s next tick, so there is an inherent,
+    /// small window this cannot close; it is not claimed to be airtight, only fail-closed against
+    /// everything this app can actually observe.</para>
+    /// </summary>
+    private async void RemoveSession_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as MenuItem)?.Tag is not RootsPanelNodeViewModel node || node.Kind != RootsPanelNodeKind.Session)
+        {
+            return;
+        }
+
+        string sessionId = node.Key;
+        Func<bool> isLive = () => node.IsRunning || (_sessionRegistry?.TryGet(sessionId, out _) ?? false);
+
+        if (isLive())
+        {
+            MessageBox.Show(
+                this,
+                "This session is running. Stop it first, then remove it.",
+                "Remove session",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+            return;
+        }
+
+        var plan = SessionRemover.Plan(sessionId, node.ProjectDir);
+        if (!plan.IsSafe)
+        {
+            MessageBox.Show(
+                this,
+                "Refusing to remove this session - it did not pass validation:\n\n" + string.Join('\n', plan.Warnings),
+                "Remove session",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+            return;
+        }
+
+        int existingCount = plan.ExistingTargets.Count();
+        if (existingCount == 0 && !plan.HistoryFileExists)
+        {
+            MessageBox.Show(this, "There is nothing on disk to remove for this session.", "Remove session",
+                MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        double totalMegabytes = plan.TotalBytes / (1024.0 * 1024.0);
+        var confirmResult = MessageBox.Show(
+            this,
+            $"Remove \"{node.Text}\"?\n\n" +
+            $"This moves {existingCount} location(s) (~{totalMegabytes:0.0} MB) to the recycle bin and removes " +
+            "this session's entry from history.jsonl. The tab strip and panel A are unaffected if the session " +
+            "is not currently open.\n\nThis can be undone from the recycle bin, but is otherwise permanent.",
+            "Remove session",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Warning,
+            MessageBoxResult.No);
+
+        if (confirmResult != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        var result = await Task.Run(() => SessionRemoverExecutor.Execute(plan, isLive, SessionRemovalMode.RecycleBin));
+
+        if (result.FullyRemoved)
+        {
+            ShowTransientWarning($"\"{node.Text}\" was removed.");
+            return;
+        }
+
+        if (result.AbortedForLiveness)
+        {
+            MessageBox.Show(this, "The session became active again during removal, so nothing further was touched.",
+                "Remove session", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var failed = result.Steps.Where(s => s.Outcome == SessionRemovalStepOutcome.Failed).ToArray();
+        string detail = failed.Length > 0
+            ? string.Join('\n', failed.Select(s => $"- {s.Description}: {s.Detail}"))
+            : $"Aborted: {result.AbortReason}";
+        MessageBox.Show(this, "Removal did not fully complete:\n\n" + detail, "Remove session",
+            MessageBoxButton.OK, MessageBoxImage.Error);
     }
 
     private DispatcherTimer? _transientWarningTimer;

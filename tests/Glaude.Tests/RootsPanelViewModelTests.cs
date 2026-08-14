@@ -373,6 +373,15 @@ public class RootsPanelViewModelTests
     }
 
     [Fact]
+    public void SessionNode_CarriesProjectDir_ForSessionRemoverPlan()
+    {
+        var (vm, feed, _) = Build();
+        feed.Publish(TelemetryFixtures.Tree(new[] { TelemetryFixtures.Root(RootPath, TelemetryFixtures.Session("s-1")) }));
+
+        Assert.Equal("C--projects", Node(vm, "s-1").ProjectDir);
+    }
+
+    [Fact]
     public void RootPathFor_ResolvesAnySessionKey_RegardlessOfWhatIsCurrentlySelected()
     {
         var (vm, feed, _) = Build();

@@ -132,6 +132,9 @@ public class MonitorTreeBuilderTests
         Assert.Equal(
             "● Build session monitoring application — 22b04584-99e… — Opus 5 — effort=high — 14.8% of 1M",
             session.Text);
+        // P4-T4/T3: ProjectDir is carried through purely for SessionRemover.Plan's projectDir parameter -
+        // nothing else in this file's own output depends on it.
+        Assert.Equal("C--projects", session.ProjectDir);
 
         Assert.Single(session.Agents);
         var agent = session.Agents[0];

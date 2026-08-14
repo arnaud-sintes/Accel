@@ -29,8 +29,12 @@ public sealed record MonitorRowColumns(string Id, string Name, string Type, stri
 /// <summary>One rendered sub-agent leaf.</summary>
 public sealed record MonitorAgentNode(string AgentId, string Text, MonitorNodeState State, MonitorRowColumns Columns);
 
-/// <summary>One rendered session node, with its (already live-filtered by the server) sub-agents.</summary>
-public sealed record MonitorSessionNode(string SessionId, string Text, MonitorNodeState State, MonitorAgentNode[] Agents, MonitorRowColumns Columns);
+/// <summary>One rendered session node, with its (already live-filtered by the server) sub-agents.
+/// <see cref="ProjectDir"/> is the transcript's project slug (<c>SessionTreeDto.ProjectDir</c>) -
+/// carried through purely so P4-T4's "Remove session" action can resolve
+/// <c>projects/&lt;slug&gt;/&lt;sessionId&gt;[.jsonl]</c> without a second disk scan; nothing here
+/// otherwise needed it.</summary>
+public sealed record MonitorSessionNode(string SessionId, string Text, MonitorNodeState State, MonitorAgentNode[] Agents, MonitorRowColumns Columns, string ProjectDir = "");
 
 /// <summary>One rendered root-folder node. <see cref="OrphanAgents"/> is only ever non-empty for
 /// the synthetic "(unattributed)" root - a normal configured root's agents are always nested
@@ -198,7 +202,7 @@ public static class MonitorTreeBuilder
 
         var agents = (session.Agents ?? Array.Empty<AgentTreeDto>()).Select(BuildAgentNode).ToArray();
 
-        return new MonitorSessionNode(session.SessionId ?? string.Empty, text, state, agents, columns);
+        return new MonitorSessionNode(session.SessionId ?? string.Empty, text, state, agents, columns, session.ProjectDir ?? string.Empty);
     }
 
     private static MonitorAgentNode BuildAgentNode(AgentTreeDto agent)

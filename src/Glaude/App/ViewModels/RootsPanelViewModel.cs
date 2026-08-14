@@ -48,13 +48,15 @@ public sealed partial class RootsPanelNodeViewModel : ObservableObject
         MonitorNodeState state,
         MonitorRowColumns columns,
         RootsPanelViewModel? owner = null,
-        bool isFocused = false)
+        bool isFocused = false,
+        string projectDir = "")
     {
         Key = key ?? string.Empty;
         Text = text ?? string.Empty;
         Kind = kind;
         State = state;
         Columns = columns ?? MonitorRowColumns.Empty;
+        ProjectDir = projectDir ?? string.Empty;
         _owner = owner;
         _isFocused = isFocused;
 
@@ -85,6 +87,14 @@ public sealed partial class RootsPanelNodeViewModel : ObservableObject
 
     /// <summary>The six-column projection (ID | Name | Type | Model | Effort | Context).</summary>
     public MonitorRowColumns Columns { get; }
+
+    /// <summary>
+    /// The transcript's project slug (empty for root/agent/placeholder rows) - carried through from
+    /// <see cref="MonitorSessionNode.ProjectDir"/> purely so P4-T4's "Remove session" action can resolve
+    /// <c>projects/&lt;slug&gt;/&lt;sessionId&gt;[.jsonl]</c> (<see cref="SessionRemover.Plan"/>'s
+    /// <c>projectDir</c> parameter) without a second disk scan.
+    /// </summary>
+    public string ProjectDir { get; }
 
     /// <summary>Whether this row currently represents a live/running session or agent - the
     /// "IsRunning" half of P1-T4 / locked-in decision 9's IsRunning x IsFocused visual-state axis.
@@ -671,7 +681,7 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
 
     private RootsPanelNodeViewModel BuildSessionNode(MonitorSessionNode session)
     {
-        var node = new RootsPanelNodeViewModel(session.SessionId, session.Text, RootsPanelNodeKind.Session, session.State, session.Columns, this);
+        var node = new RootsPanelNodeViewModel(session.SessionId, session.Text, RootsPanelNodeKind.Session, session.State, session.Columns, this, projectDir: session.ProjectDir);
 
         foreach (var agent in session.Agents)
         {

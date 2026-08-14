@@ -243,6 +243,21 @@
                                                     </Style>
                                                 </MenuItem.Style>
                                             </MenuItem>
+                                            <!--
+                                                Remove: disabled (refused, fail-closed) while the session is
+                                                running per locked-in decision 4 / risk register item 3 -
+                                                see MainWindow.RemoveSession_Click. Recycle-bin only from
+                                                this menu; there is deliberately no UI path to
+                                                SessionRemovalMode.PermanentDelete.
+                                            -->
+                                            <MenuItem Header="Remove…">
+                                                <MenuItem.Style>
+                                                    <Style TargetType="MenuItem">
+                                                        <Setter Property="Tag" Value="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
+                                                        <EventSetter Event="MenuItem.Click" Handler="RemoveSession_Click" />
+                                                    </Style>
+                                                </MenuItem.Style>
+                                            </MenuItem>
                                         </ContextMenu>
                                     </Setter.Value>
                                 </Setter>
