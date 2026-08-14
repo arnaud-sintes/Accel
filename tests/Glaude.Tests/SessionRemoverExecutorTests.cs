@@ -80,7 +80,7 @@ public class SessionRemoverExecutorTests : IDisposable
         var unsafePlan = SessionRemover.Plan("not-a-guid", "C--projects", _homeDir);
         Assert.False(unsafePlan.IsSafe);
 
-        Assert.Throws<ArgumentException>(() => SessionRemoverExecutor.Execute(unsafePlan, homeDirOverride: _homeDir));
+        Assert.Throws<ArgumentException>(() => SessionRemoverExecutor.Execute(unsafePlan, isSessionLive: () => false, homeDirOverride: _homeDir));
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -97,7 +97,7 @@ public class SessionRemoverExecutorTests : IDisposable
         var plan = SessionRemover.Plan(sessionId, slug, _homeDir);
         Assert.True(plan.IsSafe);
 
-        var result = SessionRemoverExecutor.Execute(plan, SessionRemovalMode.PermanentDelete, isSessionLive: () => false, homeDirOverride: _homeDir);
+        var result = SessionRemoverExecutor.Execute(plan, mode: SessionRemovalMode.PermanentDelete, isSessionLive: () => false, homeDirOverride: _homeDir);
 
         Assert.True(result.FullyRemoved);
         Assert.False(result.AbortedForLiveness);
@@ -127,7 +127,7 @@ public class SessionRemoverExecutorTests : IDisposable
         string sessionId = "22222222-2222-2222-2222-222222222222";
         var plan = SessionRemover.Plan(sessionId, "C--projects", _homeDir);
 
-        var result = SessionRemoverExecutor.Execute(plan, SessionRemovalMode.PermanentDelete, isSessionLive: () => false, homeDirOverride: _homeDir);
+        var result = SessionRemoverExecutor.Execute(plan, mode: SessionRemovalMode.PermanentDelete, isSessionLive: () => false, homeDirOverride: _homeDir);
 
         Assert.True(result.FullyRemoved);
         Assert.All(result.Steps, s => Assert.Equal(SessionRemovalStepOutcome.NotPresent, s.Outcome));
@@ -146,7 +146,7 @@ public class SessionRemoverExecutorTests : IDisposable
         PopulateFullFixture(sessionId, slug, out string transcriptPath, out string historyPath);
 
         var plan = SessionRemover.Plan(sessionId, slug, _homeDir);
-        var result = SessionRemoverExecutor.Execute(plan, SessionRemovalMode.PermanentDelete, isSessionLive: () => true, homeDirOverride: _homeDir);
+        var result = SessionRemoverExecutor.Execute(plan, mode: SessionRemovalMode.PermanentDelete, isSessionLive: () => true, homeDirOverride: _homeDir);
 
         Assert.True(result.AbortedForLiveness);
         Assert.False(result.FullyRemoved);
@@ -176,13 +176,48 @@ public class SessionRemoverExecutorTests : IDisposable
             return callCount > 1; // live from the second liveness check onward
         }
 
-        var result = SessionRemoverExecutor.Execute(plan, SessionRemovalMode.PermanentDelete, isSessionLive: ReportLiveAfterFirstTarget, homeDirOverride: _homeDir);
+        var result = SessionRemoverExecutor.Execute(plan, mode: SessionRemovalMode.PermanentDelete, isSessionLive: ReportLiveAfterFirstTarget, homeDirOverride: _homeDir);
 
         Assert.True(result.AbortedForLiveness);
         Assert.Equal(SessionRemovalStepOutcome.Removed, result.Steps[0].Outcome);
         Assert.All(result.Steps.Skip(1), s => Assert.Equal(SessionRemovalStepOutcome.Skipped, s.Outcome));
 
         // The transcript (last target) must never have been touched once the run aborted.
+        Assert.True(File.Exists(transcriptPath));
+    }
+
+    /// <summary>
+    /// Regression test for a CONFIRMED finding from the P4-T3c adversarial review: a target delete that
+    /// throws (a locked file, a permissions error) did not previously abort the run, so the loop fell
+    /// through to still delete the transcript last as if nothing had gone wrong - verified by the review
+    /// to leave the transcript gone while an earlier location partially survived, exactly the "half gone
+    /// but no longer discoverable" state the transcript-last ordering exists to prevent. This test forces
+    /// a real delete failure (a file held open with no sharing) on the very first target and proves the
+    /// transcript step is now skipped, not removed.
+    /// </summary>
+    [Fact]
+    public void Execute_AFailedDelete_AbortsTheRun_AndNeverReachesTheTranscript()
+    {
+        string sessionId = "99999999-8888-7777-6666-555555555555";
+        const string slug = "C--projects";
+        PopulateFullFixture(sessionId, slug, out string transcriptPath, out _);
+
+        string lockedFile = Path.Combine(_claudeHome, "file-history", sessionId, "a.txt");
+        using var lockHandle = new FileStream(lockedFile, FileMode.Open, FileAccess.Read, FileShare.None);
+
+        var plan = SessionRemover.Plan(sessionId, slug, _homeDir);
+        var firstTarget = plan.Targets[0];
+        Assert.Equal("File history", firstTarget.Description); // sanity: this is the target we locked
+
+        var result = SessionRemoverExecutor.Execute(plan, mode: SessionRemovalMode.PermanentDelete, isSessionLive: () => false, homeDirOverride: _homeDir);
+
+        Assert.Equal(SessionRemovalAbortReason.TargetDeleteFailed, result.AbortReason);
+        Assert.False(result.FullyRemoved);
+        Assert.Equal(SessionRemovalStepOutcome.Failed, result.Steps[0].Outcome);
+        Assert.All(result.Steps.Skip(1), s => Assert.Equal(SessionRemovalStepOutcome.Skipped, s.Outcome));
+        Assert.False(result.HistoryRewriteAttempted);
+
+        // The transcript must still be there - the whole point of the ordering.
         Assert.True(File.Exists(transcriptPath));
     }
 
@@ -212,7 +247,7 @@ public class SessionRemoverExecutorTests : IDisposable
 
         try
         {
-            var result = SessionRemoverExecutor.Execute(tamperedPlan, SessionRemovalMode.PermanentDelete, isSessionLive: () => false, homeDirOverride: _homeDir);
+            var result = SessionRemoverExecutor.Execute(tamperedPlan, mode: SessionRemovalMode.PermanentDelete, isSessionLive: () => false, homeDirOverride: _homeDir);
 
             Assert.True(result.AbortedForLiveness == false); // aborted for re-validation, not liveness
             Assert.Equal(SessionRemovalStepOutcome.Skipped, result.Steps[0].Outcome);
@@ -245,7 +280,7 @@ public class SessionRemoverExecutorTests : IDisposable
             "{\"sessionId\":\"trunc"); // partial last line, as if caught mid-append
 
         var plan = SessionRemover.Plan(sessionId, slug, _homeDir);
-        var result = SessionRemoverExecutor.Execute(plan, SessionRemovalMode.PermanentDelete, isSessionLive: () => false, homeDirOverride: _homeDir);
+        var result = SessionRemoverExecutor.Execute(plan, mode: SessionRemovalMode.PermanentDelete, isSessionLive: () => false, homeDirOverride: _homeDir);
 
         Assert.True(result.HistoryRewriteSucceeded);
         Assert.Equal(1, result.HistoryLinesRemoved);
@@ -263,7 +298,7 @@ public class SessionRemoverExecutorTests : IDisposable
         WriteFixtureFile("history.jsonl", $"{{\"sessionId\":\"{sessionId}\"}}\n");
 
         var plan = SessionRemover.Plan(sessionId, "C--projects", _homeDir);
-        SessionRemoverExecutor.Execute(plan, SessionRemovalMode.PermanentDelete, isSessionLive: () => false, homeDirOverride: _homeDir);
+        SessionRemoverExecutor.Execute(plan, mode: SessionRemovalMode.PermanentDelete, isSessionLive: () => false, homeDirOverride: _homeDir);
 
         var leftoverTempFiles = Directory.GetFiles(_claudeHome, "*.tmp", SearchOption.TopDirectoryOnly);
         Assert.Empty(leftoverTempFiles);
@@ -285,7 +320,7 @@ public class SessionRemoverExecutorTests : IDisposable
         var target = plan.Targets.Single(t => t.Description == "Tasks");
         Assert.True(target.Exists);
 
-        var result = SessionRemoverExecutor.Execute(plan, SessionRemovalMode.RecycleBin, isSessionLive: () => false, homeDirOverride: _homeDir);
+        var result = SessionRemoverExecutor.Execute(plan, mode: SessionRemovalMode.RecycleBin, isSessionLive: () => false, homeDirOverride: _homeDir);
 
         var taskStep = result.Steps.Single(s => s.Description == "Tasks");
         Assert.Equal(SessionRemovalStepOutcome.Removed, taskStep.Outcome);

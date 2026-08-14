@@ -226,6 +226,54 @@ public class SessionRemoverPlanTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// Regression test for a CONFIRMED finding from the P4-T3c adversarial review:
+    /// <c>TryFindReparsePoint</c> originally stopped its walk <i>before</i> ever inspecting
+    /// <c>.claude</c> itself, so replacing <c>%USERPROFILE%\.claude</c> wholesale with a junction to an
+    /// entirely different directory made every downstream check (leaf-GUID match, "inside home" prefix
+    /// test, the reparse walk) pass anyway - they all reason about the string path, never about where the
+    /// OS actually resolves it. The review verified this escaped a real plan+execute run and deleted a
+    /// file outside any real <c>.claude</c> tree; this test proves the same setup is now rejected by the
+    /// planner before an executor ever gets near it.
+    /// </summary>
+    [Fact]
+    public void Plan_RejectsEverything_WhenClaudeHomeItselfIsAJunction()
+    {
+        string sessionId = "aaaaaaaa-0000-0000-0000-000000000001";
+        string outsideTarget = Path.Combine(Path.GetTempPath(), "claude-home-junction-target-" + Guid.NewGuid());
+        Directory.CreateDirectory(Path.Combine(outsideTarget, "tasks", sessionId));
+        File.WriteAllText(Path.Combine(outsideTarget, "tasks", sessionId, "victim.txt"), "must never be deleted");
+
+        // Replace the fixture's own .claude (created empty in the constructor) with a junction to
+        // outsideTarget - simulating .claude itself having been swapped for a reparse point.
+        Directory.Delete(_claudeHome);
+        var psi = new System.Diagnostics.ProcessStartInfo("cmd.exe", $"/c mklink /J \"{_claudeHome}\" \"{outsideTarget}\"")
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        using var proc = System.Diagnostics.Process.Start(psi)!;
+        proc.WaitForExit(5000);
+
+        try
+        {
+            Assert.True(Directory.Exists(_claudeHome), "test setup failed to create the junction - mklink /J did not succeed");
+
+            var plan = SessionRemover.Plan(sessionId, "C--projects", _homeDir);
+
+            Assert.False(plan.IsSafe);
+            Assert.Contains(plan.Warnings, w => w.Contains("reparse point", StringComparison.OrdinalIgnoreCase));
+            Assert.Empty(plan.Targets);
+            Assert.True(File.Exists(Path.Combine(outsideTarget, "tasks", sessionId, "victim.txt")));
+        }
+        finally
+        {
+            try { Directory.Delete(_claudeHome); } catch { /* best effort cleanup - removes the junction, not its target */ }
+            try { Directory.Delete(outsideTarget, recursive: true); } catch { /* best effort cleanup */ }
+        }
+    }
+
     // ---------------------------------------------------------------------------------------------
     // ValidateTarget - the internal gate, exercised directly for the cases that don't need a full plan.
     // ---------------------------------------------------------------------------------------------

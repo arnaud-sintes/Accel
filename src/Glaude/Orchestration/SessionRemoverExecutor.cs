@@ -74,6 +74,19 @@ public enum SessionRemovalAbortReason
     /// review) to reason about.
     /// </summary>
     RevalidationFailed,
+
+    /// <summary>
+    /// A target's delete (or recycle-bin move) threw - a locked file, a permissions error, anything
+    /// <see cref="DeleteTarget"/> catches. <b>Fixed after an adversarial review (P4-T3c)</b> found that a
+    /// mid-run exception did not previously abort the run: earlier code only treated
+    /// <see cref="SessionLive"/>/<see cref="RevalidationFailed"/> as abort-worthy, so a failed delete on
+    /// an earlier target still let the run fall through to delete the transcript last as normal -
+    /// verified empirically to leave the transcript gone while an earlier location partially survived,
+    /// exactly the "half gone but no longer discoverable" state the transcript-last ordering exists to
+    /// prevent. A <see cref="SessionRemovalStepOutcome.Failed"/> outcome now aborts the remainder of the
+    /// run the same way the other two reasons do.
+    /// </summary>
+    TargetDeleteFailed,
 }
 
 /// <summary>The full result of one <see cref="SessionRemoverExecutor.Execute"/> call.</summary>
@@ -138,26 +151,33 @@ public static class SessionRemoverExecutor
     /// </summary>
     /// <param name="plan">Must have <see cref="SessionRemovalPlan.IsSafe"/> true - see this class's
     /// remarks on why a plan is never trusted blindly regardless.</param>
-    /// <param name="mode">Recycle-bin (default, recoverable) or permanent.</param>
     /// <param name="isSessionLive">
     /// Returns whether the session is currently considered live (a running process, a live PID-registry
     /// entry - whatever the caller's own liveness authority is; this class deliberately takes no
     /// dependency on <see cref="PtyRegistry"/> or <see cref="PtyPidRegistry"/> itself, matching
     /// <see cref="PtyOrphanProbes"/>'s own injected-probe pattern). Called immediately before every
-    /// target and again before the history rewrite. A null delegate is treated as "never live" - callers
-    /// MUST supply a real check in production; leaving it null is only ever correct in a test that has
-    /// already guaranteed there is nothing live to race against.
+    /// target and again before the history rewrite.
+    ///
+    /// <para><b>Deliberately not optional/nullable.</b> An adversarial review (P4-T3c) flagged the
+    /// original <c>Func&lt;bool&gt;? = null</c> shape as an unsafe default for a safety-critical gate: a
+    /// future caller that simply forgot to pass this (easy to do with an optional parameter, especially
+    /// once the real PtyRegistry/PID-registry wiring lands in a later change) got silent, no-warning
+    /// permission to delete a live session's data - the worst failure mode for exactly this check. Making
+    /// it required forces every call site, including a test that has already guaranteed there is nothing
+    /// live to race against, to say so explicitly (<c>() =&gt; false</c>) rather than by omission.</para>
     /// </param>
+    /// <param name="mode">Recycle-bin (default, recoverable) or permanent.</param>
     /// <param name="homeDirOverride">Test seam, mirrors <see cref="SessionRemover.Plan"/>'s own parameter.
     /// <b>Tests must always pass a fixture directory here - never the real profile.</b></param>
     /// <exception cref="ArgumentException"><paramref name="plan"/>.IsSafe is false.</exception>
     public static SessionRemovalExecutionResult Execute(
         SessionRemovalPlan plan,
+        Func<bool> isSessionLive,
         SessionRemovalMode mode = SessionRemovalMode.RecycleBin,
-        Func<bool>? isSessionLive = null,
         string? homeDirOverride = null)
     {
         ArgumentNullException.ThrowIfNull(plan);
+        ArgumentNullException.ThrowIfNull(isSessionLive);
         if (!plan.IsSafe)
         {
             throw new ArgumentException(
@@ -194,7 +214,7 @@ public static class SessionRemoverExecutor
                 continue;
             }
 
-            if (isSessionLive?.Invoke() == true)
+            if (isSessionLive())
             {
                 steps.Add(new SessionRemovalStepResult(target.Description, target.Path, null,
                     SessionRemovalStepOutcome.Skipped, "session is live - refusing to delete", null));
@@ -202,7 +222,15 @@ public static class SessionRemoverExecutor
                 continue;
             }
 
-            steps.Add(DeleteTarget(target, mode));
+            var step = DeleteTarget(target, mode);
+            steps.Add(step);
+            if (step.Outcome == SessionRemovalStepOutcome.Failed)
+            {
+                // Never proceed to the remaining targets - and in particular never proceed to the
+                // transcript, which the ordering promises is only ever deleted once everything before it
+                // is confirmed gone - after a delete that actually failed. See TargetDeleteFailed's remarks.
+                abortReason = SessionRemovalAbortReason.TargetDeleteFailed;
+            }
         }
 
         bool historyAttempted = false;
@@ -211,7 +239,7 @@ public static class SessionRemoverExecutor
 
         if (abortReason == SessionRemovalAbortReason.None && plan.HistoryFileExists)
         {
-            if (isSessionLive?.Invoke() == true)
+            if (isSessionLive())
             {
                 abortReason = SessionRemovalAbortReason.SessionLive;
             }

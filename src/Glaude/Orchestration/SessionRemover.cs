@@ -243,14 +243,30 @@ public static class SessionRemover
         return new TargetValidation(true, null);
     }
 
-    /// <summary>Walks from <paramref name="fullPath"/> up to (not including) <paramref name="fullClaudeHome"/>,
-    /// returning true at the first existing reparse point found.</summary>
+    /// <summary>
+    /// Walks from <paramref name="fullPath"/> up to and <b>including</b> both <paramref name="fullClaudeHome"/>
+    /// itself and the directory one level above it (i.e. <c>%USERPROFILE%</c>), returning true at the
+    /// first existing reparse point found.
+    ///
+    /// <para><b>Fixed after an adversarial review (P4-T3c) found this excluded both boundaries.</b> The
+    /// original version stopped its walk <i>before</i> ever inspecting <paramref name="fullClaudeHome"/>,
+    /// so if <c>%USERPROFILE%\.claude</c> itself were a junction/symlink pointing somewhere else entirely,
+    /// every check downstream (the leaf-GUID match, the "inside home" prefix test, this walk) still passed
+    /// - because all of them reason about the string <c>...\.claude\tasks\&lt;guid&gt;</c>, never about
+    /// where the OS actually resolves it. Verified empirically during that review: with <c>.claude</c>
+    /// replaced by a real junction, a full plan+execute run reported <c>IsSafe = true</c> and deleted a
+    /// file entirely outside any real <c>.claude</c> tree. Checking one level above <c>.claude</c> too
+    /// (rather than stopping exactly at it) additionally covers <c>%USERPROFILE%</c> itself being replaced.
+    /// </para>
+    /// </summary>
     private static bool TryFindReparsePoint(string fullClaudeHome, string fullPath, out string? offendingPath)
     {
+        string stopAt = Path.GetDirectoryName(fullClaudeHome) ?? fullClaudeHome;
         string? current = fullPath;
-        while (current is not null && !string.Equals(current, fullClaudeHome, StringComparison.OrdinalIgnoreCase))
+
+        while (current is not null)
         {
-            FileAttributes attributes;
+            FileAttributes? attributes;
             try
             {
                 if (Directory.Exists(current))
@@ -263,10 +279,10 @@ public static class SessionRemover
                 }
                 else
                 {
-                    // Doesn't exist (yet) at this level - nothing to check, keep walking up in case a
-                    // parent that DOES exist has been turned into a reparse point.
-                    current = Path.GetDirectoryName(current);
-                    continue;
+                    // Doesn't exist (yet) at this level - nothing to check here, but the walk still must
+                    // continue up to (and including) stopAt in case an ancestor that DOES exist has been
+                    // turned into a reparse point.
+                    attributes = null;
                 }
             }
             catch
@@ -276,16 +292,21 @@ public static class SessionRemover
                 return true;
             }
 
-            if ((attributes & FileAttributes.ReparsePoint) != 0)
+            if (attributes is { } a && (a & FileAttributes.ReparsePoint) != 0)
             {
                 offendingPath = current;
                 return true;
             }
 
-            string? parent = Path.GetDirectoryName(current);
-            if (string.Equals(parent, current, StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(current, stopAt, StringComparison.OrdinalIgnoreCase))
             {
-                break; // reached a root without ever matching fullClaudeHome - stop rather than loop forever.
+                break; // checked stopAt itself (inclusive) - never walk further up than %USERPROFILE%.
+            }
+
+            string? parent = Path.GetDirectoryName(current);
+            if (parent is null || string.Equals(parent, current, StringComparison.OrdinalIgnoreCase))
+            {
+                break; // reached a root without ever matching stopAt - stop rather than loop forever.
             }
 
             current = parent;
