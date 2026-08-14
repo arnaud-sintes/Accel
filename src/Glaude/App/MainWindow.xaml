@@ -103,6 +103,19 @@
             <MenuItem Header="_Help" />
         </Menu>
 
+        <!--
+            P4-T2: non-modal "rename may not have applied" warning banner (the plan's exact wording
+            for what a rename's completion-poll timeout should surface - the write may well have
+            landed even though the status file never confirmed a matching name within the timeout, so
+            this deliberately never blocks the UI the way a MessageBox would). Collapsed by default;
+            MainWindow.ShowTransientWarning sets the text and shows it, auto-hiding itself again after
+            a few seconds via a DispatcherTimer.
+        -->
+        <Border x:Name="TransientWarningBanner" DockPanel.Dock="Top" Background="#FFFFF4CE"
+                BorderBrush="#FFB00020" BorderThickness="0,0,0,1" Padding="8,4" Visibility="Collapsed">
+            <TextBlock x:Name="TransientWarningText" TextWrapping="Wrap" Foreground="#FF6B4E00" />
+        </Border>
+
         <!-- Horizontal split: Panel A | splitter | center area | splitter | Panel B. -->
         <Grid>
             <Grid.ColumnDefinitions>
@@ -185,6 +198,18 @@
                                             <MenuItem Header="Stop monitoring this folder…"
                                                       Command="{Binding PlacementTarget.Tag.RemoveRootCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
                                                       CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
+                                            <!--
+                                                P4-T2: only meaningful for a session row with a live tab
+                                                open (MainWindow.RenameSession_Click no-ops otherwise, same
+                                                guard-clause convention as RemoveRootCommand above), so this
+                                                is shown for every row rather than adding a Kind-based
+                                                visibility converter for this task. Click (not Command) is
+                                                used because the handler needs to open a modal dialog and
+                                                await a PTY round-trip, which a plain ICommand on a
+                                                WPF-free ViewModel cannot do.
+                                            -->
+                                            <MenuItem Header="Rename…" Click="RenameSession_Click"
+                                                      Tag="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
                                         </ContextMenu>
                                     </Setter.Value>
                                 </Setter>

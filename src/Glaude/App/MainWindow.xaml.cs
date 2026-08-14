@@ -2,6 +2,8 @@ namespace Glaude.App;
 
 using System;
 using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Threading;
 using Glaude.App.Services;
 using Glaude.App.ViewModels;
 using Glaude.Orchestration;
@@ -218,5 +220,103 @@ public partial class MainWindow : Window
         // the constructor). Nothing is awaited: AddTab is synchronous and the attach is fire-and-forget
         // by design, exactly as P2-T5b's own call site was.
         Tabs?.AddTab(tabId, string.IsNullOrWhiteSpace(viewModel.DisplayName) ? null : viewModel.DisplayName);
+    }
+
+    /// <summary>
+    /// P4-T2: renames a live session via <see cref="SlashCommandDriver"/> - the first real consumer of
+    /// P4-T1's generic mechanism. <c>Tag</c> on the clicked <see cref="MenuItem"/> carries the row's
+    /// <see cref="RootsPanelNodeViewModel"/> (see MainWindow.xaml's context-menu comment); anything other
+    /// than a session row is a silent no-op, the same guard-clause convention
+    /// <c>RootsPanelViewModel.RemoveRootCommand</c> already uses for a mismatched row kind.
+    ///
+    /// <para><b>The gate fails closed, twice, before anything is written:</b> (1) the row's key (a session
+    /// GUID, which doubles as its tabId - see this file's <see cref="CreateSession_Click"/> remarks) must
+    /// resolve to a session this Glaude instance actually has open (<see cref="PtyRegistry.TryGet"/>) -
+    /// rename can only ever act on a live tab, since that is the only way to reach the session's stdin;
+    /// (2) <c>~/.claude/sessions/&lt;pid&gt;.json</c>'s <c>status</c> must read exactly
+    /// <see cref="ClaudeSessionStatusFile.StatusIdle"/> - unknown/missing/busy all refuse injection rather
+    /// than guess. Only once both hold does the dialog even open.</para>
+    ///
+    /// <para>On confirm, <see cref="SlashCommandDriver.InvokeAsync(PtySession, string, System.Collections.Generic.IReadOnlyList{string}?, System.Func{ClaudeSessionStatusSnapshot?, bool}, TimeSpan, System.Threading.CancellationToken)"/>
+    /// writes <c>/rename &lt;name&gt;</c> and polls the same status file for its <c>name</c> field to
+    /// actually match. A <see cref="SlashCommandOutcome.TimedOut"/> result surfaces the plan's own
+    /// specified copy ("rename may not have applied") as a non-modal banner rather than a blocking
+    /// MessageBox - the command was still sent, so a dialog implying failure would be actively
+    /// misleading.</para>
+    /// </summary>
+    private async void RenameSession_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as MenuItem)?.Tag is not RootsPanelNodeViewModel node || node.Kind != RootsPanelNodeKind.Session)
+        {
+            return;
+        }
+
+        if (_sessionRegistry is null || !_sessionRegistry.TryGet(node.Key, out var session) || session is null)
+        {
+            MessageBox.Show(
+                this,
+                "This session isn't open in a tab right now, so it can't be renamed. Open it first.",
+                "Rename session",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+            return;
+        }
+
+        var status = ClaudeSessionStatusFile.TryRead(session.ProcessId);
+        if (!ClaudeSessionStatusFile.IsIdle(status))
+        {
+            MessageBox.Show(
+                this,
+                "The session is busy right now. Wait for it to go idle before renaming.",
+                "Rename session",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+            return;
+        }
+
+        var dialogViewModel = new RenameSessionDialogViewModel(node.Text);
+        var dialog = new RenameSessionDialog(dialogViewModel) { Owner = this };
+        dialog.ShowDialog();
+
+        if (!dialog.Confirmed || dialogViewModel.ConfirmedName is not { } newName)
+        {
+            return;
+        }
+
+        var driver = new SlashCommandDriver();
+        var result = await driver.InvokeAsync(
+            session,
+            "/rename",
+            new[] { newName },
+            snapshot => string.Equals(snapshot?.Name, newName, StringComparison.Ordinal),
+            TimeSpan.FromSeconds(5));
+
+        if (result.Outcome == SlashCommandOutcome.TimedOut)
+        {
+            ShowTransientWarning($"Rename to \"{newName}\" may not have applied - please check the session.");
+        }
+    }
+
+    private DispatcherTimer? _transientWarningTimer;
+
+    /// <summary>
+    /// Shows <paramref name="text"/> in the non-modal banner beneath the menu bar, auto-hiding it again
+    /// after a few seconds. Never blocks the caller and never stacks timers - a second call while one is
+    /// already showing just restarts the clock with the new text.
+    /// </summary>
+    private void ShowTransientWarning(string text)
+    {
+        _transientWarningTimer?.Stop();
+
+        TransientWarningText.Text = text;
+        TransientWarningBanner.Visibility = Visibility.Visible;
+
+        _transientWarningTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(8) };
+        _transientWarningTimer.Tick += (_, _) =>
+        {
+            _transientWarningTimer?.Stop();
+            TransientWarningBanner.Visibility = Visibility.Collapsed;
+        };
+        _transientWarningTimer.Start();
     }
 }
