@@ -54,6 +54,14 @@ public class EventServer
     public string? ProjectsDirOverride { get; set; }
 
     /// <summary>
+    /// P2-T4: the <c>tabId -&gt; IPtyEndpoint</c> registry backing <c>/pty/{tabId}</c>. One
+    /// instance per <see cref="EventServer"/>, same lifetime as <see cref="State"/>/<see cref="RootsTree"/>.
+    /// Registration of real sessions is deliberately not wired here - that lands with P2-T6 (session
+    /// creation) and P3-T2 (<c>PtyRegistry</c>); see <see cref="PtyRouteRegistry"/>'s class doc.
+    /// </summary>
+    public PtyRouteRegistry PtySessions { get; } = new PtyRouteRegistry();
+
+    /// <summary>
     /// Builds (but does not start) a <see cref="WebApplication"/> bound to
     /// http://127.0.0.1:{port}, with the five/six event routes mapped.
     /// Exposed as a static method (rather than only an instance method) so tests can
@@ -88,7 +96,8 @@ public class EventServer
         SessionState? state = null,
         string[]? roots = null,
         RootsTreeBuilder? rootsTree = null,
-        string? projectsDirOverride = null)
+        string? projectsDirOverride = null,
+        PtyRouteRegistry? ptySessions = null)
     {
         var builder = WebApplication.CreateBuilder();
 
@@ -105,20 +114,21 @@ public class EventServer
         SessionState effectiveState = state ?? new SessionState();
         string[] effectiveRoots = roots ?? RootFoldersConfig.Load();
         RootsTreeBuilder effectiveRootsTree = rootsTree ?? new RootsTreeBuilder();
+        PtyRouteRegistry effectivePtySessions = ptySessions ?? new PtyRouteRegistry();
 
-        MapRoutes(app, capture, effectiveState, effectiveRoots, effectiveRootsTree, projectsDirOverride);
+        MapRoutes(app, capture, effectiveState, effectiveRoots, effectiveRootsTree, projectsDirOverride, effectivePtySessions);
 
         return app;
     }
 
     /// <summary>
     /// Instance form of <see cref="Build"/> that wires this instance's <see cref="State"/>,
-    /// <see cref="Roots"/>, and <see cref="RootsTree"/> into the routes, so callers
-    /// (Program.cs's `run` verb, and metrics tests) can read the resulting session/agent
+    /// <see cref="Roots"/>, <see cref="RootsTree"/>, and <see cref="PtySessions"/> into the routes,
+    /// so callers (Program.cs's `run` verb, and metrics tests) can read the resulting session/agent
     /// records back out afterwards.
     /// </summary>
     public WebApplication BuildApp(int port, string? dumpRawDir = null) =>
-        Build(port, dumpRawDir, State, Roots, RootsTree, ProjectsDirOverride);
+        Build(port, dumpRawDir, State, Roots, RootsTree, ProjectsDirOverride, PtySessions);
 
     private static void MapRoutes(
         WebApplication app,
@@ -126,7 +136,8 @@ public class EventServer
         SessionState state,
         string[] roots,
         RootsTreeBuilder rootsTree,
-        string? projectsDirOverride)
+        string? projectsDirOverride,
+        PtyRouteRegistry ptySessions)
     {
         app.MapPost("/events/session-start", ctx => HandleEventAsync(ctx, "SessionStart", capture, state));
         app.MapPost("/events/session-end", ctx => HandleEventAsync(ctx, "SessionEnd", capture, state));
@@ -144,6 +155,10 @@ public class EventServer
         // Phase UI-D: disk-enumerated + live-merged session/agent tree, scanned/cached fresh
         // per request by rootsTree (see RootsTreeBuilder's per-instance caches).
         RootsTreeRoute.Map(app, roots, state, rootsTree, projectsDirOverride);
+
+        // P2-T4: loopback WebSocket PTY transport. See PtyRoutes' class doc for the security
+        // posture (Origin check + unguessable tabId) and the binary/text framing convention.
+        PtyRoutes.Map(app, ptySessions);
     }
 
     // Every route: read raw body, best-effort parse, hand off to EventPrinter, always 204.
