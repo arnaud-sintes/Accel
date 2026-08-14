@@ -24,6 +24,32 @@ using Microsoft.Win32.SafeHandles;
 /// </summary>
 public sealed class GlaudeJobObject : IDisposable
 {
+    /// <summary>
+    /// The one process-wide job object, created on first use and <b>never disposed</b>.
+    ///
+    /// <para><b>Why a static (rooting requirement, P2-T2b finding 1).</b> The job handle lives in a
+    /// <see cref="SafeHandle"/>, and <see cref="SafeHandle"/> has a critical finalizer that closes the
+    /// handle. Because the job carries <c>JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE</c>, "handle closed" means
+    /// "every assigned process is terminated". So a <see cref="GlaudeJobObject"/> that becomes
+    /// unreachable while sessions are live does not merely stop protecting them - it silently kills
+    /// every <c>claude.exe</c> in it at the next GC. Holding the instance in a <c>static readonly</c>
+    /// <see cref="Lazy{T}"/> field makes it a GC root for the entire life of the AppDomain, which is
+    /// exactly the lifetime the plan's locked-in decision 7 asks for ("one Windows Job Object for the
+    /// whole app").</para>
+    ///
+    /// <para><b>Do not dispose this.</b> There is no correct moment to: while the app runs, disposing
+    /// kills every session; at process exit the OS closes the handle anyway, which is precisely the
+    /// kill-on-close backstop that stops orphaned children surviving a Task-Manager kill of Glaude.
+    /// <see cref="PtySession"/> additionally keeps its own reference to whichever
+    /// <see cref="GlaudeJobObject"/> it was assigned to for the whole life of the session, so even a
+    /// caller-supplied (non-static, e.g. test-owned) job cannot be collected out from under a live
+    /// session.</para>
+    /// </summary>
+    public static GlaudeJobObject Shared => SharedLazy.Value;
+
+    private static readonly Lazy<GlaudeJobObject> SharedLazy =
+        new(Create, LazyThreadSafetyMode.ExecutionAndPublication);
+
     private readonly JobObjectSafeHandle handle;
     private bool disposed;
 
@@ -103,6 +129,90 @@ public sealed class GlaudeJobObject : IDisposable
         {
             int error = Marshal.GetLastWin32Error();
             throw new Win32Exception(error, "AssignProcessToJobObject failed.");
+        }
+    }
+
+    /// <summary>
+    /// Preferred overload: assigns a process to this job object given the <see cref="SafeProcessHandle"/>
+    /// that owns its handle (e.g. <see cref="ConPtySession.ProcessHandle"/>).
+    ///
+    /// <para><b>Why this exists (P2-T2b finding 2).</b> The <see cref="IntPtr"/> overload forces callers
+    /// to reach for <see cref="SafeHandle.DangerousGetHandle"/>, which hands the raw handle value to
+    /// native code with no reference held: if the owning <see cref="SafeHandle"/> is closed or finalized
+    /// between <c>DangerousGetHandle</c> and the P/Invoke returning, the value is stale and
+    /// <c>AssignProcessToJobObject</c> is called on a closed - possibly recycled - handle. This overload
+    /// does the <see cref="SafeHandle.DangerousAddRef"/>/<see cref="SafeHandle.DangerousRelease"/> pair
+    /// around the call so the handle provably cannot be released for its duration, and releases the ref
+    /// in a <c>finally</c> so a throwing P/Invoke cannot leak it.</para>
+    ///
+    /// <para>Ownership is unchanged: the caller still owns <paramref name="processHandle"/>.</para>
+    /// </summary>
+    /// <exception cref="ArgumentNullException"><paramref name="processHandle"/> is null.</exception>
+    /// <exception cref="ArgumentException">The handle is invalid (closed or never set).</exception>
+    /// <exception cref="ObjectDisposedException">The job object has already been disposed.</exception>
+    /// <exception cref="Win32Exception">Thrown if <c>AssignProcessToJobObject</c> fails.</exception>
+    public void AssignProcess(SafeProcessHandle processHandle)
+    {
+        ArgumentNullException.ThrowIfNull(processHandle);
+        ObjectDisposedException.ThrowIf(disposed, this);
+
+        if (processHandle.IsInvalid || processHandle.IsClosed)
+        {
+            throw new ArgumentException(
+                "The process handle is invalid or already closed; it cannot be assigned to a job object.",
+                nameof(processHandle));
+        }
+
+        bool refAdded = false;
+        try
+        {
+            // Throws ObjectDisposedException if the handle was closed between the check above and here,
+            // which is the correct outcome - better a managed exception than a P/Invoke on a stale value.
+            processHandle.DangerousAddRef(ref refAdded);
+            AssignProcess(processHandle.DangerousGetHandle());
+        }
+        finally
+        {
+            if (refAdded)
+            {
+                processHandle.DangerousRelease();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Diagnostic: whether <paramref name="processHandle"/> is currently assigned to <i>this</i> job
+    /// object. Used by the <c>pty-session-smoke-test</c> verb to positively confirm that the
+    /// spawn-suspended → assign → resume ordering really put the child in the job (as opposed to just
+    /// "the API returned success"), and usable by <c>glaude doctor</c> later (CX-T3).
+    /// </summary>
+    /// <remarks>
+    /// <c>IsProcessInJob</c> with a non-null job handle answers "is it in this specific job", which is
+    /// what we want; passing NULL would answer the weaker "is it in any job at all".
+    /// </remarks>
+    public bool ContainsProcess(SafeProcessHandle processHandle)
+    {
+        ArgumentNullException.ThrowIfNull(processHandle);
+        ObjectDisposedException.ThrowIf(disposed, this);
+
+        bool refAdded = false;
+        try
+        {
+            processHandle.DangerousAddRef(ref refAdded);
+            if (!NativeMethods.IsProcessInJob(processHandle.DangerousGetHandle(), handle, out bool result))
+            {
+                int error = Marshal.GetLastWin32Error();
+                throw new Win32Exception(error, "IsProcessInJob failed.");
+            }
+
+            return result;
+        }
+        finally
+        {
+            if (refAdded)
+            {
+                processHandle.DangerousRelease();
+            }
         }
     }
 
@@ -193,6 +303,12 @@ internal static class NativeMethods
 
     [DllImport("kernel32.dll", SetLastError = true)]
     public static extern bool AssignProcessToJobObject(JobObjectSafeHandle hJob, IntPtr hProcess);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool IsProcessInJob(
+        IntPtr processHandle,
+        JobObjectSafeHandle jobHandle,
+        [MarshalAs(UnmanagedType.Bool)] out bool result);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     public static extern bool CloseHandle(IntPtr hObject);

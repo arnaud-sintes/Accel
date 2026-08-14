@@ -30,6 +30,16 @@ if (args.Length > 0 && string.Equals(args[0], "pty-smoke-test", StringComparison
     return Glaude.Orchestration.ConPtySmokeTest.Run(Console.Out, iterations);
 }
 
+// P2-T3: hidden dev-only verb, same rationale and same placement rules as `pty-smoke-test` above -
+// PtySession is real process lifecycle plus a real Job Object, which no unit test with fakes can
+// prove. It launches cmd.exe (never claude.exe) for the same reason ConPtySmokeTest does. Optional
+// cycle count for the leak loop: `pty-session-smoke-test [cycles]` (default 10).
+if (args.Length > 0 && string.Equals(args[0], "pty-session-smoke-test", StringComparison.Ordinal))
+{
+    var cycles = args.Length > 1 && int.TryParse(args[1], out var parsedCycles) ? parsedCycles : 10;
+    return Glaude.Orchestration.PtySessionSmokeTest.Run(Console.Out, cycles);
+}
+
 // Runs the WPF shell scaffolding standalone, on its own STA thread (mirrors RunCombinedAsync's
 // existing WinForms STA thread below - this process's real Main is not STA, since the combined
 // app already needed WinForms on a dedicated thread rather than the process's own). Dev-only,

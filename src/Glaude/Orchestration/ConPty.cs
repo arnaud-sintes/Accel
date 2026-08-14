@@ -36,6 +36,19 @@ public sealed class ConPtyLaunchSpec
     /// <see cref="ConPtySession.ResumeMainThread"/>; a suspended child never produces output and
     /// never exits, so forgetting it looks exactly like a hang.</summary>
     public bool CreateSuspended { get; init; }
+
+    /// <summary>
+    /// Optional environment variables to add to / override in / remove from the environment the child
+    /// would otherwise inherit. A null value removes the variable. When this is null or empty the child
+    /// inherits this process's environment exactly (<c>lpEnvironment = NULL</c>), which is the historical
+    /// and default behaviour; only when it is non-empty is an explicit UTF-16 environment block built
+    /// (and <c>CREATE_UNICODE_ENVIRONMENT</c> added to the creation flags).
+    ///
+    /// <para>Added for P2-T3: a terminal child legitimately needs a couple of environment knobs
+    /// (<c>TERM</c>, and later per-session Claude Code variables), and there is no other way to set them
+    /// without a shell.</para>
+    /// </summary>
+    public IReadOnlyDictionary<string, string?>? EnvironmentOverrides { get; init; }
 }
 
 /// <summary>
@@ -464,6 +477,7 @@ public sealed class ConPtySession : IDisposable
         var attributeList = IntPtr.Zero;
         var attributeListInitialized = false;
         var pseudoConsoleRefAdded = false;
+        var environmentBlock = IntPtr.Zero;
 
         try
         {
@@ -542,6 +556,18 @@ public sealed class ConPtySession : IDisposable
                 creationFlags |= Native.CREATE_SUSPENDED;
             }
 
+            // Environment: NULL (inherit) unless the caller asked for overrides. The block is UTF-16
+            // with embedded NULs, so it cannot go through the string marshaller - it is copied into
+            // unmanaged memory here and freed in the finally below, whether or not CreateProcessW
+            // succeeded.
+            var environmentChars = BuildEnvironmentBlock(spec.EnvironmentOverrides);
+            if (environmentChars is not null)
+            {
+                environmentBlock = Marshal.AllocHGlobal(environmentChars.Length * sizeof(char));
+                Marshal.Copy(environmentChars, 0, environmentBlock, environmentChars.Length);
+                creationFlags |= Native.CREATE_UNICODE_ENVIRONMENT;
+            }
+
             // CreateProcessW may write into lpCommandLine, so it must be a mutable, NUL-terminated
             // buffer - never a marshalled string literal.
             var commandLine = new char[spec.CommandLine.Length + 1];
@@ -557,7 +583,7 @@ public sealed class ConPtySession : IDisposable
                     IntPtr.Zero,
                     false,
                     creationFlags,
-                    IntPtr.Zero,
+                    environmentBlock,
                     spec.WorkingDirectory,
                     ref startupInfo,
                     out var processInformation))
@@ -589,6 +615,11 @@ public sealed class ConPtySession : IDisposable
                 pseudoConsole.DangerousRelease();
             }
 
+            if (environmentBlock != IntPtr.Zero)
+            {
+                Marshal.FreeHGlobal(environmentBlock);
+            }
+
             if (attributeList != IntPtr.Zero)
             {
                 // DeleteProcThreadAttributeList is only legal on an initialized list; the allocation is
@@ -599,6 +630,97 @@ public sealed class ConPtySession : IDisposable
                 }
 
                 Marshal.FreeHGlobal(attributeList);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Builds a <c>CreateProcessW</c> UTF-16 environment block, or null when there is nothing to
+    /// override (in which case the caller passes NULL and the child inherits this process's environment).
+    ///
+    /// <para>Shape, per the <c>lpEnvironment</c> documentation: <c>NAME=VALUE\0NAME=VALUE\0...\0</c> -
+    /// i.e. every entry NUL-terminated plus one extra NUL to terminate the block. Names are compared
+    /// case-insensitively (Windows environment semantics) and the result is sorted ordinal-ignore-case,
+    /// which is the order Windows itself produces; a null override value removes the variable entirely.</para>
+    /// </summary>
+    internal static char[]? BuildEnvironmentBlock(IReadOnlyDictionary<string, string?>? overrides) =>
+        BuildEnvironmentBlock(overrides, EnumerateProcessEnvironment());
+
+    /// <summary>Test seam for <see cref="BuildEnvironmentBlock(IReadOnlyDictionary{string, string?}?)"/>
+    /// taking an explicit base environment instead of the real process environment.</summary>
+    internal static char[]? BuildEnvironmentBlock(
+        IReadOnlyDictionary<string, string?>? overrides,
+        IEnumerable<KeyValuePair<string, string>> baseEnvironment)
+    {
+        ArgumentNullException.ThrowIfNull(baseEnvironment);
+
+        if (overrides is null || overrides.Count == 0)
+        {
+            return null;
+        }
+
+        var merged = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in baseEnvironment)
+        {
+            if (!string.IsNullOrEmpty(entry.Key))
+            {
+                merged[entry.Key] = entry.Value ?? string.Empty;
+            }
+        }
+
+        foreach (var (name, value) in overrides)
+        {
+            if (string.IsNullOrEmpty(name) || name.Contains('=', StringComparison.Ordinal) || name.Contains('\0', StringComparison.Ordinal))
+            {
+                // A name containing '=' or a NUL cannot be represented in the block at all; silently
+                // accepting it would corrupt every entry after it.
+                throw new ArgumentException(
+                    $"Environment variable name '{name}' is empty or contains '=' or a NUL, which cannot be represented in a Win32 environment block.",
+                    nameof(overrides));
+            }
+
+            if (value is null)
+            {
+                merged.Remove(name);
+                continue;
+            }
+
+            if (value.Contains('\0', StringComparison.Ordinal))
+            {
+                throw new ArgumentException(
+                    $"The value of environment variable '{name}' contains a NUL, which cannot be represented in a Win32 environment block.",
+                    nameof(overrides));
+            }
+
+            merged[name] = value;
+        }
+
+        var builder = new System.Text.StringBuilder();
+        foreach (var name in merged.Keys.OrderBy(k => k, StringComparer.OrdinalIgnoreCase))
+        {
+            builder.Append(name).Append('=').Append(merged[name]).Append('\0');
+        }
+
+        // The extra terminator. An entirely empty environment is still a legal block ("\0\0" - a single
+        // NUL after zero entries would be ambiguous, so emit one for the empty case too).
+        builder.Append('\0');
+        if (merged.Count == 0)
+        {
+            builder.Append('\0');
+        }
+
+        var block = new char[builder.Length];
+        builder.CopyTo(0, block, 0, builder.Length);
+        return block;
+    }
+
+    private static IEnumerable<KeyValuePair<string, string>> EnumerateProcessEnvironment()
+    {
+        foreach (System.Collections.DictionaryEntry entry in Environment.GetEnvironmentVariables())
+        {
+            if (entry.Key is string key)
+            {
+                yield return new KeyValuePair<string, string>(key, entry.Value as string ?? string.Empty);
             }
         }
     }
@@ -649,6 +771,7 @@ public sealed class ConPtySession : IDisposable
     {
         internal const uint EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
         internal const uint CREATE_SUSPENDED = 0x00000004;
+        internal const uint CREATE_UNICODE_ENVIRONMENT = 0x00000400;
         internal const int PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE = 0x00020016;
         internal const int STARTF_USESTDHANDLES = 0x00000100;
         internal const int ERROR_INSUFFICIENT_BUFFER = 122;
