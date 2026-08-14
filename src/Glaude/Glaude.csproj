@@ -9,7 +9,16 @@
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
-    <InvariantGlobalization>true</InvariantGlobalization>
+    <!--
+      InvariantGlobalization was removed: WPF's text-input pipeline resolves the keyboard layout's
+      own culture (e.g. LCID 1036/fr-FR on a French keyboard) on every keystroke into any TextBox,
+      independently of FrameworkElement.Language (which only affects markup/binding culture
+      resolution - the various Window.Language="" workarounds elsewhere in this codebase do not
+      help here). Under invariant mode that throws CultureNotFoundException the instant a user
+      types on a non-English keyboard - reproduced via the "Create session" dialog's Display Name
+      box. A desktop WPF app with real user-facing text input cannot use invariant globalization;
+      this is not a per-control workaround, it is a hard SDK-level conflict.
+    -->
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
 

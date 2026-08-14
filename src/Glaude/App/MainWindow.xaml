@@ -3,18 +3,14 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:conv="clr-namespace:Glaude.App.Converters"
         xmlns:controls="clr-namespace:Glaude.App.Controls"
-        Title="Glaude" Height="720" Width="1200"
-        Language="">
+        Title="Glaude" Height="720" Width="1200">
     <!--
-        P1-T4: the project sets InvariantGlobalization (Glaude.csproj) for the self-contained
-        publish, which strips the culture tables WPF's default FrameworkElement.Language
-        ("en-US") needs to resolve a "specific culture" for. Any data-bound value converter
-        (HexToBrushConverter, BooleanToVisibilityConverter - both newly introduced by this task's
-        badges/glyphs) triggers that resolution the very first time its binding activates,
-        throwing XamlParseException("Cannot find non-neutral culture related to 'en-us'") the
-        moment the row template is measured - repro'd via "ui-preview verify". The Language=""
-        attribute above avoids the lookup entirely rather than asking WPF to resolve a language
-        this build has no culture data for.
+        P1-T4 originally set Language="" here to route around a XamlParseException caused by
+        InvariantGlobalization (Glaude.csproj) stripping the culture tables FrameworkElement.Language
+        needed. InvariantGlobalization was removed instead (see Glaude.csproj's comment) once it
+        turned out to also crash WPF's keyboard-input pipeline on a non-English keyboard - a much
+        more fundamental conflict than the binding-converter symptom this attribute was papering
+        over. With real culture data present again, the default Language is fine.
     -->
     <Window.Resources>
         <conv:HexToBrushConverter x:Key="HexToBrush" />

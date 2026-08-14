@@ -3,13 +3,12 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Create session" Height="420" Width="480"
         WindowStartupLocation="CenterOwner" ResizeMode="NoResize"
-        ShowInTaskbar="False"
-        Language="">
+        ShowInTaskbar="False">
     <!--
-        P2-T6: the "Create session" popup. Same Language="" workaround as MainWindow.xaml (see its
-        comment) - InvariantGlobalization strips the culture tables WPF's default
-        FrameworkElement.Language resolution needs, and this dialog's ComboBox/TextBox bindings
-        would otherwise throw the same XamlParseException the first time they activate.
+        P2-T6 originally set Language="" here, matching MainWindow.xaml's now-removed workaround -
+        see Glaude.csproj's comment on why InvariantGlobalization was removed entirely instead (it
+        also crashed this dialog's own TextBoxes the moment a user typed on a non-English keyboard,
+        which Language="" never addressed). Default Language is fine with real culture data present.
     -->
     <Grid Margin="14">
         <Grid.RowDefinitions>
