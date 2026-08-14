@@ -134,6 +134,16 @@ static void RunUiPreview(bool verify)
             .Features
             .Get<Microsoft.AspNetCore.Hosting.Server.Features.IServerAddressesFeature>();
         ptyPort = new Uri(addressesFeature!.Addresses.First()).Port;
+
+        // Reported bug: any real `claude` session launched while this preview is running printed
+        // "SessionStart:startup hook error" - the hooks installed in ~/.claude/settings.json (by
+        // whatever real `glaude install`/production run happened last) point at THAT run's port, not
+        // this preview's fresh ephemeral one, so the hook's POST simply had nothing listening on the
+        // other end. RunCombinedAsync already reinstalls on every real startup for the exact same
+        // reason (a port can change between runs) - this preview verb just wasn't doing the same
+        // thing. Installing here means hooks point at this preview while it's running; the next real
+        // `glaude` startup reinstalls them again for its own port, same as always.
+        InstallCommand.Run(ptyPort, Console.Out);
     }
     catch
     {
