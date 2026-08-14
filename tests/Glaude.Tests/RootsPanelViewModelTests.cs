@@ -312,6 +312,67 @@ public class RootsPanelViewModelTests
     }
 
     [Fact]
+    public void SelectedRootPath_IsNull_WhenNothingIsSelected()
+    {
+        var (vm, feed, _) = Build();
+        feed.Publish(TelemetryFixtures.Tree(new[] { TelemetryFixtures.Root(RootPath, TelemetryFixtures.Session("s-1")) }));
+
+        Assert.Null(vm.SelectedRootPath);
+    }
+
+    [Fact]
+    public void SelectedRootPath_IsTheRootItselfWhenARootRowIsSelected()
+    {
+        var (vm, feed, _) = Build();
+        feed.Publish(TelemetryFixtures.Tree(new[] { TelemetryFixtures.Root(RootPath, TelemetryFixtures.Session("s-1")) }));
+
+        vm.Roots[0].IsSelected = true;
+
+        Assert.Equal(RootPath, vm.SelectedRootPath);
+    }
+
+    [Fact]
+    public void SelectedRootPath_IsTheOwningRoot_WhenASessionRowIsSelected()
+    {
+        var (vm, feed, _) = Build();
+        feed.Publish(TelemetryFixtures.Tree(new[]
+        {
+            TelemetryFixtures.Root(RootPath, TelemetryFixtures.Session("s-1")),
+            TelemetryFixtures.Root(OtherRootPath, TelemetryFixtures.Session("s-2")),
+        }));
+
+        Node(vm, "s-2").IsSelected = true;
+
+        Assert.Equal(OtherRootPath, vm.SelectedRootPath);
+    }
+
+    [Fact]
+    public void SelectedRootPath_IsTheOwningRoot_WhenAnAgentRowIsSelected()
+    {
+        var (vm, feed, _) = Build();
+        feed.Publish(TelemetryFixtures.Tree(new[]
+        {
+            TelemetryFixtures.Root(RootPath, TelemetryFixtures.Session("s-live", isLive: true, agents: new[] { TelemetryFixtures.Agent("agent-1") })),
+        }));
+
+        Node(vm, "agent-1").IsSelected = true;
+
+        Assert.Equal(RootPath, vm.SelectedRootPath);
+    }
+
+    [Fact]
+    public void SelectedRootPath_IsNull_WhenTheSelectedNodeNoLongerExists()
+    {
+        var (vm, feed, _) = Build();
+        feed.Publish(TelemetryFixtures.Tree(new[] { TelemetryFixtures.Root(RootPath, TelemetryFixtures.Session("s-gone")) }));
+        Node(vm, "s-gone").IsSelected = true;
+
+        feed.Publish(TelemetryFixtures.Tree(new[] { TelemetryFixtures.Root(RootPath) }));
+
+        Assert.Null(vm.SelectedRootPath);
+    }
+
+    [Fact]
     public void SelectingTheKeylessPlaceholderRow_DoesNotBecomeASelectionKey()
     {
         var (vm, feed, _) = Build();

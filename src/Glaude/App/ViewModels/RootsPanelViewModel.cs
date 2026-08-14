@@ -300,6 +300,43 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     private string? _selectedKey;
 
+    /// <summary>
+    /// The filesystem path of the root that <see cref="SelectedKey"/> belongs to - the root's own
+    /// path if a root row is selected, or the owning root's path if a session/agent row under it is
+    /// selected - or null if nothing is selected or the selection has since disappeared. Root node
+    /// keys are already the root's real path (see <see cref="BuildRootNode"/>), so no additional
+    /// path resolution is needed.
+    ///
+    /// <para>Consumed by "Create session" (P2-T6/MainWindow) to default a new session's working
+    /// directory to whichever root the user currently has selected in this panel, rather than
+    /// making them re-pick a folder that's already visible on screen.</para>
+    /// </summary>
+    public string? SelectedRootPath
+    {
+        get
+        {
+            if (string.IsNullOrEmpty(SelectedKey))
+            {
+                return null;
+            }
+
+            foreach (var root in Roots)
+            {
+                if (root.Key == SelectedKey)
+                {
+                    return root.Key;
+                }
+
+                if (EnumerateAll(root.Children).Any(n => n.Key == SelectedKey))
+                {
+                    return root.Key;
+                }
+            }
+
+            return null;
+        }
+    }
+
     /// <summary>Number of configured roots in the last snapshot.</summary>
     [ObservableProperty]
     private int _rootCount;

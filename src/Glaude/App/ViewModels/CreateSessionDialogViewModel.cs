@@ -31,6 +31,7 @@ public sealed partial class CreateSessionDialogViewModel : ObservableObject
     private readonly Func<Guid> _guidFactory;
     private readonly Func<IReadOnlyList<string>, string?, PtyLaunchSpec> _specBuilder;
     private readonly Func<PtyLaunchSpec, PtySession> _sessionStarter;
+    private readonly IFolderPickerService _folderPicker;
 
     /// <summary>
     /// Shown next to the extra-args field, and read by the dialog's code-behind to set the warning
@@ -63,17 +64,26 @@ public sealed partial class CreateSessionDialogViewModel : ObservableObject
     [ObservableProperty]
     private string? _errorMessage;
 
+    /// <param name="initialWorkingDirectory">Pre-fills <see cref="WorkingDirectory"/> - typically panel
+    /// A's currently selected root (<c>RootsPanelViewModel.SelectedRootPath</c>), so the new session
+    /// starts wherever the user is already looking rather than defaulting to some unrelated directory.
+    /// Still user-editable via <see cref="BrowseWorkingDirectoryCommand"/> or direct text entry before
+    /// confirming.</param>
     public CreateSessionDialogViewModel(
         Func<Guid>? guidFactory = null,
         Func<IReadOnlyList<string>, string?, PtyLaunchSpec>? specBuilder = null,
-        Func<PtyLaunchSpec, PtySession>? sessionStarter = null)
+        Func<PtyLaunchSpec, PtySession>? sessionStarter = null,
+        IFolderPickerService? folderPicker = null,
+        string? initialWorkingDirectory = null)
     {
         _guidFactory = guidFactory ?? Guid.NewGuid;
         _specBuilder = specBuilder ?? DefaultSpecBuilder;
         _sessionStarter = sessionStarter ?? (spec => PtySession.Start(spec));
+        _folderPicker = folderPicker ?? new WinFormsFolderPickerService();
 
         _selectedModelFamily = ModelFamilies[0];
         _selectedEffortLevel = EffortLevels[0];
+        _workingDirectory = initialWorkingDirectory;
     }
 
     /// <summary>Model-family vocabulary - exactly <see cref="ModelBadgeTable.Families"/>, the same
@@ -153,9 +163,15 @@ public sealed partial class CreateSessionDialogViewModel : ObservableObject
         ErrorMessage = null;
         try
         {
+            var workingDirectory = string.IsNullOrWhiteSpace(WorkingDirectory) ? null : WorkingDirectory;
+            if (workingDirectory is not null && !Directory.Exists(workingDirectory))
+            {
+                ErrorMessage = $"Working directory '{workingDirectory}' does not exist.";
+                return;
+            }
+
             var sessionId = _guidFactory();
             var arguments = BuildArguments(sessionId);
-            var workingDirectory = string.IsNullOrWhiteSpace(WorkingDirectory) ? null : WorkingDirectory;
             var spec = _specBuilder(arguments, workingDirectory);
             var session = _sessionStarter(spec);
 
@@ -172,6 +188,18 @@ public sealed partial class CreateSessionDialogViewModel : ObservableObject
 
     [RelayCommand]
     private void Cancel() => RequestClose?.Invoke(this, false);
+
+    /// <summary>Lets the user override the pre-filled/panel-A-derived working directory, reusing the
+    /// same folder picker panel A's "Add root…" already uses rather than a second dialog type.</summary>
+    [RelayCommand]
+    private void BrowseWorkingDirectory()
+    {
+        string? folder = _folderPicker.PickFolder("Select a working directory for this session");
+        if (!string.IsNullOrWhiteSpace(folder))
+        {
+            WorkingDirectory = folder;
+        }
+    }
 
     private static PtyLaunchSpec DefaultSpecBuilder(IReadOnlyList<string> arguments, string? workingDirectory) =>
         PtySession.CreateClaudeSpec(arguments, workingDirectory);

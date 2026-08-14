@@ -272,4 +272,151 @@ public class CreateSessionDialogViewModelTests
     };
 
     private static PtySession FakeStarter(PtyLaunchSpec spec) => PtySession.Start(spec);
+
+    // ---------------------------------------------------------------------------------------------
+    // Working directory: pre-filled from panel A's selection, still overridable via Browse or direct
+    // text entry, and validated before a launch is attempted.
+    // ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void InitialWorkingDirectory_PreFillsWorkingDirectory()
+    {
+        var viewModel = new CreateSessionDialogViewModel(initialWorkingDirectory: @"C:\projects\selected-root");
+
+        Assert.Equal(@"C:\projects\selected-root", viewModel.WorkingDirectory);
+    }
+
+    [Fact]
+    public void NoInitialWorkingDirectory_LeavesWorkingDirectoryNull()
+    {
+        var viewModel = new CreateSessionDialogViewModel();
+
+        Assert.Null(viewModel.WorkingDirectory);
+    }
+
+    [Fact]
+    public void BrowseWorkingDirectoryCommand_UpdatesWorkingDirectory_WhenAFolderIsPicked()
+    {
+        var picker = new FakeFolderPicker(@"C:\browsed\folder");
+        var viewModel = new CreateSessionDialogViewModel(folderPicker: picker)
+        {
+            WorkingDirectory = @"C:\projects\selected-root",
+        };
+
+        viewModel.BrowseWorkingDirectoryCommand.Execute(null);
+
+        Assert.Equal(@"C:\browsed\folder", viewModel.WorkingDirectory);
+    }
+
+    [Fact]
+    public void BrowseWorkingDirectoryCommand_LeavesWorkingDirectoryUnchanged_WhenCancelled()
+    {
+        var picker = new FakeFolderPicker(null);
+        var viewModel = new CreateSessionDialogViewModel(folderPicker: picker)
+        {
+            WorkingDirectory = @"C:\projects\selected-root",
+        };
+
+        viewModel.BrowseWorkingDirectoryCommand.Execute(null);
+
+        Assert.Equal(@"C:\projects\selected-root", viewModel.WorkingDirectory);
+    }
+
+    [Fact]
+    public void Confirm_WorkingDirectoryDoesNotExist_SetsErrorMessageAndNeverStartsASession()
+    {
+        var starterCalled = false;
+        var viewModel = new CreateSessionDialogViewModel(
+            specBuilder: (arguments, workingDirectory) => FakeSpec(),
+            sessionStarter: spec => { starterCalled = true; return FakeStarter(spec); })
+        {
+            WorkingDirectory = @"C:\this\path\does\not\exist\glaude-test",
+        };
+
+        var closeRaised = false;
+        viewModel.RequestClose += (_, _) => closeRaised = true;
+
+        viewModel.ConfirmCommand.Execute(null);
+
+        Assert.False(closeRaised);
+        Assert.False(starterCalled);
+        Assert.Null(viewModel.LastStartedSession);
+        Assert.Contains(@"C:\this\path\does\not\exist\glaude-test", viewModel.ErrorMessage);
+    }
+
+    [Fact]
+    public void Confirm_BlankWorkingDirectory_IsTreatedAsNotSet_NoExistenceCheck()
+    {
+        var viewModel = new CreateSessionDialogViewModel(
+            specBuilder: (arguments, workingDirectory) => FakeSpec(),
+            sessionStarter: FakeStarter)
+        {
+            WorkingDirectory = "   ",
+        };
+
+        viewModel.ConfirmCommand.Execute(null);
+
+        Assert.Null(viewModel.ErrorMessage);
+        Assert.NotNull(viewModel.LastStartedSession);
+        viewModel.LastStartedSession!.Dispose();
+    }
+
+    [Fact]
+    public async System.Threading.Tasks.Task Confirm_WorkingDirectory_ActuallyReachesTheRealChildProcess()
+    {
+        var workingDirectory = Directory.CreateTempSubdirectory("glaude-create-session-wd-test-").FullName;
+        try
+        {
+            var viewModel = new CreateSessionDialogViewModel(
+                specBuilder: (arguments, wd) => new PtyLaunchSpec
+                {
+                    ExecutablePath = CmdPath(),
+                    Arguments = arguments,
+                    WorkingDirectory = wd,
+                },
+                sessionStarter: FakeStarter,
+                initialWorkingDirectory: workingDirectory);
+
+            viewModel.ConfirmCommand.Execute(null);
+            var session = viewModel.LastStartedSession!;
+            try
+            {
+                var bytes = System.Text.Encoding.UTF8.GetBytes("cd\r");
+                session.Write(bytes);
+
+                var accumulated = new System.Text.StringBuilder();
+                var deadline = DateTime.UtcNow.AddSeconds(10);
+                while (!accumulated.ToString().Contains(workingDirectory, StringComparison.OrdinalIgnoreCase) && DateTime.UtcNow < deadline)
+                {
+                    if (session.Output.TryRead(out var chunk))
+                    {
+                        accumulated.Append(chunk);
+                    }
+                    else
+                    {
+                        await System.Threading.Tasks.Task.Delay(25);
+                    }
+                }
+
+                Assert.Contains(workingDirectory, accumulated.ToString(), StringComparison.OrdinalIgnoreCase);
+            }
+            finally
+            {
+                session.Dispose();
+            }
+        }
+        finally
+        {
+            Directory.Delete(workingDirectory, recursive: true);
+        }
+    }
+
+    private sealed class FakeFolderPicker : Glaude.App.Services.IFolderPickerService
+    {
+        private readonly string? _result;
+
+        public FakeFolderPicker(string? result) => _result = result;
+
+        public string? PickFolder(string description) => _result;
+    }
 }

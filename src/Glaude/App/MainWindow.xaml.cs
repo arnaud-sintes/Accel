@@ -176,7 +176,11 @@ public partial class MainWindow : Window
     /// </summary>
     private void CreateSession_Click(object sender, RoutedEventArgs e)
     {
-        var viewModel = new CreateSessionDialogViewModel();
+        // Defaults the new session's working directory to whichever root the user currently has
+        // selected in panel A (a root row itself, or a session/agent row under one) - see
+        // RootsPanelViewModel.SelectedRootPath. Null (nothing selected, or scaffolding/no rootsPanel)
+        // just leaves the field blank; the user can still type or browse to a folder in the dialog.
+        var viewModel = new CreateSessionDialogViewModel(initialWorkingDirectory: RootsPanel?.SelectedRootPath);
         var dialog = new CreateSessionDialog(viewModel) { Owner = this };
         dialog.ShowDialog();
 
