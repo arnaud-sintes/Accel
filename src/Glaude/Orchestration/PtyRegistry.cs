@@ -240,7 +240,7 @@ public interface IPtyProcessObserver : IDisposable
 /// <see cref="SessionEnded"/> is raised on a thread-pool thread - marshal to the UI yourself. A throwing
 /// subscriber is swallowed rather than allowed to abort a teardown.</para>
 /// </summary>
-public sealed class PtyRegistry : IDisposable
+public sealed class PtyRegistry : IPtySessionHost, IDisposable
 {
     /// <summary>
     /// The process-wide registry, created on first use - same convention (and same rationale) as

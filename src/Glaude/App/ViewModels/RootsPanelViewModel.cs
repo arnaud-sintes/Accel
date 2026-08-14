@@ -38,6 +38,8 @@ public enum RootsPanelNodeKind
 public sealed partial class RootsPanelNodeViewModel : ObservableObject
 {
     private readonly RootsPanelViewModel? _owner;
+    private SessionVisualState _visualState;
+    private string _automationDescription = string.Empty;
 
     public RootsPanelNodeViewModel(
         string key,
@@ -45,7 +47,8 @@ public sealed partial class RootsPanelNodeViewModel : ObservableObject
         RootsPanelNodeKind kind,
         MonitorNodeState state,
         MonitorRowColumns columns,
-        RootsPanelViewModel? owner = null)
+        RootsPanelViewModel? owner = null,
+        bool isFocused = false)
     {
         Key = key ?? string.Empty;
         Text = text ?? string.Empty;
@@ -53,8 +56,9 @@ public sealed partial class RootsPanelNodeViewModel : ObservableObject
         State = state;
         Columns = columns ?? MonitorRowColumns.Empty;
         _owner = owner;
+        _isFocused = isFocused;
 
-        VisualState = SessionVisualStateResolver.Resolve(IsRunning, IsFocused);
+        _visualState = SessionVisualStateResolver.Resolve(IsRunning, IsFocused);
 
         ModelBadge = (Kind == RootsPanelNodeKind.Session || Kind == RootsPanelNodeKind.Agent) && !string.IsNullOrEmpty(Columns.Model)
             ? ModelBadgeTable.Resolve(Columns.Model)
@@ -64,7 +68,7 @@ public sealed partial class RootsPanelNodeViewModel : ObservableObject
         EffortLevel = ShowModelBadge ? EffortBarLevel.Resolve(Columns.Effort) : 0;
         ShowEffortBars = ShowModelBadge;
 
-        AutomationDescription = BuildAutomationDescription();
+        _automationDescription = BuildAutomationDescription();
         TooltipText = BuildTooltipText();
     }
 
@@ -90,19 +94,35 @@ public sealed partial class RootsPanelNodeViewModel : ObservableObject
     public bool IsRunning => State == MonitorNodeState.Live;
 
     /// <summary>
-    /// The "IsFocused" half of the same axis. <b>Not really wired yet</b>: a real focus signal is
-    /// <c>ISessionSelectionService</c> (P3-T1), a later task - this property is a deliberate,
-    /// explicitly-labelled stub that always returns <c>false</c> until then. It is not a fake
-    /// selection service; it carries no state and nothing writes to it. Wiring P3-T1 to actually
-    /// drive this - or replacing it with a real bound property once that service exists - is that
-    /// later task's job, not this one's.
+    /// The "IsFocused" half of the same axis - <b>wired for real as of P3-T1</b>: it is
+    /// <c>Key == ISessionSelectionService.FocusedSessionId</c> (case-insensitive), pushed in by
+    /// <see cref="RootsPanelViewModel"/> both at construction and whenever the selection service
+    /// broadcasts a change. Only session rows can ever match, since the focused id is a session GUID.
+    ///
+    /// <para>Setting it re-derives <see cref="VisualState"/> and <see cref="AutomationDescription"/> and
+    /// raises change notifications for both, so panel A's four-state style (and its screen-reader text)
+    /// follow a selection change live, without a full tree rebuild. Panel C's <c>TabsViewModel</c> remains
+    /// the only writer of the selection itself; this setter is a projection of it, not a second
+    /// authority.</para>
     /// </summary>
-    public bool IsFocused => false;
+    [ObservableProperty]
+    private bool _isFocused;
+
+    partial void OnIsFocusedChanged(bool value)
+    {
+        VisualState = SessionVisualStateResolver.Resolve(IsRunning, value);
+        AutomationDescription = BuildAutomationDescription();
+    }
 
     /// <summary>Glyph/weight/colour/automation-name for this row's current IsRunning x IsFocused
-    /// combination - see <see cref="SessionVisualStateResolver"/>. Computed once at construction
-    /// like every other property here, since a rebuild always creates fresh node instances.</summary>
-    public SessionVisualState VisualState { get; }
+    /// combination - see <see cref="SessionVisualStateResolver"/>. Re-derived when
+    /// <see cref="IsFocused"/> changes (<see cref="IsRunning"/> only ever changes via a rebuild, which
+    /// creates fresh nodes).</summary>
+    public SessionVisualState VisualState
+    {
+        get => _visualState;
+        private set => SetProperty(ref _visualState, value);
+    }
 
     /// <summary>The letter-in-chip model badge (O/S/H/F/?) for this row, per
     /// <see cref="ModelBadgeTable"/> - only meaningful for <see cref="RootsPanelNodeKind.Session"/>
@@ -124,7 +144,11 @@ public sealed partial class RootsPanelNodeViewModel : ObservableObject
     /// <c>AutomationProperties.Name</c> - never rely on colour alone for accessibility (P1-T4's
     /// hard requirement), so screen readers get the same running/focused information sighted
     /// users get from the glyph/weight/colour.</summary>
-    public string AutomationDescription { get; }
+    public string AutomationDescription
+    {
+        get => _automationDescription;
+        private set => SetProperty(ref _automationDescription, value);
+    }
 
     /// <summary>Hover tooltip text: session id + context-window size, both already available on
     /// <see cref="Columns"/> (e.g. "Session 5604b0d8… — 12.3% of 1M (assumed)").</summary>
@@ -215,6 +239,11 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
     private readonly IUserConfirmationService _confirmation;
     private readonly string _configPath;
 
+    /// <summary>P3-T1's focus signal, read-only (panel C writes it). Null in the pure-scaffolding /
+    /// pre-P3 construction paths, in which case every row's <c>IsFocused</c> simply stays false - the
+    /// same behaviour this panel had while <c>IsFocused</c> was a stub.</summary>
+    private readonly ISessionSelectionService? _selection;
+
     /// <summary>
     /// P1-T3b's root add/remove commands need a folder picker, a confirmation prompt, and the
     /// <c>glaude-folders.json</c> path to mutate - all three are optional constructor parameters
@@ -227,16 +256,23 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
         IUiThreadDispatcher dispatcher,
         IFolderPickerService? folderPicker = null,
         IUserConfirmationService? confirmation = null,
-        string? configPath = null)
+        string? configPath = null,
+        ISessionSelectionService? selection = null)
     {
         _feed = feed ?? throw new ArgumentNullException(nameof(feed));
         _dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
         _folderPicker = folderPicker ?? new WinFormsFolderPickerService();
         _confirmation = confirmation ?? new MessageBoxConfirmationService();
         _configPath = configPath ?? Glaude.Server.RootFoldersConfig.DefaultCandidatePaths()[0];
+        _selection = selection;
 
         _feed.SnapshotAvailable += OnSnapshotAvailable;
         _feed.SnapshotFailed += OnSnapshotFailed;
+
+        // P3-T1: read-only consumer of the selection hub - panel C is the only writer. The
+        // subscription is weak (see SessionSelectionService), so a panel that is dropped without
+        // Dispose still cannot be resurrected by the service; Dispose unsubscribes anyway.
+        _selection?.Subscribe(this, OnFocusedSessionChanged);
 
         // A feed that already has a snapshot (e.g. Start() was called before this panel was
         // constructed) must not leave the panel blank until the next change signal.
@@ -257,8 +293,10 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
     private string _statusText = "Waiting for telemetry…";
 
     /// <summary>Stable key of the currently selected node (root path / session id / agent id), or
-    /// null. Preserved across rebuilds. A future <c>ISessionSelectionService</c> (P3-T1) becomes the
-    /// authority for the focused session; this property is only panel A's own tree selection.</summary>
+    /// null. Preserved across rebuilds. <see cref="ISessionSelectionService"/> (P3-T1, written only by
+    /// panel C) is the authority for the <i>focused</i> session and drives each node's
+    /// <see cref="RootsPanelNodeViewModel.IsFocused"/>; this property is only panel A's own tree
+    /// selection, which is a different thing (clicking a row does not steal focus from panel C).</summary>
     [ObservableProperty]
     private string? _selectedKey;
 
@@ -351,6 +389,33 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
         }
     });
 
+    /// <summary>
+    /// P3-T1: the focused session changed in panel C. Re-applies <c>IsFocused</c> to every existing row
+    /// in place - no rebuild, no telemetry round trip - so panel A's highlight follows a tab switch
+    /// immediately. Marshalled through the dispatcher for the same reason snapshots are: the message is
+    /// delivered on whichever thread wrote the selection.
+    /// </summary>
+    private void OnFocusedSessionChanged(FocusedSessionChangedMessage message) => _dispatcher.Post(() =>
+    {
+        if (!_disposed)
+        {
+            ApplyFocus();
+        }
+    });
+
+    /// <summary>Sets <c>IsFocused</c> on every row from the selection service (all false when there is no
+    /// service). Called after every rebuild and on every focus change.</summary>
+    private void ApplyFocus()
+    {
+        foreach (var node in EnumerateAll(Roots))
+        {
+            node.IsFocused = IsNodeFocused(node.Key);
+        }
+    }
+
+    private bool IsNodeFocused(string key) =>
+        _selection is not null && !string.IsNullOrEmpty(key) && _selection.IsFocused(key);
+
     private void OnSnapshotFailed(string message) => _dispatcher.Post(() =>
     {
         if (!_disposed)
@@ -387,6 +452,11 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
             {
                 Roots.Add(BuildRootNode(tree.Unattributed));
             }
+
+            // P3-T1: every rebuild creates fresh node instances, so the focus flag has to be re-applied
+            // to them from the selection service (panel C's, the single authority) - exactly like
+            // expansion and selection state below, and for the same reason.
+            ApplyFocus();
 
             var keysToExpand = MonitorTreeExpansion.ComputeKeysToExpand(tree, expandedKeys);
             keysToExpand.UnionWith(MonitorTreeExpansion.ComputeDefaultExpansionForNewKeys(tree, _everSeenKeys));
@@ -563,5 +633,6 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
         _disposed = true;
         _feed.SnapshotAvailable -= OnSnapshotAvailable;
         _feed.SnapshotFailed -= OnSnapshotFailed;
+        _selection?.Unsubscribe(this);
     }
 }

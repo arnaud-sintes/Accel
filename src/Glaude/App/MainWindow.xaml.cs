@@ -1,7 +1,6 @@
 namespace Glaude.App;
 
 using System;
-using System.Collections.Generic;
 using System.Windows;
 using Glaude.App.ViewModels;
 using Glaude.Orchestration;
@@ -32,21 +31,43 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// P2-T5b: <paramref name="ptyRegistry"/>/<paramref name="ptyWebSocketPort"/> are this task's
-    /// own minimal stopgap for getting a `tabId` + a reachable <c>/pty/{tabId}</c> WebSocket route
-    /// end to end, ahead of Phase 3's real <c>PtyRegistry</c>/<c>TabsViewModel</c> — see
-    /// <see cref="CreateSession_Click"/>. Both are optional and default to "terminal wiring
-    /// disabled" (null registry), which is what every existing caller of the single-argument
-    /// constructor still gets — this constructor overload does not change behaviour for anything
-    /// that predates P2-T5b.
+    /// P2-T5b's overload, kept so nothing that predates P3-T1 has to change: no tab strip and no session
+    /// registry means the "Create session" menu item can still launch and attach a session, it just has
+    /// no tab (see <see cref="CreateSession_Click"/>).
     /// </summary>
-    public MainWindow(RootsPanelViewModel? rootsPanel, PtyRouteRegistry? ptyRegistry, int ptyWebSocketPort)
+    public MainWindow(RootsPanelViewModel? rootsPanel, PtyRouteRegistry? ptyRouteRegistry, int ptyWebSocketPort)
+        : this(rootsPanel, ptyRouteRegistry, ptyWebSocketPort, null, null)
+    {
+    }
+
+    /// <summary>
+    /// P3-T1's real composition: <paramref name="tabs"/> is panel C's tab strip (the only writer of
+    /// <c>ISessionSelectionService</c>) and <paramref name="sessionRegistry"/> is the app-lifetime
+    /// <see cref="PtyRegistry"/> that owns every live session's lifetime. Together they replace P2-T6's
+    /// stopgap <c>List&lt;(tabId, session)&gt;</c> ownership bridge, which disposed sessions itself and is
+    /// gone from this file entirely.
+    ///
+    /// <para><paramref name="ptyRouteRegistry"/>/<paramref name="ptyWebSocketPort"/> stay as P2-T5b left
+    /// them: the <c>tabId -&gt; IPtyEndpoint</c> map behind the <c>/pty/{tabId}</c> WebSocket route (a
+    /// different registry from <see cref="PtyRegistry"/> - that one owns process lifetime, this one owns
+    /// route reachability), plus the loopback port its Kestrel host is bound to. Every parameter is
+    /// optional and null degrades gracefully, so the designer/scaffolding paths still work.</para>
+    /// </summary>
+    public MainWindow(
+        RootsPanelViewModel? rootsPanel,
+        PtyRouteRegistry? ptyRouteRegistry,
+        int ptyWebSocketPort,
+        TabsViewModel? tabs,
+        PtyRegistry? sessionRegistry)
     {
         InitializeComponent();
 
         RootsPanel = rootsPanel;
-        _ptyRegistry = ptyRegistry;
+        Tabs = tabs;
+        _ptyRouteRegistry = ptyRouteRegistry;
         _ptyWebSocketPort = ptyWebSocketPort;
+        _sessionRegistry = sessionRegistry;
+
         if (rootsPanel is not null)
         {
             // Scoped to panel A only - deliberately not Window.DataContext, so the remaining
@@ -55,66 +76,72 @@ public partial class MainWindow : Window
             PanelA.DataContext = rootsPanel;
         }
 
+        if (tabs is not null)
+        {
+            PanelC.DataContext = tabs;
+
+            // Panel D hosts exactly ONE TerminalView, reattached per selected tab (see TabsViewModel's
+            // class remarks for why one-and-reattach beats one-control-per-tab). This is the only place
+            // that knows both the control and the port, so the attach hook is wired here rather than
+            // making the ViewModel aware of WPF.
+            tabs.AttachTerminalAsync = tabId => Terminal.AttachPtyAsync(tabId, _ptyWebSocketPort);
+        }
+
         Closed += (_, _) =>
         {
-            // P2-T6: temporary ownership bridge (see CreateSession_Click) - Phase 3's PtyRegistry
-            // is the real owner once it exists. Disposing here is what stops a session created
-            // through this menu item from outliving the window as an unreachable, un-disposed
-            // object (the child process itself is still safety-netted by GlaudeJobObject.Shared's
-            // kill-on-close regardless, but a graceful Dispose is still the right thing to attempt
-            // first).
-            foreach (var (tabId, session) in _sessionsPendingRegistry)
-            {
-                _ptyRegistry?.Unregister(tabId);
-                try
-                {
-                    session.Dispose();
-                }
-                catch
-                {
-                    // Best-effort only on the way out.
-                }
-            }
-
-            _sessionsPendingRegistry.Clear();
+            // No session teardown here any more: PtyRegistry is the single owner of PtySession.Dispose
+            // (P3-T2) and app-exit teardown is P3-T4's job (CloseAllAsync/Dispose around the app loop).
+            // This only drops the tab strip's registry subscription.
+            Tabs?.Dispose();
         };
     }
 
     /// <summary>Panel A's ViewModel, or null when the window was constructed as bare scaffolding.</summary>
     public RootsPanelViewModel? RootsPanel { get; }
 
+    /// <summary>Panel C's ViewModel (the tab strip), or null in the scaffolding paths.</summary>
+    public TabsViewModel? Tabs { get; }
+
     /// <summary>
-    /// P2-T5b/P2-T6 stopgap: the <c>tabId -&gt; IPtyEndpoint</c> registry backing whichever
-    /// <c>EventServer</c> instance's Kestrel host is actually listening (null means "no terminal
-    /// wiring available", e.g. the pure-scaffolding/ui-preview-without-a-server construction path).
+    /// The <c>tabId -&gt; IPtyEndpoint</c> registry backing whichever <c>EventServer</c> instance's
+    /// Kestrel host is actually listening (null means "no terminal wiring available", e.g. the
+    /// pure-scaffolding construction path).
     /// </summary>
-    private readonly PtyRouteRegistry? _ptyRegistry;
+    private readonly PtyRouteRegistry? _ptyRouteRegistry;
 
     /// <summary>The port that registry's owning Kestrel instance is bound to.</summary>
     private readonly int _ptyWebSocketPort;
 
     /// <summary>
-    /// P2-T6: sessions started through the "Create session" dialog before Phase 3's
-    /// <c>PtyRegistry</c>/<c>TabsViewModel</c> exist to actually own them. This is a deliberately
-    /// minimal, temporary bridge - not a registry - so a session created from this menu item is at
-    /// least reachable and disposed on window close rather than immediately unreferenced. Phase 3
-    /// replaces this list outright; nothing here is meant to survive that refactor. Each entry's
-    /// tabId is whatever it was registered under in <see cref="_ptyRegistry"/> (P2-T5b addition),
-    /// so window-close teardown can unregister it, not just dispose the session.
+    /// P3-T2's registry: the app-lifetime <c>tabId -&gt; PtySession</c> map and the only thing allowed to
+    /// dispose a session. Null in the scaffolding paths, in which case a created session is registered
+    /// for the route only and left for the job object to reap.
     /// </summary>
-    private readonly List<(string TabId, PtySession Session)> _sessionsPendingRegistry = new();
+    private readonly PtyRegistry? _sessionRegistry;
 
     /// <summary>
-    /// P2-T6: opens the "Create session" dialog modally. On confirm, the dialog's ViewModel has
-    /// already generated the session GUID, built the argv array, resolved/validated the launch spec,
-    /// and started a live <see cref="PtySession"/> (see <see cref="CreateSessionDialogViewModel.Confirm"/>) -
-    /// this handler's job is to keep that session reachable (<see cref="_sessionsPendingRegistry"/>)
-    /// until Phase 3 gives it a real owner, and — P2-T5b's addition — to register it under a fresh
-    /// tabId in <see cref="_ptyRegistry"/> (if one was supplied) and attach panel D's terminal to
-    /// it over the WebSocket route, so the newly created session is actually visible/interactive
-    /// rather than just alive in the background.
+    /// P2-T6 + P3-T1: opens the "Create session" dialog modally. On confirm, the dialog's ViewModel has
+    /// already generated the session GUID, built the argv array, resolved/validated the launch spec, and
+    /// started a live <see cref="PtySession"/> (see <see cref="CreateSessionDialogViewModel.Confirm"/>).
+    /// This handler now gives that session a real owner and a real tab:
+    /// <list type="number">
+    /// <item><b>tabId = the session GUID.</b> Deliberately <see cref="CreateSessionDialogViewModel.LastGeneratedSessionId"/>
+    /// rendered with <c>ToString()</c> - the same "D" (dashed) form the dialog passed to
+    /// <c>--session-id</c> - and not a second, unrelated <c>Guid.NewGuid()</c> as P2-T5b's stopgap used.
+    /// That equality is load-bearing rather than cosmetic: it is what lets panel A (whose session rows are
+    /// keyed by the transcript's session id, dashed) light up as focused when panel C selects a tab, and
+    /// it keeps the registry, the <c>/pty/{tabId}</c> route and `claude`'s own id one value instead of
+    /// three. The dashed form is required for the panel-A match; the id is still an unguessable GUID, so
+    /// the route's security posture is unchanged.</item>
+    /// <item><b>Registered with <see cref="PtyRegistry"/> first</b>, which takes ownership of disposal
+    /// (nothing in this file disposes a session any more), then with the route registry so the WebSocket
+    /// can reach it.</item>
+    /// <item><b>A tab is added to panel C</b>, which selects it, which writes the focused session id and
+    /// reattaches panel D's terminal to this session - so the attach happens through the ordinary
+    /// selection path, not a special create-time one.</item>
+    /// </list>
     /// </summary>
-    private async void CreateSession_Click(object sender, RoutedEventArgs e)
+    private void CreateSession_Click(object sender, RoutedEventArgs e)
     {
         var viewModel = new CreateSessionDialogViewModel();
         var dialog = new CreateSessionDialog(viewModel) { Owner = this };
@@ -125,27 +152,27 @@ public partial class MainWindow : Window
             return;
         }
 
-        string tabId = Guid.NewGuid().ToString("N");
-        _sessionsPendingRegistry.Add((tabId, session));
+        // The GUID the dialog already generated for --session-id IS the tabId (see this method's doc).
+        string tabId = (viewModel.LastGeneratedSessionId ?? Guid.NewGuid()).ToString();
 
-        if (_ptyRegistry is null)
+        try
         {
-            // No server/registry was supplied (e.g. the pure-scaffolding construction path) -
-            // the session is still started and kept reachable above, it is just not wired to
-            // panel D's terminal.
+            _sessionRegistry?.Register(tabId, session);
+        }
+        catch (Exception)
+        {
+            // Register only throws for a duplicate tabId (impossible for a fresh GUID) or a disposed
+            // registry (the app is shutting down - it has already started closing this session, see
+            // Register's own contract). Either way there is nothing useful to add to the UI here, and
+            // the session must not be disposed from this file.
             return;
         }
 
-        _ptyRegistry.RegisterSession(tabId, session);
-        try
-        {
-            await Terminal.AttachPtyAsync(tabId, _ptyWebSocketPort);
-        }
-        catch
-        {
-            // Best-effort: a failed attach (e.g. WebView2 not yet initialized) must not leave the
-            // session un-tracked or crash the UI thread - the session stays registered and
-            // reachable; the user can be given a retry affordance in a later phase.
-        }
+        _ptyRouteRegistry?.RegisterSession(tabId, session);
+
+        // Selecting the new tab is what attaches panel D (TabsViewModel.AttachTerminalAsync, wired in
+        // the constructor). Nothing is awaited: AddTab is synchronous and the attach is fire-and-forget
+        // by design, exactly as P2-T5b's own call site was.
+        Tabs?.AddTab(tabId, string.IsNullOrWhiteSpace(viewModel.DisplayName) ? null : viewModel.DisplayName);
     }
 }

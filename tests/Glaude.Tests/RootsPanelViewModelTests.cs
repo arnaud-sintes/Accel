@@ -31,6 +31,17 @@ public class RootsPanelViewModelTests
         return (new RootsPanelViewModel(feed, dispatcher), feed, dispatcher);
     }
 
+    /// <summary>P3-T1: panel A plus a real selection hub. The writer is what panel C would hold (tests
+    /// stand in for it), and the panel itself only ever gets the read-only interface.</summary>
+    private static (RootsPanelViewModel Vm, FakeTelemetryFeed Feed, Glaude.App.Services.SessionSelectionService Selection, Glaude.App.Services.ISessionSelectionWriter Writer) BuildWithSelection()
+    {
+        var feed = new FakeTelemetryFeed();
+        var dispatcher = new RecordingUiThreadDispatcher();
+        var selection = new Glaude.App.Services.SessionSelectionService();
+        var writer = selection.AcquireWriter();
+        return (new RootsPanelViewModel(feed, dispatcher, selection: selection), feed, selection, writer);
+    }
+
     private static RootsPanelNodeViewModel Node(RootsPanelViewModel vm, string key) =>
         Flatten(vm).Single(n => n.Key == key);
 
@@ -558,9 +569,13 @@ public class RootsPanelViewModelTests
         Assert.False(Node(vm, "s-old").IsRunning);
     }
 
+    // --- P3-T1: IsFocused is now driven by the real ISessionSelectionService (panel C writes it) ---
+
     [Fact]
-    public void IsFocused_IsAlwaysFalse_UntilP3T1WiresARealSelectionService()
+    public void IsFocused_IsFalseForEveryRow_WhenNoSelectionServiceIsSupplied()
     {
+        // The pre-P3 construction paths (and the WPF designer) pass no selection service; every row then
+        // behaves exactly as it did while IsFocused was a hard-coded stub.
         var (vm, feed, _) = Build();
         feed.Publish(TelemetryFixtures.Tree(new[]
         {
@@ -568,6 +583,136 @@ public class RootsPanelViewModelTests
         }));
 
         Assert.False(Node(vm, "s-live").IsFocused);
+    }
+
+    [Fact]
+    public void IsFocused_IsTrueOnlyForTheFocusedSessionRow()
+    {
+        var (vm, feed, selection, writer) = BuildWithSelection();
+        writer.SetFocused("s-focused");
+
+        feed.Publish(TelemetryFixtures.Tree(new[]
+        {
+            TelemetryFixtures.Root(
+                RootPath,
+                TelemetryFixtures.Session("s-focused", isLive: true),
+                TelemetryFixtures.Session("s-other", isLive: true)),
+        }));
+
+        Assert.True(Node(vm, "s-focused").IsFocused);
+        Assert.False(Node(vm, "s-other").IsFocused);
+        Assert.False(Node(vm, RootPath).IsFocused); // a root row can never match a session id
+        Assert.Equal("s-focused", selection.FocusedSessionId);
+    }
+
+    [Fact]
+    public void IsFocused_FollowsALaterSelectionChange_WithoutARebuild()
+    {
+        var (vm, feed, _, writer) = BuildWithSelection();
+        feed.Publish(TelemetryFixtures.Tree(new[]
+        {
+            TelemetryFixtures.Root(
+                RootPath,
+                TelemetryFixtures.Session("s-1", isLive: true),
+                TelemetryFixtures.Session("s-2", isLive: true)),
+        }));
+
+        var first = Node(vm, "s-1");
+        var second = Node(vm, "s-2");
+
+        writer.SetFocused("s-2");
+        Assert.False(first.IsFocused);
+        Assert.True(second.IsFocused);
+
+        writer.SetFocused("s-1");
+        Assert.True(first.IsFocused);
+        Assert.False(second.IsFocused);
+
+        writer.SetFocused(null);
+        Assert.False(first.IsFocused);
+        Assert.False(second.IsFocused);
+    }
+
+    [Fact]
+    public void FocusChange_UpdatesTheVisualStateAndAccessibilityText_AndRaisesNotifications()
+    {
+        var (vm, feed, _, writer) = BuildWithSelection();
+        feed.Publish(TelemetryFixtures.Tree(new[]
+        {
+            TelemetryFixtures.Root(RootPath, TelemetryFixtures.Session("s-1", isLive: true)),
+        }));
+
+        var node = Node(vm, "s-1");
+        var changed = new System.Collections.Generic.List<string?>();
+        node.PropertyChanged += (_, e) => changed.Add(e.PropertyName);
+
+        writer.SetFocused("s-1");
+
+        Assert.Equal(SessionVisualStateResolver.Resolve(isRunning: true, isFocused: true), node.VisualState);
+        Assert.Contains("focused", node.AutomationDescription, System.StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(nameof(RootsPanelNodeViewModel.IsFocused), changed);
+        Assert.Contains(nameof(RootsPanelNodeViewModel.VisualState), changed);
+        Assert.Contains(nameof(RootsPanelNodeViewModel.AutomationDescription), changed);
+    }
+
+    [Fact]
+    public void FocusSurvivesARebuild_BecauseFreshNodesAreReprojectedFromTheService()
+    {
+        var (vm, feed, _, writer) = BuildWithSelection();
+        writer.SetFocused("s-1");
+        var tree = TelemetryFixtures.Tree(new[]
+        {
+            TelemetryFixtures.Root(RootPath, TelemetryFixtures.Session("s-1", isLive: true)),
+        });
+
+        feed.Publish(tree);
+        feed.Publish(tree); // second snapshot -> brand-new node instances
+
+        Assert.True(Node(vm, "s-1").IsFocused);
+    }
+
+    [Fact]
+    public void FocusIsCaseInsensitive_BecauseTabIdsAndTranscriptIdsNeedNotAgreeOnHexCasing()
+    {
+        var (vm, feed, _, writer) = BuildWithSelection();
+        writer.SetFocused("5604B0D8-AAAA-BBBB-CCCC-DDDDDDDDDDDD");
+
+        feed.Publish(TelemetryFixtures.Tree(new[]
+        {
+            TelemetryFixtures.Root(RootPath, TelemetryFixtures.Session("5604b0d8-aaaa-bbbb-cccc-dddddddddddd", isLive: true)),
+        }));
+
+        Assert.True(Node(vm, "5604b0d8-aaaa-bbbb-cccc-dddddddddddd").IsFocused);
+    }
+
+    [Fact]
+    public void Dispose_StopsApplyingFurtherFocusChanges()
+    {
+        var (vm, feed, _, writer) = BuildWithSelection();
+        feed.Publish(TelemetryFixtures.Tree(new[]
+        {
+            TelemetryFixtures.Root(RootPath, TelemetryFixtures.Session("s-1", isLive: true)),
+        }));
+        var node = Node(vm, "s-1");
+
+        vm.Dispose();
+        writer.SetFocused("s-1");
+
+        Assert.False(node.IsFocused);
+    }
+
+    [Fact]
+    public void PanelA_OnlyEverReadsTheSelection_ItIsHandedTheReadOnlyInterface()
+    {
+        // The constructor parameter's type is the read interface, which has no mutator at all (see
+        // SessionSelectionServiceTests) - panel A structurally cannot steal panel C's write role.
+        var parameter = typeof(RootsPanelViewModel)
+            .GetConstructors()
+            .Single()
+            .GetParameters()
+            .Single(p => p.Name == "selection");
+
+        Assert.Equal(typeof(Glaude.App.Services.ISessionSelectionService), parameter.ParameterType);
     }
 
     [Fact]

@@ -285,8 +285,81 @@
                         <RowDefinition Height="*" MinHeight="60" />
                     </Grid.RowDefinitions>
 
+                    <!--
+                        Panel C - the tab strip (P3-T1), bound to TabsViewModel (set as PanelC's
+                        DataContext by MainWindow's constructor; null in the scaffolding case, where
+                        the empty-state hint below is what renders).
+
+                        A horizontal ListBox rather than a TabControl: panel D's content is a single
+                        shared TerminalView reattached per selection (see TabsViewModel's class
+                        remarks - a TabControl would want one content element per tab, i.e. one
+                        WebView2 per tab), so what is needed here is selection only, which is
+                        exactly what a ListBox with SelectedItem two-way bound gives. Visual polish
+                        (real tab shapes, close-on-middle-click, drag reorder) is explicitly not in
+                        P3-T1's scope.
+                    -->
                     <Border x:Name="PanelC" Grid.Row="0" BorderBrush="#FF808080" BorderThickness="0,0,0,1" Background="#FFE8E8E8">
-                        <TextBlock Text="Panel C — Tabs" Margin="8,6" VerticalAlignment="Center" />
+                        <Grid>
+                            <TextBlock Text="Panel C — Tabs (no sessions open)" Margin="8,6" VerticalAlignment="Center"
+                                       Foreground="#FF505050" FontSize="11"
+                                       Visibility="{Binding IsEmpty, Converter={StaticResource BoolToVis}, FallbackValue=Visible}" />
+                            <ListBox x:Name="TabsList" ItemsSource="{Binding Tabs}"
+                                     SelectedItem="{Binding SelectedTab, Mode=TwoWay}"
+                                     Background="Transparent" BorderThickness="0" Padding="4,2"
+                                     ScrollViewer.HorizontalScrollBarVisibility="Auto"
+                                     ScrollViewer.VerticalScrollBarVisibility="Disabled">
+                                <ListBox.ItemsPanel>
+                                    <ItemsPanelTemplate>
+                                        <StackPanel Orientation="Horizontal" />
+                                    </ItemsPanelTemplate>
+                                </ListBox.ItemsPanel>
+                                <ListBox.ItemContainerStyle>
+                                    <Style TargetType="ListBoxItem">
+                                        <Setter Property="Margin" Value="0,0,4,0" />
+                                        <Setter Property="Padding" Value="6,2" />
+                                        <!--
+                                            Same accessibility rule as panel A (P1-T4): the tab's
+                                            state is exposed as text, never only as styling - see
+                                            TabViewModel.AutomationDescription.
+                                        -->
+                                        <Setter Property="AutomationProperties.Name" Value="{Binding AutomationDescription}" />
+                                    </Style>
+                                </ListBox.ItemContainerStyle>
+                                <ListBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <StackPanel Orientation="Horizontal">
+                                            <TextBlock Text="{Binding Title}" MaxWidth="160"
+                                                       TextTrimming="CharacterEllipsis" VerticalAlignment="Center">
+                                                <TextBlock.Style>
+                                                    <Style TargetType="TextBlock">
+                                                        <Style.Triggers>
+                                                            <!-- Ended tabs stay in the strip (never vanish silently) but read as inactive. -->
+                                                            <DataTrigger Binding="{Binding HasEnded}" Value="True">
+                                                                <Setter Property="Foreground" Value="#FF757575" />
+                                                                <Setter Property="FontStyle" Value="Italic" />
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </TextBlock.Style>
+                                            </TextBlock>
+                                            <TextBlock Text="{Binding StatusSuffix}" Margin="4,0,0,0" FontSize="10"
+                                                       Foreground="#FF757575" VerticalAlignment="Center" />
+                                            <!--
+                                                Close goes through TabsViewModel.CloseTabCommand ->
+                                                PtyRegistry.CloseAsync. Nothing in the ViewModel layer
+                                                can dispose a PtySession (it never holds one).
+                                            -->
+                                            <Button Content="✕" Margin="6,0,0,0" Padding="3,0" FontSize="10"
+                                                    BorderThickness="0" Background="Transparent"
+                                                    ToolTip="Close this session"
+                                                    AutomationProperties.Name="Close session tab"
+                                                    Command="{Binding DataContext.CloseTabCommand, RelativeSource={RelativeSource AncestorType=ListBox}}"
+                                                    CommandParameter="{Binding}" />
+                                        </StackPanel>
+                                    </DataTemplate>
+                                </ListBox.ItemTemplate>
+                            </ListBox>
+                        </Grid>
                     </Border>
 
                     <!--

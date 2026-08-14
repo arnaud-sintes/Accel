@@ -62,6 +62,15 @@ if (args.Length > 0 && string.Equals(args[0], "terminal-e2e-smoke-test", StringC
     return Glaude.App.TerminalE2ESmokeTest.Run(Console.Out);
 }
 
+// P3-T1: hidden dev-only verb, same rationale and placement rules as the smoke tests above - proves the
+// real tab strip (panel C) drives ISessionSelectionService, panel D's reattach, panel A's IsFocused
+// highlight and PtyRegistry-routed tab close, against real child processes and real XAML bindings. No
+// unit test can establish any of that. Launches cmd.exe, never claude.exe.
+if (args.Length > 0 && string.Equals(args[0], "tabs-e2e-smoke-test", StringComparison.Ordinal))
+{
+    return Glaude.App.TabsE2ESmokeTest.Run(Console.Out);
+}
+
 // Runs the WPF shell scaffolding standalone, on its own STA thread (mirrors RunCombinedAsync's
 // existing WinForms STA thread below - this process's real Main is not STA, since the combined
 // app already needed WinForms on a dedicated thread rather than the process's own). Dev-only,
@@ -114,17 +123,32 @@ static void RunUiPreview(bool verify)
         new Glaude.App.Services.EventServerTelemetrySource(server),
         dispatcher,
         new Glaude.App.Services.DispatcherDebounceTimer(System.Windows.Threading.Dispatcher.CurrentDispatcher));
-    var rootsPanel = new Glaude.App.ViewModels.RootsPanelViewModel(feed, dispatcher);
+    // P3-T1's composition point: the selection hub is created here, its single write capability goes to
+    // panel C's TabsViewModel and nothing else, and panel A gets the read-only interface (locked-in
+    // decision 8 - TabsViewModel is the only writer of FocusedSessionId). PtyRegistry is constructed
+    // rather than taken from PtyRegistry.Shared so this dev verb owns and disposes its own sessions.
+    var selection = new Glaude.App.Services.SessionSelectionService();
+    var sessionRegistry = new Glaude.Orchestration.PtyRegistry();
+    var rootsPanel = new Glaude.App.ViewModels.RootsPanelViewModel(feed, dispatcher, selection: selection);
+    var tabs = new Glaude.App.ViewModels.TabsViewModel(sessionRegistry, selection.AcquireWriter(), dispatcher);
 
     var mainWindow = new Glaude.App.MainWindow(
         rootsPanel,
         ptyWebApp is not null ? server.PtySessions : null,
-        ptyPort);
+        ptyPort,
+        tabs,
+        sessionRegistry);
     mainWindow.Loaded += (_, _) => rootsPanel.Start();
     mainWindow.Closed += (_, _) =>
     {
         rootsPanel.Dispose();
         feed.Dispose();
+
+        // Interim (P3-T4 owns the real app-exit shutdown story): closing the registry is what stops a
+        // session created through the "Create session" menu item from outliving this preview - it closes
+        // every registered session through the one blessed path (dispose -> verify -> force-kill the
+        // tree). It replaces P2-T6's stopgap, which disposed sessions from MainWindow.Closed directly.
+        sessionRegistry.Dispose();
         if (ptyWebApp is not null)
         {
             try
@@ -193,6 +217,12 @@ static void RunUiPreview(bool verify)
 
                 Report("PanelB", mainWindow.PanelB);
                 Report("PanelC", mainWindow.PanelC);
+
+                // P3-T1: panel C's strip is bound and empty at startup (no sessions created in this
+                // non-interactive pass) - the real two-tab/selection/reattach proof is the dedicated
+                // `tabs-e2e-smoke-test` verb, which needs real child processes.
+                Console.WriteLine($"PanelC.Tabs: {tabs.Tabs.Count} (ListBox items: {mainWindow.TabsList.Items.Count}, empty-state visible: {mainWindow.TabsList.Items.Count == 0})");
+                Console.WriteLine($"Selection.FocusedSessionId: {selection.FocusedSessionId ?? "<null>"}");
                 Report("PanelD", mainWindow.PanelD);
                 Report("PanelE", mainWindow.PanelE);
 
