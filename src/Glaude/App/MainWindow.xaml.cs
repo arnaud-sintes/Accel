@@ -178,9 +178,16 @@ public partial class MainWindow : Window
     {
         // Defaults the new session's working directory to whichever root the user currently has
         // selected in panel A (a root row itself, or a session/agent row under one) - see
-        // RootsPanelViewModel.SelectedRootPath. Null (nothing selected, or scaffolding/no rootsPanel)
-        // just leaves the field blank; the user can still type or browse to a folder in the dialog.
-        var viewModel = new CreateSessionDialogViewModel(initialWorkingDirectory: RootsPanel?.SelectedRootPath);
+        // RootsPanelViewModel.SelectedRootPath - falling back to the first configured root that
+        // still exists on disk when nothing is selected. Deliberately never left null/blank here:
+        // an unset working directory has claude inherit Glaude's own process directory (its build
+        // output folder) as the child's cwd - not a real project, and not something the user has
+        // ever trusted - so Claude Code's first-run trust prompt blocks the session until someone
+        // notices and answers it inside the terminal, which made a freshly created session look
+        // like it had simply never started (reported bug: "no opened session visible in panel A").
+        // The dialog's own working-directory field is still fully editable/browsable before confirm.
+        var initialWorkingDirectory = RootsPanel?.SelectedRootPath ?? RootsPanel?.FirstAvailableRootPath;
+        var viewModel = new CreateSessionDialogViewModel(initialWorkingDirectory: initialWorkingDirectory);
         var dialog = new CreateSessionDialog(viewModel) { Owner = this };
         dialog.ShowDialog();
 

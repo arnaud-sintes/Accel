@@ -373,6 +373,38 @@ public class RootsPanelViewModelTests
     }
 
     [Fact]
+    public void FirstAvailableRootPath_ReturnsTheFirstRootThatExistsOnDisk()
+    {
+        var (vm, feed, _) = Build();
+        var realDir = System.IO.Path.GetTempPath();
+        feed.Publish(TelemetryFixtures.Tree(new[]
+        {
+            TelemetryFixtures.Root(OtherRootPath), // doesn't exist on disk
+            TelemetryFixtures.Root(realDir),
+        }));
+
+        Assert.Equal(realDir, vm.FirstAvailableRootPath);
+    }
+
+    [Fact]
+    public void FirstAvailableRootPath_IsNull_WhenNoConfiguredRootExistsOnDisk()
+    {
+        var (vm, feed, _) = Build();
+        feed.Publish(TelemetryFixtures.Tree(new[] { TelemetryFixtures.Root(OtherRootPath) }));
+
+        Assert.Null(vm.FirstAvailableRootPath);
+    }
+
+    [Fact]
+    public void FirstAvailableRootPath_IsNull_WhenNoRootsAreConfigured()
+    {
+        var (vm, feed, _) = Build();
+        feed.Publish(TelemetryFixtures.EmptyTree());
+
+        Assert.Null(vm.FirstAvailableRootPath);
+    }
+
+    [Fact]
     public void SelectingTheKeylessPlaceholderRow_DoesNotBecomeASelectionKey()
     {
         var (vm, feed, _) = Build();

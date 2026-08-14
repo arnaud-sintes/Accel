@@ -163,8 +163,19 @@ public sealed partial class CreateSessionDialogViewModel : ObservableObject
         ErrorMessage = null;
         try
         {
-            var workingDirectory = string.IsNullOrWhiteSpace(WorkingDirectory) ? null : WorkingDirectory;
-            if (workingDirectory is not null && !Directory.Exists(workingDirectory))
+            // A blank field is never passed through as null: PtySession/ConPtySession treat a null
+            // working directory as "inherit the parent process's own current directory" - which for
+            // Glaude.exe is its build output folder, not a real project and not anything the user has
+            // ever seen or trusted. Claude Code's first-run trust prompt then blocks the session until
+            // someone notices and answers it inside the terminal, which made a freshly created
+            // session look like it had simply never started (reported bug). MainWindow already
+            // defaults this field to panel A's selection or the first configured root before the
+            // dialog ever opens; this is the last-resort fallback for the case where neither exists
+            // (no roots configured at all) and the user confirmed without typing/browsing to one.
+            var workingDirectory = string.IsNullOrWhiteSpace(WorkingDirectory)
+                ? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
+                : WorkingDirectory;
+            if (!Directory.Exists(workingDirectory))
             {
                 ErrorMessage = $"Working directory '{workingDirectory}' does not exist.";
                 return;

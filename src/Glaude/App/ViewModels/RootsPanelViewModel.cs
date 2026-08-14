@@ -337,6 +337,24 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
         }
     }
 
+    /// <summary>
+    /// The first configured root that actually exists on disk, or null if there are none (no roots
+    /// configured at all, or every configured root has since been deleted/renamed). Filters out the
+    /// synthetic "(unattributed)" root node the same way <see cref="Directory.Exists"/> naturally
+    /// would - that placeholder key is never a real path.
+    ///
+    /// <para>Consumed by "Create session" (P2-T6/MainWindow) as the fallback default working
+    /// directory when nothing is selected in this panel (see <see cref="SelectedRootPath"/>) - never
+    /// leave a new session's working directory unset, since that has <c>claude</c> inherit Glaude's
+    /// own process directory (its build output folder) as the child's cwd, which is neither a
+    /// meaningful project root nor a folder the user has ever seen or trusted, and Claude Code's
+    /// first-run trust prompt then blocks the session indefinitely until someone notices and answers
+    /// it in the terminal - which is exactly what made a freshly created session look like it never
+    /// started at all.</para>
+    /// </summary>
+    public string? FirstAvailableRootPath =>
+        Roots.FirstOrDefault(r => r.Kind == RootsPanelNodeKind.Root && Directory.Exists(r.Key))?.Key;
+
     /// <summary>Number of configured roots in the last snapshot.</summary>
     [ObservableProperty]
     private int _rootCount;

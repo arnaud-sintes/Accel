@@ -345,10 +345,20 @@ public class CreateSessionDialogViewModelTests
     }
 
     [Fact]
-    public void Confirm_BlankWorkingDirectory_IsTreatedAsNotSet_NoExistenceCheck()
+    public void Confirm_BlankWorkingDirectory_FallsBackToUserProfile_NeverToNull()
     {
+        // A null working directory would have PtySession/ConPtySession inherit Glaude.exe's own
+        // current directory (its build output folder) as the child's cwd - not a real project, and
+        // not anything the user has ever trusted, which triggers Claude Code's first-run trust prompt
+        // and makes a freshly created session look like it never started. A blank field must never
+        // reach the spec builder as null.
+        string? receivedWorkingDirectory = "not set";
         var viewModel = new CreateSessionDialogViewModel(
-            specBuilder: (arguments, workingDirectory) => FakeSpec(),
+            specBuilder: (arguments, workingDirectory) =>
+            {
+                receivedWorkingDirectory = workingDirectory;
+                return FakeSpec();
+            },
             sessionStarter: FakeStarter)
         {
             WorkingDirectory = "   ",
@@ -358,6 +368,7 @@ public class CreateSessionDialogViewModelTests
 
         Assert.Null(viewModel.ErrorMessage);
         Assert.NotNull(viewModel.LastStartedSession);
+        Assert.Equal(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), receivedWorkingDirectory);
         viewModel.LastStartedSession!.Dispose();
     }
 
