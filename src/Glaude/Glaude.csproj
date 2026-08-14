@@ -12,6 +12,20 @@
     <InvariantGlobalization>true</InvariantGlobalization>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+
+    <!--
+      P1-T4: Microsoft.NET.Sdk.Web (needed only for the in-process Kestrel EventServer - this
+      app has no ASP.NET Core MVC controllers at all, see grep for AddControllers/ApplicationPart)
+      defaults GenerateMvcApplicationPartsAssemblyAttributes to true for any Exe output. That
+      target's discovery pass runs again inside the "wpftmp" temporary project MSBuild generates
+      to markup-compile XAML that references local (same-assembly) clr-namespace types - which
+      panel A's P1-T4 styling (Converters/Controls referenced from MainWindow.xaml) newly does -
+      and hits a long-standing SDK bug there (missing 'FusionName' metadata on
+      Microsoft.WindowsDesktop.App.Ref's Accessibility.dll reference-pack assembly), failing the
+      whole build. Disabling it is safe (nothing in this app uses MVC parts discovery) and avoids
+      the bug entirely rather than working around it per-XAML-file.
+    -->
+    <GenerateMvcApplicationPartsAssemblyAttributes>false</GenerateMvcApplicationPartsAssemblyAttributes>
   </PropertyGroup>
 
   <!--

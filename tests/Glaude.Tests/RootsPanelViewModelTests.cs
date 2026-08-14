@@ -380,6 +380,156 @@ public class RootsPanelViewModelTests
         Assert.All(Flatten(vm), n => Assert.False(n.IsExpanded));
     }
 
+    // --- P1-T3b: root add/remove commands ---
+
+    private static string NewFixtureConfigPath() =>
+        System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"glaude-folders-vm-test-{Guid.NewGuid():N}.json");
+
+    private static string NewFixtureFolderPath() =>
+        System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"glaude-root-vm-test-{Guid.NewGuid():N}");
+
+    [Fact]
+    public void AddRootCommand_WhenUserPicksAFolder_PersistsItAndRefreshesViaTheFeed()
+    {
+        var feed = new FakeTelemetryFeed();
+        var dispatcher = new RecordingUiThreadDispatcher();
+        var picker = new FakeFolderPickerService();
+        string configPath = NewFixtureConfigPath();
+        string folder = NewFixtureFolderPath();
+        picker.NextResult = folder;
+
+        var vm = new RootsPanelViewModel(feed, dispatcher, folderPicker: picker, configPath: configPath);
+
+        vm.AddRootCommand.Execute(null);
+
+        Assert.True(System.IO.Directory.Exists(folder));
+        Assert.Contains(folder, Glaude.Server.RootFoldersConfig.LoadFull(new[] { configPath }).Roots);
+        Assert.Equal(1, feed.RefreshRequestCount);
+
+        System.IO.Directory.Delete(folder, recursive: true);
+        System.IO.File.Delete(configPath);
+    }
+
+    [Fact]
+    public void AddRootCommand_WhenUserCancelsTheDialog_DoesNothing()
+    {
+        var feed = new FakeTelemetryFeed();
+        var dispatcher = new RecordingUiThreadDispatcher();
+        var picker = new FakeFolderPickerService { NextResult = null }; // cancelled
+        string configPath = NewFixtureConfigPath();
+
+        var vm = new RootsPanelViewModel(feed, dispatcher, folderPicker: picker, configPath: configPath);
+
+        vm.AddRootCommand.Execute(null);
+
+        Assert.Equal(0, feed.RefreshRequestCount);
+        Assert.False(System.IO.File.Exists(configPath));
+    }
+
+    [Fact]
+    public void RemoveRootCommand_WhenConfirmed_DereferencesTheRootButNeverTouchesDisk()
+    {
+        var feed = new FakeTelemetryFeed();
+        var dispatcher = new RecordingUiThreadDispatcher();
+        var confirmation = new FakeUserConfirmationService { NextResult = true };
+        string configPath = NewFixtureConfigPath();
+        string folder = NewFixtureFolderPath();
+        System.IO.Directory.CreateDirectory(folder);
+        string fileInFolder = System.IO.Path.Combine(folder, "keep-me.txt");
+        System.IO.File.WriteAllText(fileInFolder, "still here");
+        Glaude.App.Services.RootFolderEditor.AddRoot(configPath, folder);
+
+        var vm = new RootsPanelViewModel(feed, dispatcher, confirmation: confirmation, configPath: configPath);
+        feed.Publish(TelemetryFixtures.Tree(new[] { TelemetryFixtures.Root(folder) }));
+        var rootNode = vm.Roots[0];
+
+        vm.RemoveRootCommand.Execute(rootNode);
+
+        Assert.DoesNotContain(folder, Glaude.Server.RootFoldersConfig.LoadFull(new[] { configPath }).Roots);
+        Assert.Equal(1, feed.RefreshRequestCount);
+
+        // The critical data-safety assertion: the folder and its contents are untouched on disk.
+        Assert.True(System.IO.Directory.Exists(folder));
+        Assert.True(System.IO.File.Exists(fileInFolder));
+        Assert.Equal("still here", System.IO.File.ReadAllText(fileInFolder));
+
+        System.IO.Directory.Delete(folder, recursive: true);
+        System.IO.File.Delete(configPath);
+    }
+
+    [Fact]
+    public void RemoveRootCommand_WhenUserDeclinesConfirmation_LeavesTheConfigUntouched()
+    {
+        var feed = new FakeTelemetryFeed();
+        var dispatcher = new RecordingUiThreadDispatcher();
+        var confirmation = new FakeUserConfirmationService { NextResult = false }; // declined
+        string configPath = NewFixtureConfigPath();
+        string folder = NewFixtureFolderPath();
+        Glaude.App.Services.RootFolderEditor.AddRoot(configPath, folder);
+
+        var vm = new RootsPanelViewModel(feed, dispatcher, confirmation: confirmation, configPath: configPath);
+        feed.Publish(TelemetryFixtures.Tree(new[] { TelemetryFixtures.Root(folder) }));
+        var rootNode = vm.Roots[0];
+
+        vm.RemoveRootCommand.Execute(rootNode);
+
+        Assert.Contains(folder, Glaude.Server.RootFoldersConfig.LoadFull(new[] { configPath }).Roots);
+        Assert.Equal(0, feed.RefreshRequestCount);
+
+        System.IO.Directory.Delete(folder, recursive: true);
+        System.IO.File.Delete(configPath);
+    }
+
+    [Fact]
+    public void RemoveRootCommand_ConfirmationCopy_NeverContainsTheWordDelete()
+    {
+        var feed = new FakeTelemetryFeed();
+        var dispatcher = new RecordingUiThreadDispatcher();
+        var confirmation = new FakeUserConfirmationService { NextResult = false };
+        string configPath = NewFixtureConfigPath();
+        string folder = NewFixtureFolderPath();
+        Glaude.App.Services.RootFolderEditor.AddRoot(configPath, folder);
+
+        var vm = new RootsPanelViewModel(feed, dispatcher, confirmation: confirmation, configPath: configPath);
+        feed.Publish(TelemetryFixtures.Tree(new[] { TelemetryFixtures.Root(folder) }));
+
+        vm.RemoveRootCommand.Execute(vm.Roots[0]);
+
+        Assert.NotNull(confirmation.LastMessage);
+        Assert.DoesNotContain("delete", confirmation.LastMessage, StringComparison.OrdinalIgnoreCase);
+        Assert.NotNull(confirmation.LastTitle);
+        Assert.DoesNotContain("delete", confirmation.LastTitle, StringComparison.OrdinalIgnoreCase);
+
+        System.IO.Directory.Delete(folder, recursive: true);
+        System.IO.File.Delete(configPath);
+    }
+
+    [Fact]
+    public void RemoveRootCommand_ScopedAwayFromANonRootNode_DoesNothing()
+    {
+        var feed = new FakeTelemetryFeed();
+        var dispatcher = new RecordingUiThreadDispatcher();
+        var confirmation = new FakeUserConfirmationService { NextResult = true };
+        string configPath = NewFixtureConfigPath();
+        string folder = NewFixtureFolderPath();
+        Glaude.App.Services.RootFolderEditor.AddRoot(configPath, folder);
+
+        var vm = new RootsPanelViewModel(feed, dispatcher, confirmation: confirmation, configPath: configPath);
+        feed.Publish(TelemetryFixtures.Tree(new[]
+        {
+            TelemetryFixtures.Root(folder, TelemetryFixtures.Session("session-1")),
+        }));
+        var sessionNode = vm.Roots[0].Children[0];
+
+        vm.RemoveRootCommand.Execute(sessionNode);
+
+        Assert.Equal(0, confirmation.CallCount);
+        Assert.Contains(folder, Glaude.Server.RootFoldersConfig.LoadFull(new[] { configPath }).Roots);
+
+        System.IO.Directory.Delete(folder, recursive: true);
+        System.IO.File.Delete(configPath);
+    }
+
     [Fact]
     public void Dispose_StopsApplyingFurtherSnapshots()
     {
@@ -391,5 +541,121 @@ public class RootsPanelViewModelTests
 
         Assert.Single(vm.Roots);
         Assert.False(feed.HasSnapshotSubscribers);
+    }
+
+    // --- P1-T4: model/effort badges, running/focused visual state, accessibility text ---
+
+    [Fact]
+    public void LiveSession_IsRunningTrue_HistoricalSession_IsRunningFalse()
+    {
+        var (vm, feed, _) = Build();
+        feed.Publish(TelemetryFixtures.Tree(new[]
+        {
+            TelemetryFixtures.Root(RootPath, TelemetryFixtures.Session("s-live", isLive: true), TelemetryFixtures.Session("s-old")),
+        }));
+
+        Assert.True(Node(vm, "s-live").IsRunning);
+        Assert.False(Node(vm, "s-old").IsRunning);
+    }
+
+    [Fact]
+    public void IsFocused_IsAlwaysFalse_UntilP3T1WiresARealSelectionService()
+    {
+        var (vm, feed, _) = Build();
+        feed.Publish(TelemetryFixtures.Tree(new[]
+        {
+            TelemetryFixtures.Root(RootPath, TelemetryFixtures.Session("s-live", isLive: true)),
+        }));
+
+        Assert.False(Node(vm, "s-live").IsFocused);
+    }
+
+    [Fact]
+    public void SessionNode_ShowsAModelBadge_MatchingTheSonnetFixtureModelId()
+    {
+        var (vm, feed, _) = Build();
+        feed.Publish(TelemetryFixtures.Tree(new[]
+        {
+            TelemetryFixtures.Root(RootPath, TelemetryFixtures.Session("s-1", isLive: true)),
+        }));
+
+        var node = Node(vm, "s-1");
+        Assert.True(node.ShowModelBadge);
+        Assert.Equal("S", node.ModelBadge.Letter); // TelemetryFixtures.Session defaults ModelId to "claude-sonnet-5"
+        Assert.True(node.ModelBadge.Matched);
+    }
+
+    [Fact]
+    public void SessionNode_ShowsEffortBars_MatchingTheMediumFixtureEffort()
+    {
+        var (vm, feed, _) = Build();
+        feed.Publish(TelemetryFixtures.Tree(new[]
+        {
+            TelemetryFixtures.Root(RootPath, TelemetryFixtures.Session("s-1", isLive: true)),
+        }));
+
+        var node = Node(vm, "s-1");
+        Assert.True(node.ShowEffortBars);
+        Assert.Equal(2, node.EffortLevel); // TelemetryFixtures.Session defaults EffortLevel to "medium"
+    }
+
+    [Fact]
+    public void RootAndPlaceholderNodes_NeverShowModelOrEffortBadges()
+    {
+        var (vm, feed, _) = Build();
+        feed.Publish(TelemetryFixtures.Tree(new[] { TelemetryFixtures.Root(RootPath) }));
+
+        var rootNode = vm.Roots[0];
+        var placeholderNode = rootNode.Children[0];
+
+        Assert.False(rootNode.ShowModelBadge);
+        Assert.False(rootNode.ShowEffortBars);
+        Assert.False(placeholderNode.ShowModelBadge);
+        Assert.False(placeholderNode.ShowEffortBars);
+    }
+
+    [Fact]
+    public void AutomationDescription_MentionsRunningForALiveSession_AndIdleForAHistoricalOne()
+    {
+        var (vm, feed, _) = Build();
+        feed.Publish(TelemetryFixtures.Tree(new[]
+        {
+            TelemetryFixtures.Root(RootPath, TelemetryFixtures.Session("s-live", isLive: true), TelemetryFixtures.Session("s-old")),
+        }));
+
+        Assert.Contains("Running", Node(vm, "s-live").AutomationDescription);
+        Assert.Contains("Idle", Node(vm, "s-old").AutomationDescription);
+    }
+
+    [Fact]
+    public void TooltipText_IncludesSessionIdAndContextSummary()
+    {
+        var (vm, feed, _) = Build();
+        feed.Publish(TelemetryFixtures.Tree(new[]
+        {
+            TelemetryFixtures.Root(RootPath, TelemetryFixtures.Session("s-1", isLive: true)),
+        }));
+
+        var node = Node(vm, "s-1");
+        Assert.Contains(node.Columns.Id, node.TooltipText);
+        Assert.Contains(node.Columns.Context, node.TooltipText);
+    }
+
+    [Fact]
+    public void AgentNode_AlsoResolvesModelBadgeAndEffortBars()
+    {
+        var (vm, feed, _) = Build();
+        feed.Publish(TelemetryFixtures.Tree(new[]
+        {
+            TelemetryFixtures.Root(
+                RootPath,
+                TelemetryFixtures.Session("s-live", isLive: true, agents: new[] { TelemetryFixtures.Agent("agent-1") })),
+        }));
+
+        var agentNode = Node(vm, "agent-1");
+        Assert.True(agentNode.ShowModelBadge);
+        Assert.Equal("S", agentNode.ModelBadge.Letter); // TelemetryFixtures.Agent defaults ModelId to "claude-sonnet-5"
+        Assert.True(agentNode.ShowEffortBars);
+        Assert.Equal(2, agentNode.EffortLevel); // TelemetryFixtures.Agent defaults EffortLevel to "medium"
     }
 }

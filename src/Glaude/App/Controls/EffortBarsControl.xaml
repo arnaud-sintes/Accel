@@ -1,0 +1,17 @@
+<UserControl x:Class="Glaude.App.Controls.EffortBarsControl"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             SnapsToDevicePixels="True">
+    <!--
+        P1-T4: four stacked signal bars, increasing height left to right, next to the model
+        badge - Level (0-4, see EffortBarLevel.Resolve) controls how many are filled. Unfilled
+        bars stay visible as a hollow outline rather than disappearing, so "effort unknown"
+        (Level=0) is visibly different from "no control here at all".
+    -->
+    <StackPanel Orientation="Horizontal" VerticalAlignment="Bottom" Height="12" Width="16">
+        <Rectangle x:Name="Bar1" Width="2" Height="4" Margin="0,0,1,0" StrokeThickness="1" />
+        <Rectangle x:Name="Bar2" Width="2" Height="6" Margin="0,0,1,0" StrokeThickness="1" />
+        <Rectangle x:Name="Bar3" Width="2" Height="9" Margin="0,0,1,0" StrokeThickness="1" />
+        <Rectangle x:Name="Bar4" Width="2" Height="12" StrokeThickness="1" />
+    </StackPanel>
+</UserControl>

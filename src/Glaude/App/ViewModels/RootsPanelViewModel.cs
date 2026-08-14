@@ -53,6 +53,19 @@ public sealed partial class RootsPanelNodeViewModel : ObservableObject
         State = state;
         Columns = columns ?? MonitorRowColumns.Empty;
         _owner = owner;
+
+        VisualState = SessionVisualStateResolver.Resolve(IsRunning, IsFocused);
+
+        ModelBadge = (Kind == RootsPanelNodeKind.Session || Kind == RootsPanelNodeKind.Agent) && !string.IsNullOrEmpty(Columns.Model)
+            ? ModelBadgeTable.Resolve(Columns.Model)
+            : ModelBadge.Unmatched;
+        ShowModelBadge = Kind == RootsPanelNodeKind.Session || Kind == RootsPanelNodeKind.Agent;
+
+        EffortLevel = ShowModelBadge ? EffortBarLevel.Resolve(Columns.Effort) : 0;
+        ShowEffortBars = ShowModelBadge;
+
+        AutomationDescription = BuildAutomationDescription();
+        TooltipText = BuildTooltipText();
     }
 
     /// <summary>Stable id (root path / session id / agent id); empty for placeholder rows.</summary>
@@ -69,6 +82,54 @@ public sealed partial class RootsPanelNodeViewModel : ObservableObject
     /// <summary>The six-column projection (ID | Name | Type | Model | Effort | Context).</summary>
     public MonitorRowColumns Columns { get; }
 
+    /// <summary>Whether this row currently represents a live/running session or agent - the
+    /// "IsRunning" half of P1-T4 / locked-in decision 9's IsRunning x IsFocused visual-state axis.
+    /// Derived from <see cref="State"/>: both <see cref="MonitorNodeState.Historical"/> and
+    /// <see cref="MonitorNodeState.Stale"/> collapse onto "not running" for this axis - only
+    /// <see cref="MonitorNodeState.Live"/> counts as running.</summary>
+    public bool IsRunning => State == MonitorNodeState.Live;
+
+    /// <summary>
+    /// The "IsFocused" half of the same axis. <b>Not really wired yet</b>: a real focus signal is
+    /// <c>ISessionSelectionService</c> (P3-T1), a later task - this property is a deliberate,
+    /// explicitly-labelled stub that always returns <c>false</c> until then. It is not a fake
+    /// selection service; it carries no state and nothing writes to it. Wiring P3-T1 to actually
+    /// drive this - or replacing it with a real bound property once that service exists - is that
+    /// later task's job, not this one's.
+    /// </summary>
+    public bool IsFocused => false;
+
+    /// <summary>Glyph/weight/colour/automation-name for this row's current IsRunning x IsFocused
+    /// combination - see <see cref="SessionVisualStateResolver"/>. Computed once at construction
+    /// like every other property here, since a rebuild always creates fresh node instances.</summary>
+    public SessionVisualState VisualState { get; }
+
+    /// <summary>The letter-in-chip model badge (O/S/H/F/?) for this row, per
+    /// <see cref="ModelBadgeTable"/> - only meaningful for <see cref="RootsPanelNodeKind.Session"/>
+    /// and <see cref="RootsPanelNodeKind.Agent"/> rows; see <see cref="ShowModelBadge"/>.</summary>
+    public ModelBadge ModelBadge { get; }
+
+    /// <summary>Whether a model badge should render for this row at all (root/placeholder rows
+    /// never have a model).</summary>
+    public bool ShowModelBadge { get; }
+
+    /// <summary>1-4 stacked signal bars representing effort level (0 = unknown/unset), per
+    /// <see cref="EffortBarLevel"/>.</summary>
+    public int EffortLevel { get; }
+
+    /// <summary>Whether the effort-bar badge should render for this row at all.</summary>
+    public bool ShowEffortBars { get; }
+
+    /// <summary>Accessible text description of this row's state, for
+    /// <c>AutomationProperties.Name</c> - never rely on colour alone for accessibility (P1-T4's
+    /// hard requirement), so screen readers get the same running/focused information sighted
+    /// users get from the glyph/weight/colour.</summary>
+    public string AutomationDescription { get; }
+
+    /// <summary>Hover tooltip text: session id + context-window size, both already available on
+    /// <see cref="Columns"/> (e.g. "Session 5604b0d8… — 12.3% of 1M (assumed)").</summary>
+    public string TooltipText { get; }
+
     public ObservableCollection<RootsPanelNodeViewModel> Children { get; } = new();
 
     [ObservableProperty]
@@ -78,6 +139,33 @@ public sealed partial class RootsPanelNodeViewModel : ObservableObject
     private bool _isSelected;
 
     partial void OnIsSelectedChanged(bool value) => _owner?.OnNodeSelectionChanged(this, value);
+
+    private string BuildAutomationDescription()
+    {
+        string kindLabel = Kind switch
+        {
+            RootsPanelNodeKind.Root => "Root",
+            RootsPanelNodeKind.Session => "Session",
+            RootsPanelNodeKind.Agent => "Agent",
+            _ => "Row",
+        };
+
+        return Kind is RootsPanelNodeKind.Session or RootsPanelNodeKind.Agent
+            ? $"{kindLabel}: {Text}. {VisualState.AutomationName}."
+            : $"{kindLabel}: {Text}.";
+    }
+
+    private string BuildTooltipText()
+    {
+        if (!ShowModelBadge || string.IsNullOrEmpty(Columns.Id))
+        {
+            return Text;
+        }
+
+        return string.IsNullOrEmpty(Columns.Context)
+            ? $"Session {Columns.Id}"
+            : $"Session {Columns.Id} — {Columns.Context}";
+    }
 
     public override string ToString() => Text;
 }

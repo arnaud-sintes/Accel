@@ -217,3 +217,44 @@ internal static class TelemetryFixtures
 
     public static RootsTreeDto EmptyTree() => Tree();
 }
+
+/// <summary>P1-T3b test double for <see cref="IFolderPickerService"/>: returns a preset path (or
+/// null, standing in for the user cancelling the dialog) and records how many times it was
+/// invoked, with no real <c>FolderBrowserDialog</c> ever appearing.</summary>
+internal sealed class FakeFolderPickerService : IFolderPickerService
+{
+    public string? NextResult { get; set; }
+
+    public int CallCount { get; private set; }
+
+    public string? LastDescription { get; private set; }
+
+    public string? PickFolder(string description)
+    {
+        CallCount++;
+        LastDescription = description;
+        return NextResult;
+    }
+}
+
+/// <summary>P1-T3b test double for <see cref="IUserConfirmationService"/>: returns a preset
+/// yes/no and records the exact message/title shown, with no real <c>MessageBox</c> ever
+/// appearing.</summary>
+internal sealed class FakeUserConfirmationService : IUserConfirmationService
+{
+    public bool NextResult { get; set; } = true;
+
+    public int CallCount { get; private set; }
+
+    public string? LastMessage { get; private set; }
+
+    public string? LastTitle { get; private set; }
+
+    public bool Confirm(string message, string title)
+    {
+        CallCount++;
+        LastMessage = message;
+        LastTitle = title;
+        return NextResult;
+    }
+}

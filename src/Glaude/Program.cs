@@ -25,6 +25,17 @@ if (args.Length > 0 && string.Equals(args[0], "ui-preview", StringComparison.Ord
 // see the `ui-preview` check above for why this exists.
 static void RunUiPreview(bool verify)
 {
+    if (verify)
+    {
+        // P1-T4 verification: WPF binding errors ("System.Windows.Data Error") normally only go
+        // to OutputDebugString, invisible to a plain console run - route them to stdout too so
+        // `ui-preview --verify`'s own console output is enough to prove the new badge/glyph/
+        // colour bindings actually resolved cleanly, without needing an attached debugger.
+        System.Diagnostics.PresentationTraceSources.Refresh();
+        System.Diagnostics.PresentationTraceSources.DataBindingSource.Listeners.Add(new System.Diagnostics.ConsoleTraceListener());
+        System.Diagnostics.PresentationTraceSources.DataBindingSource.Switch.Level = System.Diagnostics.SourceLevels.Error;
+    }
+
     var wpfApp = new Glaude.App.App();
 
     // P1-T2's composition point (dev-only): the panel-A object graph, wired the same way the real
