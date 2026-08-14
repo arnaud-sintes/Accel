@@ -279,8 +279,14 @@
                         <TextBlock Text="Panel C — Tabs" Margin="8,6" VerticalAlignment="Center" />
                     </Border>
 
+                    <!--
+                        Panel D content: P2-T5's WebView2-hosted xterm.js terminal (renders only,
+                        no live PTY yet; that is P2-T5b). x:Name="Terminal" is used by
+                        Program.cs's `ui-preview` verify path to await TerminalView.Initialization
+                        and query document.title for proof the page actually loaded.
+                    -->
                     <Border x:Name="PanelD" Grid.Row="1" Background="White">
-                        <TextBlock Text="Panel D — Content" Margin="8" TextWrapping="Wrap" />
+                        <controls:TerminalView x:Name="Terminal" />
                     </Border>
                 </Grid>
 

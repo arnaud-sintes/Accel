@@ -44,6 +44,74 @@
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.0" />
+
+    <!--
+      P2-T5: WebView2 host for App/Controls/TerminalView.xaml. Pinned to the exact latest stable
+      (non-prerelease) version on nuget.org at the time of writing - deliberately not floated.
+      See the comment below (right after this ItemGroup) for how its native WebView2Loader.dll
+      loader interacts with PublishSingleFile.
+    -->
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4129.50" />
+  </ItemGroup>
+
+  <!--
+    P2-T5: WebView2Loader.dll (the package's native loader, added by its own build\Common.targets
+    as a Content item under runtimes\win-x64\native\, CopyToOutputDirectory=PreserveNewest) is
+    left at its package default here - no ExcludeFromSingleFile override was needed. In a plain
+    build it lands as a loose file next to Glaude.exe (also copied to the output root by the
+    .NET runtime-asset resolution for a self-contained win-x64 build). In the PublishSingleFile
+    output, this project's existing IncludeNativeLibrariesForSelfExtract=true bundles it into the
+    single-file payload instead (Content is not the same as embedded managed resources, but native
+    RuntimeCopyLocal assets get folded in under that flag) - the documented WebView2Loader.dll
+    self-locating-lookup problem some report with PublishSingleFile did NOT reproduce here: the
+    published exe's own `ui-preview` run (see this task's report) rendered panel D and read back
+    document.title successfully, so no extra fix (e.g. explicit ExcludeFromSingleFile) was
+    required for this WebView2/SDK version combination.
+  -->
+
+  <!--
+    P2-T5: xterm.js + the FitAddon, vendored offline (see App/Controls/wwwroot/xterm/
+    THIRD_PARTY_NOTICES.txt for exact versions/licenses), served to the WebView2 control via
+    CoreWebView2.SetVirtualHostNameToFolderMapping (TerminalView.xaml.cs) rather than embedded as
+    true assembly EmbeddedResource + runtime extraction - see that file's doc comment for why.
+    Explicit Content items (with an explicit output <Link>) rather than relying on
+    Microsoft.NET.Sdk.Web's implicit wwwroot glob, since that implicit glob only covers a
+    project-root-level "wwwroot" folder and this one is nested under App/Controls.
+  -->
+  <ItemGroup>
+    <Content Include="App\Controls\wwwroot\xterm\xterm.js">
+      <Link>wwwroot\xterm\xterm.js</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="App\Controls\wwwroot\xterm\xterm.css">
+      <Link>wwwroot\xterm\xterm.css</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="App\Controls\wwwroot\xterm\addon-fit.js">
+      <Link>wwwroot\xterm\addon-fit.js</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="App\Controls\wwwroot\xterm\index.html">
+      <Link>wwwroot\xterm\index.html</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+  </ItemGroup>
+
+  <!--
+    P2-T2: the ConPTY interop surface (native struct layouts, flag constants, COORD conversion) must
+    be unit-testable for marshalling correctness - a wrong STARTUPINFOEX size or a wrong
+    PROC_THREAD_ATTRIBUTE value is an AccessViolation at runtime, not a compile error - without
+    turning P/Invoke declarations into public API that callers could bind to. The assembly is not
+    strong named, so the plain assembly name is sufficient.
+  -->
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>Glaude.Tests</_Parameter1>
+    </AssemblyAttribute>
   </ItemGroup>
 
 </Project>
