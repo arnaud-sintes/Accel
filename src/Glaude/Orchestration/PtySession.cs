@@ -306,6 +306,7 @@ public sealed class PtySession : IDisposable
     private readonly object _writeGate = new();
     private readonly TimeSpan _pumpJoinTimeout;
     private readonly Process? _childProcess;
+    private readonly DateTime? _processStartTimeUtc;
 
     private int _disposed;
     private int _exitSignalled;
@@ -320,6 +321,7 @@ public sealed class PtySession : IDisposable
         Channel<string> outputChannel,
         PtyOutputPump pump,
         Process? childProcess,
+        DateTime? processStartTimeUtc,
         TimeSpan pumpJoinTimeout)
     {
         _conPty = conPty;
@@ -327,6 +329,7 @@ public sealed class PtySession : IDisposable
         _outputChannel = outputChannel;
         _pump = pump;
         _childProcess = childProcess;
+        _processStartTimeUtc = processStartTimeUtc;
         _pumpJoinTimeout = pumpJoinTimeout;
     }
 
@@ -336,6 +339,21 @@ public sealed class PtySession : IDisposable
 
     /// <summary>The child's PID.</summary>
     public int ProcessId => _conPty.ProcessId;
+
+    /// <summary>
+    /// The child's actual process start time (UTC) as read while it was still <i>suspended</i>, i.e.
+    /// provably the process this session launched - or null if it could not be read. Survives
+    /// <see cref="Dispose"/> (it is a captured value, not a live query).
+    ///
+    /// <para><b>Why this exists (P3-T2).</b> It is the PID-reuse guard for anything that later re-opens the
+    /// child by PID: <see cref="ProcessId"/> alone identifies a process only for as long as that process
+    /// object still exists, and Windows reuses PIDs freely. <see cref="PtyRegistry"/> pairs the two - it
+    /// opens its own <c>Process</c> handle for the child and refuses to trust (and therefore refuses to
+    /// <c>Kill</c>) any handle whose start time does not match this value, which is what makes its
+    /// force-kill last resort incapable of killing an unrelated process that inherited the PID. Same
+    /// PID+start-time pairing <see cref="PtyPidRegistry"/> persists for cross-restart reconciliation.</para>
+    /// </summary>
+    public DateTime? ProcessStartTimeUtc => _processStartTimeUtc;
 
     /// <summary>Current pseudoconsole width in cells.</summary>
     public int Columns => _conPty.Columns;
@@ -503,6 +521,20 @@ public sealed class PtySession : IDisposable
             // exit observation keeps working across ConPtySession.Dispose closing its own handle.
             childProcess = TryOpenChildProcess(conPty.ProcessId);
 
+            // Read the start time here, for the same reason the handle is opened here: the child is
+            // suspended, so this is provably *this* child's start time and not a recycled PID's. See
+            // ProcessStartTimeUtc for who needs it and why (PtyRegistry's force-kill guard).
+            DateTime? processStartTimeUtc = null;
+            try
+            {
+                processStartTimeUtc = childProcess?.StartTime.ToUniversalTime();
+            }
+            catch
+            {
+                // Unreadable start time is a degraded-but-usable session, exactly like a missing observer
+                // handle: consumers treat null as "cannot verify identity by PID".
+            }
+
             var outputChannel = Channel.CreateBounded<string>(new BoundedChannelOptions(options.OutputChannelCapacity)
             {
                 FullMode = BoundedChannelFullMode.Wait,
@@ -516,7 +548,14 @@ public sealed class PtySession : IDisposable
                 outputChannel.Writer,
                 options.ReadBufferSize);
 
-            session = new PtySession(conPty, jobObject, outputChannel, pump, childProcess, options.PumpJoinTimeout);
+            session = new PtySession(
+                conPty,
+                jobObject,
+                outputChannel,
+                pump,
+                childProcess,
+                processStartTimeUtc,
+                options.PumpJoinTimeout);
 
             // Start the pump before resuming, so not one byte of the child's output can be produced
             // before somebody is draining the pipe.

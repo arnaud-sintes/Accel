@@ -42,6 +42,17 @@ if (args.Length > 0 && string.Equals(args[0], "pty-session-smoke-test", StringCo
     return Glaude.Orchestration.PtySessionSmokeTest.Run(Console.Out, cycles);
 }
 
+// P3-T2: hidden dev-only verb, same rationale and same placement rules as the smoke tests above -
+// PtyRegistry's load-bearing properties are concurrency and OS-resource ownership under real load (N
+// real children torn down at once from N threads, double-closes, self-exit racers, force-kill), which no
+// unit test with fakes can establish. Launches cmd.exe, never claude.exe. Optional tab count:
+// `pty-registry-stress-test [tabs]` (default 30).
+if (args.Length > 0 && string.Equals(args[0], "pty-registry-stress-test", StringComparison.Ordinal))
+{
+    var tabs = args.Length > 1 && int.TryParse(args[1], out var parsedTabs) ? parsedTabs : 30;
+    return Glaude.Orchestration.PtyRegistryStressTest.Run(Console.Out, tabs);
+}
+
 // P2-T5b: hidden dev-only verb, same rationale and placement rules as the smoke tests above -
 // proves xterm.js (WebView2, panel D) is actually wired to a live PtySession over a real
 // /pty/{tabId} WebSocket route on a real EventServer/Kestrel instance, end to end. No unit test
