@@ -2,6 +2,7 @@ namespace Glaude.App;
 
 using System;
 using System.Windows;
+using Glaude.App.Services;
 using Glaude.App.ViewModels;
 using Glaude.Orchestration;
 using Glaude.Server;
@@ -59,6 +60,23 @@ public partial class MainWindow : Window
         int ptyWebSocketPort,
         TabsViewModel? tabs,
         PtyRegistry? sessionRegistry)
+        : this(rootsPanel, ptyRouteRegistry, ptyWebSocketPort, tabs, sessionRegistry, null)
+    {
+    }
+
+    /// <summary>
+    /// P3-T3: <paramref name="selection"/> feeds panels B/E's stub <see cref="FocusedSessionStubViewModel"/>
+    /// readers - the same read-only <see cref="ISessionSelectionService"/> panel A already consumes for
+    /// <c>IsFocused</c>. Null degrades exactly like every other optional parameter here: the panel keeps its
+    /// P1-T1b placeholder text with no status line beneath it.
+    /// </summary>
+    public MainWindow(
+        RootsPanelViewModel? rootsPanel,
+        PtyRouteRegistry? ptyRouteRegistry,
+        int ptyWebSocketPort,
+        TabsViewModel? tabs,
+        PtyRegistry? sessionRegistry,
+        ISessionSelectionService? selection)
     {
         InitializeComponent();
 
@@ -87,14 +105,29 @@ public partial class MainWindow : Window
             tabs.AttachTerminalAsync = tabId => Terminal.AttachPtyAsync(tabId, _ptyWebSocketPort);
         }
 
+        if (selection is not null)
+        {
+            // Two independent instances, not one shared DataContext: each is a plain reader with no
+            // panel-specific state yet, and Phases 5/6 replace both outright rather than share them.
+            _panelBStub = new FocusedSessionStubViewModel(selection);
+            _panelEStub = new FocusedSessionStubViewModel(selection);
+            PanelB.DataContext = _panelBStub;
+            PanelE.DataContext = _panelEStub;
+        }
+
         Closed += (_, _) =>
         {
             // No session teardown here any more: PtyRegistry is the single owner of PtySession.Dispose
             // (P3-T2) and app-exit teardown is P3-T4's job (CloseAllAsync/Dispose around the app loop).
-            // This only drops the tab strip's registry subscription.
+            // This only drops the tab strip's registry subscription plus panels B/E's own.
             Tabs?.Dispose();
+            _panelBStub?.Dispose();
+            _panelEStub?.Dispose();
         };
     }
+
+    private readonly FocusedSessionStubViewModel? _panelBStub;
+    private readonly FocusedSessionStubViewModel? _panelEStub;
 
     /// <summary>Panel A's ViewModel, or null when the window was constructed as bare scaffolding.</summary>
     public RootsPanelViewModel? RootsPanel { get; }

@@ -137,7 +137,8 @@ static void RunUiPreview(bool verify)
         ptyWebApp is not null ? server.PtySessions : null,
         ptyPort,
         tabs,
-        sessionRegistry);
+        sessionRegistry,
+        selection);
     mainWindow.Loaded += (_, _) => rootsPanel.Start();
     mainWindow.Closed += (_, _) =>
     {

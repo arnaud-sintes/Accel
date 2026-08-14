@@ -376,18 +376,31 @@
                 <GridSplitter Grid.Row="1" Height="4" HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
                               Background="#FFCCCCCC" ResizeBehavior="PreviousAndNext" />
 
-                <!-- Bottom area: Panel E, agent graph. -->
+                <!--
+                    Bottom area: Panel E, agent graph. P3-T3 stub: DataContext is a
+                    FocusedSessionStubViewModel (a read-only ISessionSelectionService subscriber), so this
+                    placeholder shows which session it would reflect - real graph content is Phase 6.
+                -->
                 <Border x:Name="PanelE" Grid.Row="2" BorderBrush="#FF808080" BorderThickness="0,1,0,0" Background="#FFF7F7F7">
-                    <TextBlock Text="Panel E — Agent graph" Margin="8" TextWrapping="Wrap" />
+                    <StackPanel Margin="8">
+                        <TextBlock Text="Panel E — Agent graph" TextWrapping="Wrap" />
+                        <TextBlock Text="{Binding StatusText}" FontSize="10" Foreground="#FF505050" Margin="0,4,0,0" />
+                    </StackPanel>
                 </Border>
             </Grid>
 
             <GridSplitter Grid.Column="3" Width="4" HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
                           Background="#FFCCCCCC" ResizeBehavior="PreviousAndNext" />
 
-            <!-- Panel B - file tree (right). -->
+            <!--
+                Panel B - file tree (right). P3-T3 stub: same FocusedSessionStubViewModel as panel E - real
+                file-tree content is Phase 5.
+            -->
             <Border x:Name="PanelB" Grid.Column="4" BorderBrush="#FF808080" BorderThickness="1,0,0,0" Background="#FFF3F3F3">
-                <TextBlock Text="Panel B — Files" Margin="8" TextWrapping="Wrap" />
+                <StackPanel Margin="8">
+                    <TextBlock Text="Panel B — Files" TextWrapping="Wrap" />
+                    <TextBlock Text="{Binding StatusText}" FontSize="10" Foreground="#FF505050" Margin="0,4,0,0" />
+                </StackPanel>
             </Border>
         </Grid>
     </DockPanel>
