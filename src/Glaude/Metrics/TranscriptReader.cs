@@ -39,51 +39,10 @@ public static class TranscriptReader
     /// </summary>
     public static TranscriptAssistantEntry? TryReadLastAssistantEntry(string? path)
     {
-        if (string.IsNullOrEmpty(path))
+        if (!TryReadTailLines(path, out string[] rawLines, out int firstUsableIndex, out int lastUsableIndex))
         {
             return null;
         }
-
-        string tail;
-        bool startedMidFile;
-
-        try
-        {
-            if (!File.Exists(path))
-            {
-                return null;
-            }
-
-            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-            long length = stream.Length;
-            if (length == 0)
-            {
-                return null;
-            }
-
-            long start = Math.Max(0, length - TailBytes);
-            startedMidFile = start > 0;
-
-            stream.Seek(start, SeekOrigin.Begin);
-            using var reader = new StreamReader(stream, Encoding.UTF8);
-            tail = reader.ReadToEnd();
-        }
-        catch
-        {
-            // Missing/locked/inaccessible file, I/O error, etc. - "no data", never throw.
-            return null;
-        }
-
-        if (string.IsNullOrEmpty(tail))
-        {
-            return null;
-        }
-
-        bool endsWithNewline = tail.EndsWith('\n');
-        string[] rawLines = tail.Split('\n');
-
-        int firstUsableIndex = startedMidFile ? 1 : 0;
-        int lastUsableIndex = endsWithNewline ? rawLines.Length - 1 : rawLines.Length - 2;
 
         TranscriptAssistantEntry? last = null;
 
@@ -102,6 +61,100 @@ public static class TranscriptReader
         }
 
         return last;
+    }
+
+    /// <summary>
+    /// Returns the last <c>{"type":"ai-title","aiTitle":"..."}</c> entry's <c>aiTitle</c> text
+    /// found within the same bounded tail window used by <see cref="TryReadLastAssistantEntry"/>
+    /// - "last one wins" when multiple ai-title lines appear in the transcript (verified against
+    /// real transcripts on this machine, which re-emit the same/updated ai-title line repeatedly
+    /// through the file rather than just once near the top). Never throws; returns null for a
+    /// missing/empty file, no ai-title line in the tail window, or a malformed one.
+    /// </summary>
+    public static string? TryReadLastAiTitle(string? path)
+    {
+        if (!TryReadTailLines(path, out string[] rawLines, out int firstUsableIndex, out int lastUsableIndex))
+        {
+            return null;
+        }
+
+        string? last = null;
+
+        for (int i = firstUsableIndex; i <= lastUsableIndex; i++)
+        {
+            if (i < 0 || i >= rawLines.Length)
+            {
+                continue;
+            }
+
+            string? title = TryParseAiTitleLine(rawLines[i]);
+            if (title is not null)
+            {
+                last = title;
+            }
+        }
+
+        return last;
+    }
+
+    /// <summary>
+    /// Shared tail-window read: opens <paramref name="path"/>, reads the last ~64KB, and splits
+    /// it into raw lines with the same "discard a possibly-partial boundary line" handling used
+    /// by every tail-window consumer. Returns <see langword="false"/> (with empty/default out
+    /// values) for a missing/empty/inaccessible file - never throws.
+    /// </summary>
+    private static bool TryReadTailLines(string? path, out string[] rawLines, out int firstUsableIndex, out int lastUsableIndex)
+    {
+        rawLines = Array.Empty<string>();
+        firstUsableIndex = 0;
+        lastUsableIndex = -1;
+
+        if (string.IsNullOrEmpty(path))
+        {
+            return false;
+        }
+
+        string tail;
+        bool startedMidFile;
+
+        try
+        {
+            if (!File.Exists(path))
+            {
+                return false;
+            }
+
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            long length = stream.Length;
+            if (length == 0)
+            {
+                return false;
+            }
+
+            long start = Math.Max(0, length - TailBytes);
+            startedMidFile = start > 0;
+
+            stream.Seek(start, SeekOrigin.Begin);
+            using var reader = new StreamReader(stream, Encoding.UTF8);
+            tail = reader.ReadToEnd();
+        }
+        catch
+        {
+            // Missing/locked/inaccessible file, I/O error, etc. - "no data", never throw.
+            return false;
+        }
+
+        if (string.IsNullOrEmpty(tail))
+        {
+            return false;
+        }
+
+        bool endsWithNewline = tail.EndsWith('\n');
+        rawLines = tail.Split('\n');
+
+        firstUsableIndex = startedMidFile ? 1 : 0;
+        lastUsableIndex = endsWithNewline ? rawLines.Length - 1 : rawLines.Length - 2;
+        return true;
     }
 
     private static TranscriptAssistantEntry? TryParseAssistantLine(string line)
@@ -157,6 +210,47 @@ public static class TranscriptReader
             }
 
             return new TranscriptAssistantEntry(model, effortLevel, input, output, cacheCreate, cacheRead);
+        }
+        catch
+        {
+            // Malformed / partial JSON on this line - skip it, keep going.
+            return null;
+        }
+    }
+
+    private static string? TryParseAiTitleLine(string line)
+    {
+        if (string.IsNullOrWhiteSpace(line))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(line);
+            var root = doc.RootElement;
+
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                return null;
+            }
+
+            if (!root.TryGetProperty("type", out var typeProp)
+                || typeProp.ValueKind != JsonValueKind.String
+                || typeProp.GetString() != "ai-title")
+            {
+                return null;
+            }
+
+            // Real on-disk shape (verified against real transcripts on this machine):
+            // {"type":"ai-title","aiTitle":"...","sessionId":"..."}.
+            if (root.TryGetProperty("aiTitle", out var titleProp) && titleProp.ValueKind == JsonValueKind.String)
+            {
+                string? title = titleProp.GetString();
+                return string.IsNullOrEmpty(title) ? null : title;
+            }
+
+            return null;
         }
         catch
         {

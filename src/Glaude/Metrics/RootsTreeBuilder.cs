@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text.Json.Serialization;
+using Glaude.Server;
 
 namespace Glaude.Metrics;
 
@@ -43,7 +44,10 @@ public sealed class RootsTreeBuilder
     /// <summary>Number of distinct file paths with a cached tail read. Test hook.</summary>
     public int TailCacheCount => _tailCache.Count;
 
-    private sealed record TailCacheEntry(long Length, DateTime LastWriteUtc, TranscriptAssistantEntry? Entry);
+    private static readonly IReadOnlyDictionary<string, SessionOverride> EmptySessionOverrides =
+        new Dictionary<string, SessionOverride>();
+
+    private sealed record TailCacheEntry(long Length, DateTime LastWriteUtc, TranscriptAssistantEntry? Entry, string? AiTitle);
 
     /// <summary>
     /// Builds the full tree document for the given configured <paramref name="roots"/> (in the
@@ -57,10 +61,15 @@ public sealed class RootsTreeBuilder
     /// degrade to "fewer results", never a propagated exception - see project-ui.md's
     /// "Never 500" rule for this route.
     /// </summary>
-    public RootsTreeDto Build(string[]? roots, SessionState state, string? projectsDirOverride = null)
+    public RootsTreeDto Build(
+        string[]? roots,
+        SessionState state,
+        string? projectsDirOverride = null,
+        IReadOnlyDictionary<string, SessionOverride>? sessionOverrides = null)
     {
         var stopwatch = Stopwatch.StartNew();
         roots ??= Array.Empty<string>();
+        sessionOverrides ??= EmptySessionOverrides;
 
         string projectsDir = projectsDirOverride ?? Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
@@ -99,7 +108,7 @@ public sealed class RootsTreeBuilder
                         SessionTreeDto? sessionDto = null;
                         try
                         {
-                            sessionDto = BuildSessionDto(file, projectDirName, state);
+                            sessionDto = BuildSessionDto(file, projectDirName, state, sessionOverrides);
                         }
                         catch
                         {
@@ -196,7 +205,11 @@ public sealed class RootsTreeBuilder
         }
     }
 
-    private SessionTreeDto? BuildSessionDto(string filePath, string projectDirName, SessionState state)
+    private SessionTreeDto? BuildSessionDto(
+        string filePath,
+        string projectDirName,
+        SessionState state,
+        IReadOnlyDictionary<string, SessionOverride> sessionOverrides)
     {
         string sessionId = Path.GetFileNameWithoutExtension(filePath);
         TranscriptHeadInfo headInfo = GetHeadInfoCached(filePath);
@@ -209,25 +222,48 @@ public sealed class RootsTreeBuilder
             isLive = !found.Ended;
         }
 
+        // Name resolution order, highest to lowest priority (P1-T4b):
+        //   1. Glaude's own override (glaude-folders.json v2 "sessions" map's displayName) -
+        //      an explicit user choice always wins over anything derived from the transcript.
+        //   2. A live statusLine name (/rename while the session is actually running) - gated
+        //      on isLive so a stale name left over on an ended session's snapshot does not win
+        //      over a fresher ai-title/first-message derivation.
+        //   3. The transcript's own ai-title ("last one wins" - see TranscriptReader.TryReadLastAiTitle).
+        //   4. The first user message text, truncated to a label.
+        //   5. The truncated session id - the final, always-available fallback.
         string name;
         string nameSource;
-        if (!string.IsNullOrEmpty(snapshot?.SessionName))
+        if (sessionOverrides.TryGetValue(sessionId, out var overrideEntry) && !string.IsNullOrEmpty(overrideEntry.DisplayName))
+        {
+            name = overrideEntry.DisplayName!;
+            nameSource = "glaude_override";
+        }
+        else if (isLive && !string.IsNullOrEmpty(snapshot?.SessionName))
         {
             name = snapshot!.SessionName!;
             nameSource = "status_line";
         }
         else
         {
-            string? derived = TranscriptHeadReader.DeriveLabel(headInfo.FirstUserMessageText);
-            if (!string.IsNullOrEmpty(derived))
+            string? aiTitle = GetAiTitleCached(filePath);
+            if (!string.IsNullOrEmpty(aiTitle))
             {
-                name = derived!;
-                nameSource = "first_message";
+                name = aiTitle!;
+                nameSource = "ai_title";
             }
             else
             {
-                name = sessionId.Length <= 12 ? sessionId : sessionId.Substring(0, 12);
-                nameSource = "session_id";
+                string? derived = TranscriptHeadReader.DeriveLabel(headInfo.FirstUserMessageText);
+                if (!string.IsNullOrEmpty(derived))
+                {
+                    name = derived!;
+                    nameSource = "first_message";
+                }
+                else
+                {
+                    name = sessionId.Length <= 12 ? sessionId : sessionId.Substring(0, 12);
+                    nameSource = "session_id";
+                }
             }
         }
 
@@ -270,7 +306,7 @@ public sealed class RootsTreeBuilder
         }
         else
         {
-            TranscriptAssistantEntry? tail = GetTailEntryCached(filePath, out DateTime fileLastWriteUtc);
+            TranscriptAssistantEntry? tail = GetTailEntryCached(filePath, out DateTime fileLastWriteUtc, out _);
             modelId = tail?.Model;
             effortLevel = tail?.EffortLevel;
             source = "transcript";
@@ -375,7 +411,18 @@ public sealed class RootsTreeBuilder
         return info;
     }
 
-    private TranscriptAssistantEntry? GetTailEntryCached(string path, out DateTime lastWriteTimeUtc)
+    /// <summary>
+    /// Returns just the cached ai-title (tier 3 of name resolution - see <see cref="BuildSessionDto"/>),
+    /// sharing the exact same (length, mtime)-keyed <see cref="_tailCache"/> entry as the
+    /// assistant-tail read - per P1-T4b this must not add a second, separate caching mechanism.
+    /// </summary>
+    private string? GetAiTitleCached(string path)
+    {
+        _ = GetTailEntryCached(path, out _, out string? aiTitle);
+        return aiTitle;
+    }
+
+    private TranscriptAssistantEntry? GetTailEntryCached(string path, out DateTime lastWriteTimeUtc, out string? aiTitle)
     {
         long length;
         DateTime mtime;
@@ -385,6 +432,7 @@ public sealed class RootsTreeBuilder
             if (!fi.Exists)
             {
                 lastWriteTimeUtc = default;
+                aiTitle = null;
                 return null;
             }
 
@@ -394,6 +442,7 @@ public sealed class RootsTreeBuilder
         catch
         {
             lastWriteTimeUtc = default;
+            aiTitle = null;
             return null;
         }
 
@@ -401,11 +450,14 @@ public sealed class RootsTreeBuilder
 
         if (_tailCache.TryGetValue(path, out var cached) && cached.Length == length && cached.LastWriteUtc == mtime)
         {
+            aiTitle = cached.AiTitle;
             return cached.Entry;
         }
 
         TranscriptAssistantEntry? entry = TranscriptReader.TryReadLastAssistantEntry(path);
-        _tailCache[path] = new TailCacheEntry(length, mtime, entry);
+        string? title = TranscriptReader.TryReadLastAiTitle(path);
+        _tailCache[path] = new TailCacheEntry(length, mtime, entry, title);
+        aiTitle = title;
         return entry;
     }
 

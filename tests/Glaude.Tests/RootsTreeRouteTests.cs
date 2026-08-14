@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Net;
 using System.Text.Json;
 using Glaude.Metrics;
@@ -99,6 +100,14 @@ public class RootsTreeRouteTests : IAsyncLifetime
                 },
             },
             ["effort"] = new Dictionary<string, object?> { ["level"] = effort },
+        });
+
+    private static string AiTitleLine(string title, string sessionId) =>
+        JsonSerializer.Serialize(new Dictionary<string, object?>
+        {
+            ["type"] = "ai-title",
+            ["aiTitle"] = title,
+            ["sessionId"] = sessionId,
         });
 
     private static JsonElement FindSession(JsonElement root, string path, string sessionId)
@@ -465,5 +474,168 @@ public class RootsTreeRouteTests : IAsyncLifetime
         Assert.Equal(1, builder.TailCacheCount);
         var thirdSession = third.Roots.Single(r => r.Path == @"C:\projects").Sessions.Single(s => s.SessionId == sessionId);
         Assert.NotEqual(firstSession.UsedTokens, thirdSession.UsedTokens);
+    }
+
+    // ---- P1-T4b: ai-title name source + full resolution order ----
+
+    [Fact]
+    public void AiTitlePresent_NoHigherPriorityName_UsedAsSessionName()
+    {
+        var builder = new RootsTreeBuilder();
+        string dir = Path.Combine(_fixtureRoot, "ai-title-slug");
+        Directory.CreateDirectory(dir);
+        string sessionId = $"session-{Guid.NewGuid():N}";
+        string path = Path.Combine(dir, $"{sessionId}.jsonl");
+
+        // No usable first-message text (only wrapper/skip-prefixed lines), so absent an
+        // ai-title the name would fall all the way back to the truncated session id.
+        File.WriteAllLines(path, new[]
+        {
+            ModeLine(),
+            UserLine("<system-reminder>irrelevant</system-reminder>", @"C:\projects"),
+            AiTitleLine("Refactor the roots tree builder", sessionId),
+        });
+
+        var state = new SessionState();
+        var result = builder.Build(new[] { @"C:\projects" }, state, _fixtureRoot);
+        var session = result.Roots.Single(r => r.Path == @"C:\projects").Sessions.Single(s => s.SessionId == sessionId);
+
+        Assert.Equal("Refactor the roots tree builder", session.Name);
+        Assert.Equal("ai_title", session.NameSource);
+    }
+
+    [Fact]
+    public void MultipleAiTitleLines_LastOneWins()
+    {
+        var builder = new RootsTreeBuilder();
+        string dir = Path.Combine(_fixtureRoot, "ai-title-multi-slug");
+        Directory.CreateDirectory(dir);
+        string sessionId = $"session-{Guid.NewGuid():N}";
+        string path = Path.Combine(dir, $"{sessionId}.jsonl");
+
+        File.WriteAllLines(path, new[]
+        {
+            ModeLine(),
+            AiTitleLine("First draft title", sessionId),
+            AiTitleLine("Second, updated title", sessionId),
+            AiTitleLine("Third and final title", sessionId),
+        });
+
+        var state = new SessionState();
+        var result = builder.Build(new[] { @"C:\projects" }, state, _fixtureRoot);
+
+        // No cwd anywhere in this fixture, so the session lands in unattributed - only the
+        // name resolution behavior is under test here.
+        var session = result.UnattributedSessions.Single(s => s.SessionId == sessionId);
+
+        Assert.Equal("Third and final title", session.Name);
+        Assert.Equal("ai_title", session.NameSource);
+    }
+
+    [Fact]
+    public void GlaudeOverridePresent_WinsOverAiTitle()
+    {
+        var builder = new RootsTreeBuilder();
+        string dir = Path.Combine(_fixtureRoot, "override-slug");
+        Directory.CreateDirectory(dir);
+        string sessionId = $"session-{Guid.NewGuid():N}";
+        string path = Path.Combine(dir, $"{sessionId}.jsonl");
+
+        File.WriteAllLines(path, new[]
+        {
+            ModeLine(),
+            AiTitleLine("Whatever the transcript thinks it's called", sessionId),
+        });
+
+        var state = new SessionState();
+        var overrides = new Dictionary<string, SessionOverride>
+        {
+            [sessionId] = new SessionOverride("My Custom Name", Pinned: false, Hidden: false, LastOpenedUtc: null),
+        };
+
+        var result = builder.Build(new[] { @"C:\projects" }, state, _fixtureRoot, overrides);
+        var session = result.UnattributedSessions.Single(s => s.SessionId == sessionId);
+
+        Assert.Equal("My Custom Name", session.Name);
+        Assert.Equal("glaude_override", session.NameSource);
+    }
+
+    [Fact]
+    public void LiveStatusLineName_WinsOverAiTitle_ButOnlyWhileLive()
+    {
+        var builder = new RootsTreeBuilder();
+        string dir = Path.Combine(_fixtureRoot, "live-name-slug");
+        Directory.CreateDirectory(dir);
+        string sessionId = $"session-{Guid.NewGuid():N}";
+        string path = Path.Combine(dir, $"{sessionId}.jsonl");
+
+        File.WriteAllLines(path, new[]
+        {
+            ModeLine(),
+            AiTitleLine("Transcript-derived title", sessionId),
+        });
+
+        var state = new SessionState();
+        state.UpdateSessionSnapshot(new SessionSnapshot(
+            SessionId: sessionId,
+            ModelId: "claude-sonnet-5",
+            ModelDisplayName: null,
+            EffortLevel: null,
+            ContextWindowSize: null,
+            UsedTokens: null,
+            UsedPercentage: null,
+            RemainingPercentage: null,
+            CostUsd: null,
+            PayloadVersion: null,
+            ReceivedAtUtc: DateTime.UtcNow,
+            SessionName: "Live renamed session"));
+
+        var liveResult = builder.Build(new[] { @"C:\projects" }, state, _fixtureRoot);
+        var liveSession = liveResult.UnattributedSessions.Single(s => s.SessionId == sessionId);
+        Assert.Equal("Live renamed session", liveSession.Name);
+        Assert.Equal("status_line", liveSession.NameSource);
+
+        // Once the session ends, its stale statusLine name must no longer outrank the
+        // transcript's own ai-title (tier 2 is gated on "currently running").
+        state.MarkSessionEnded(sessionId);
+        var builder2 = new RootsTreeBuilder();
+        var endedResult = builder2.Build(new[] { @"C:\projects" }, state, _fixtureRoot);
+        var endedSession = endedResult.UnattributedSessions.Single(s => s.SessionId == sessionId);
+        Assert.Equal("Transcript-derived title", endedSession.Name);
+        Assert.Equal("ai_title", endedSession.NameSource);
+    }
+
+    [Fact]
+    public void AiTitleCache_SharesTailCacheKey_DoesNotReReadOnUnchangedFile()
+    {
+        var builder = new RootsTreeBuilder();
+        string dir = Path.Combine(_fixtureRoot, "ai-title-cache-slug");
+        Directory.CreateDirectory(dir);
+        string sessionId = $"session-{Guid.NewGuid():N}";
+        string path = Path.Combine(dir, $"{sessionId}.jsonl");
+
+        File.WriteAllLines(path, new[] { ModeLine(), AiTitleLine("Original title", sessionId) });
+
+        var state = new SessionState();
+        var first = builder.Build(new[] { @"C:\projects" }, state, _fixtureRoot);
+        var firstSession = first.UnattributedSessions.Single(s => s.SessionId == sessionId);
+        Assert.Equal("Original title", firstSession.Name);
+        Assert.Equal(1, builder.TailCacheCount);
+
+        // Unchanged file: same (length, mtime) key -> exactly one cache entry, same name.
+        var second = builder.Build(new[] { @"C:\projects" }, state, _fixtureRoot);
+        var secondSession = second.UnattributedSessions.Single(s => s.SessionId == sessionId);
+        Assert.Equal(1, builder.TailCacheCount);
+        Assert.Equal("Original title", secondSession.Name);
+
+        // Change the ai-title content (changes length/mtime) -> still exactly one cache entry
+        // (same key overwritten), but the returned name must now reflect the new content,
+        // proving the shared cache key actually invalidated rather than being stuck stale.
+        Thread.Sleep(50);
+        File.WriteAllLines(path, new[] { ModeLine(), AiTitleLine("Updated title", sessionId) });
+        var third = builder.Build(new[] { @"C:\projects" }, state, _fixtureRoot);
+        var thirdSession = third.UnattributedSessions.Single(s => s.SessionId == sessionId);
+        Assert.Equal(1, builder.TailCacheCount);
+        Assert.Equal("Updated title", thirdSession.Name);
     }
 }

@@ -15,6 +15,7 @@ public static class RootsTreeRoute
 {
     public static void Map(WebApplication app, string[] roots, SessionState state, RootsTreeBuilder builder, string? projectsDirOverride = null)
     {
-        app.MapGet("/roots/tree", () => Results.Json(builder.Build(roots, state, projectsDirOverride)));
+        app.MapGet("/roots/tree", () => Results.Json(
+            builder.Build(roots, state, projectsDirOverride, RootFoldersConfig.LoadFull().Sessions)));
     }
 }
