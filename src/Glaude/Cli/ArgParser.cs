@@ -8,14 +8,16 @@ using Glaude.Settings;
 ///
 /// Post-combined-app refactor: the only "verbs" left are the two internal ones Claude Code
 /// itself invokes as short-lived child processes (<see cref="StatusLine"/>/
-/// <see cref="SubagentStatusLine"/>) - everything else (install + server + UI) now happens
-/// under the single default <see cref="Start"/> verb, selected whenever no recognised verb
-/// token is the first argument (including no arguments at all).</summary>
+/// <see cref="SubagentStatusLine"/>), plus the user-facing <see cref="Doctor"/> diagnostic —
+/// everything else (install + server + UI) now happens under the single default
+/// <see cref="Start"/> verb, selected whenever no recognised verb token is the first argument
+/// (including no arguments at all).</summary>
 public enum Verb
 {
     Start,
     StatusLine,
     SubagentStatusLine,
+    Doctor,
     Unknown,
 }
 
@@ -110,6 +112,7 @@ public static class ArgParser
     {
         "statusline" => (Verb.StatusLine, null),
         "subagent-statusline" => (Verb.SubagentStatusLine, null),
+        "doctor" => (Verb.Doctor, null),
         _ => (Verb.Unknown, token),
     };
 }

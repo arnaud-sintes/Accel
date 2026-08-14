@@ -1,6 +1,7 @@
 namespace Glaude.Tests;
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text.Json.Nodes;
 using Glaude.Cli;
@@ -31,6 +32,7 @@ public class CliTests
     [Theory]
     [InlineData("statusline", Verb.StatusLine)]
     [InlineData("subagent-statusline", Verb.SubagentStatusLine)]
+    [InlineData("doctor", Verb.Doctor)]
     public void Parse_InternalVerb_ResolvesToExpectedVerb(string token, Verb expected)
     {
         var parsed = ArgParser.Parse(new[] { token });
@@ -330,6 +332,147 @@ public class CliTests
 
         Assert.False(found);
         Assert.False(capture.HadOriginal);
+    }
+
+    // ---- DoctorCommand: claude resolution ------------------------------------------------
+
+    [Fact]
+    public void ResolveClaude_NativeExeOnPath_ReturnsNativeExe()
+    {
+        var exists = MakeExists(@"C:\tools\claude\claude.exe");
+        var resolution = DoctorCommand.ResolveClaude(@"C:\other;C:\tools\claude", exists);
+
+        Assert.Equal(ClaudeResolutionKind.NativeExe, resolution.Kind);
+        Assert.Equal(@"C:\tools\claude\claude.exe", resolution.Path);
+    }
+
+    [Theory]
+    [InlineData(".cmd")]
+    [InlineData(".bat")]
+    [InlineData(".ps1")]
+    public void ResolveClaude_ShimOnly_ReturnsShim(string ext)
+    {
+        var exists = MakeExists(@"C:\tools\claude\claude" + ext);
+        var resolution = DoctorCommand.ResolveClaude(@"C:\tools\claude", exists);
+
+        Assert.Equal(ClaudeResolutionKind.Shim, resolution.Kind);
+        Assert.Equal(@"C:\tools\claude\claude" + ext, resolution.Path);
+    }
+
+    [Fact]
+    public void ResolveClaude_NativeExeAndShimInSameDir_PrefersNativeExe()
+    {
+        var exists = MakeExists(@"C:\tools\claude\claude.exe", @"C:\tools\claude\claude.cmd");
+        var resolution = DoctorCommand.ResolveClaude(@"C:\tools\claude", exists);
+
+        Assert.Equal(ClaudeResolutionKind.NativeExe, resolution.Kind);
+    }
+
+    [Fact]
+    public void ResolveClaude_EarlierDirWins_EvenIfLaterHasNativeExe()
+    {
+        var exists = MakeExists(@"C:\shim\claude.cmd", @"C:\native\claude.exe");
+        var resolution = DoctorCommand.ResolveClaude(@"C:\shim;C:\native", exists);
+
+        Assert.Equal(ClaudeResolutionKind.Shim, resolution.Kind);
+        Assert.Equal(@"C:\shim\claude.cmd", resolution.Path);
+    }
+
+    [Fact]
+    public void ResolveClaude_NotOnPath_ReturnsMissing()
+    {
+        var resolution = DoctorCommand.ResolveClaude(@"C:\empty1;C:\empty2", _ => false);
+
+        Assert.Equal(ClaudeResolutionKind.Missing, resolution.Kind);
+        Assert.Null(resolution.Path);
+    }
+
+    [Fact]
+    public void ResolveClaude_EmptyPath_ReturnsMissingWithoutThrowing()
+    {
+        var resolution = DoctorCommand.ResolveClaude(string.Empty, _ => false);
+
+        Assert.Equal(ClaudeResolutionKind.Missing, resolution.Kind);
+    }
+
+    // ---- DoctorCommand: Run() exit codes and output --------------------------------------
+
+    [Fact]
+    public void Doctor_NativeExeAndWebView2Present_ExitsZero()
+    {
+        var writer = new StringWriter();
+        var exitCode = DoctorCommand.Run(
+            writer,
+            @"C:\tools\claude",
+            MakeExists(@"C:\tools\claude\claude.exe"),
+            () => new WebView2Probe(WebView2RuntimeStatus.Found, "120.0.0.0"));
+
+        Assert.Equal(0, exitCode);
+        Assert.Contains("[OK]   claude resolves to a native executable", writer.ToString());
+        Assert.Contains("[OK]   WebView2 Evergreen runtime present: 120.0.0.0", writer.ToString());
+        Assert.Contains("All checks passed.", writer.ToString());
+    }
+
+    [Fact]
+    public void Doctor_ShimResolution_ExitsOneAndExplains()
+    {
+        var writer = new StringWriter();
+        var exitCode = DoctorCommand.Run(
+            writer,
+            @"C:\tools\claude",
+            MakeExists(@"C:\tools\claude\claude.cmd"),
+            () => new WebView2Probe(WebView2RuntimeStatus.Found, "120.0.0.0"));
+
+        Assert.Equal(1, exitCode);
+        Assert.Contains("[FAIL] claude resolves to a shim", writer.ToString());
+        Assert.Contains("One or more checks failed", writer.ToString());
+    }
+
+    [Fact]
+    public void Doctor_WebView2Missing_ExitsOneAndExplains()
+    {
+        var writer = new StringWriter();
+        var exitCode = DoctorCommand.Run(
+            writer,
+            @"C:\tools\claude",
+            MakeExists(@"C:\tools\claude\claude.exe"),
+            () => new WebView2Probe(WebView2RuntimeStatus.NotFound, null));
+
+        Assert.Equal(1, exitCode);
+        Assert.Contains("[FAIL] WebView2 Evergreen runtime not found", writer.ToString());
+    }
+
+    [Fact]
+    public void Doctor_ClaudeMissing_ExitsOneAndExplains()
+    {
+        var writer = new StringWriter();
+        var exitCode = DoctorCommand.Run(
+            writer,
+            string.Empty,
+            _ => false,
+            () => new WebView2Probe(WebView2RuntimeStatus.Found, "120.0.0.0"));
+
+        Assert.Equal(1, exitCode);
+        Assert.Contains("[FAIL] claude was not found on PATH.", writer.ToString());
+    }
+
+    [Fact]
+    public void Doctor_AlwaysNotesChecksAreMachineLocal()
+    {
+        var writer = new StringWriter();
+        DoctorCommand.Run(
+            writer,
+            @"C:\tools\claude",
+            MakeExists(@"C:\tools\claude\claude.exe"),
+            () => new WebView2Probe(WebView2RuntimeStatus.Found, "120.0.0.0"));
+
+        Assert.Contains("re-run on every deployment target before shipping", writer.ToString());
+    }
+
+    private static Func<string, bool> MakeExists(params string[] existingPaths)
+    {
+        var set = new HashSet<string>(existingPaths, StringComparer.OrdinalIgnoreCase);
+        return path => set.Contains(path);
     }
 
     // ---- helpers ------------------------------------------------------------------------

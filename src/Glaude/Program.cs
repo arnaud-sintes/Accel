@@ -22,9 +22,12 @@ switch (parsed.Verb)
     case Verb.SubagentStatusLine:
         return await SubagentStatusLineCommand.RunAsync(parsed.Port);
 
+    case Verb.Doctor:
+        return DoctorCommand.Run(Console.Out);
+
     case Verb.Unknown:
         Console.Error.WriteLine($"Unknown argument: '{parsed.UnknownVerbText}'");
-        Console.Error.WriteLine("Usage: glaude [--port <n>] [--uninstall]");
+        Console.Error.WriteLine("Usage: glaude [--port <n>] [--uninstall] | glaude doctor");
         return 1;
 
     case Verb.Start:
