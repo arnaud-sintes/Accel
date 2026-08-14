@@ -53,6 +53,29 @@ if (args.Length > 0 && string.Equals(args[0], "pty-registry-stress-test", String
     return Glaude.Orchestration.PtyRegistryStressTest.Run(Console.Out, tabs);
 }
 
+// P3-T4: hidden dev-only verb, same rationale and placement rules as the smoke tests above. Two halves:
+// app-exit graceful shutdown reaching PtyRegistry.CloseAllAsync down all THREE exit paths (explicit
+// Dispose/finally, console control events, AppDomain.ProcessExit), and startup orphan reconciliation of
+// `glaude-sessions.json` against the real OS process table (adoptable vs. stale, risk register item 5).
+// Neither is establishable with fakes: one needs a real process actually exiting, the other needs real
+// live/dead PIDs. Launches cmd.exe, never claude.exe, and only ever writes a temp-path registry file -
+// never the user's real ~/.claude profile. See PtyShutdownReconcileSmokeTest's remarks for why the
+// coordinator is proven here rather than installed into RunCombinedAsync (which has no session concept
+// yet - that integration belongs to the later task that swaps MonitorForm for the WPF MainWindow).
+if (args.Length > 0 && string.Equals(args[0], "pty-shutdown-orphan-test", StringComparison.Ordinal))
+{
+    return Glaude.Orchestration.PtyShutdownReconcileSmokeTest.Run(Console.Out);
+}
+
+// P3-T4's re-invoked child, used by `pty-shutdown-orphan-test`'s third exit-path check only: proving that
+// AppDomain.ProcessExit really does reach the session teardown requires a process that really exits, which
+// can only be a separate one. Not a user-facing verb in any sense.
+if (args.Length > 1 &&
+    string.Equals(args[0], Glaude.Orchestration.PtyShutdownReconcileSmokeTest.ProcessExitChildVerb, StringComparison.Ordinal))
+{
+    return Glaude.Orchestration.PtyShutdownReconcileSmokeTest.RunProcessExitChild(Console.Out, args[1]);
+}
+
 // P2-T5b: hidden dev-only verb, same rationale and placement rules as the smoke tests above -
 // proves xterm.js (WebView2, panel D) is actually wired to a live PtySession over a real
 // /pty/{tabId} WebSocket route on a real EventServer/Kestrel instance, end to end. No unit test
