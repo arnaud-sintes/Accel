@@ -4,6 +4,7 @@
     <OutputType>Exe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
+    <UseWPF>true</UseWPF>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
@@ -12,5 +13,20 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
   </PropertyGroup>
+
+  <!--
+    Microsoft.NET.Sdk.Web's default implicit-usings profile includes System.IO and
+    System.Net.Http (used implicitly across Metrics/Server code such as
+    RootsTreeBuilder.cs, TranscriptReader.cs, RawPayloadCapture.cs, RootFoldersConfig.cs,
+    EventServer.cs, SubagentStatusLineCommand.cs). Enabling UseWPF pulls in the
+    WindowsDesktop SDK overlay, whose own implicit-usings profile (for UseWindowsForms /
+    UseWPF apps) replaces rather than merges with the Web SDK's list, silently dropping
+    System.IO and System.Net.Http and breaking every file that relied on them being
+    implicit. Restore them explicitly here instead of editing every affected file.
+  -->
+  <ItemGroup>
+    <Using Include="System.IO" />
+    <Using Include="System.Net.Http" />
+  </ItemGroup>
 
 </Project>
