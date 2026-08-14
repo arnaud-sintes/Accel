@@ -128,7 +128,12 @@ public sealed class PtyLaunchSpec
             throw new PtySessionLaunchException("PtyLaunchSpec.ExecutablePath must be a non-empty path to an executable image.");
         }
 
-        var extension = Path.GetExtension(ExecutablePath);
+        // Trailing dots and spaces are stripped from the last path component by Win32 path
+        // normalisation, so 'claude.cmd.' and 'claude.cmd ' open the very same file as 'claude.cmd'
+        // (measured: File.Exists is true for all three). Path.GetExtension does NOT strip them - it
+        // reports "." and ".cmd " respectively - so comparing its raw result against ".cmd" left the
+        // guard below bypassable by a path spelling that the OS resolves straight back to a shim.
+        var extension = Path.GetExtension(ExecutablePath.TrimEnd('.', ' '));
         foreach (var shimExtension in ShimExtensions)
         {
             if (string.Equals(extension, shimExtension, StringComparison.OrdinalIgnoreCase))
@@ -369,6 +374,12 @@ public sealed class PtySession : IDisposable
     /// self-exit as a teardown. That distinction is the whole point of this property for the future
     /// <c>PtyRegistry</c> (it decides whether to report "session ended" to the user). Before any exit has
     /// been observed it reports the best current estimate.</para>
+    ///
+    /// <para>Freezing at observation is necessary but not sufficient, because <see cref="Dispose"/> is
+    /// itself very often the first observer: that is why Dispose looks for an already-completed exit
+    /// <i>before</i> it marks teardown. The one case that remains genuinely ambiguous - and is reported as
+    /// <see cref="PtySessionExitReason.TornDown"/> - is a child that exits <i>during</i> the teardown, which
+    /// is exactly what a well-behaved child does when its stdin is closed.</para>
     /// </summary>
     public PtySessionExitReason ExitReason =>
         _observedExitReasonRaw >= 0
@@ -621,12 +632,14 @@ public sealed class PtySession : IDisposable
     /// <summary>
     /// Idempotent teardown, in the one order that cannot hang:
     /// <list type="number">
+    /// <item>observe an exit that has <i>already</i> happened, before anything is marked as teardown - see
+    /// the comment on the call itself for why this is load-bearing rather than an optimisation;</item>
     /// <item>mark teardown requested (so a subsequent exit is reported as
     /// <see cref="PtySessionExitReason.TornDown"/>) and cancel the pump's token - the pump stops
     /// publishing and switches to drain-and-discard, which unblocks it even if the consumer had stalled
     /// on a full channel;</item>
     /// <item>dispose the <see cref="ConPtySession"/> - closes stdin, then <c>ClosePseudoConsole</c>. This
-    /// is the call that can block until the output pipe is drained, which is why step 1 comes first;</item>
+    /// is the call that can block until the output pipe is drained, which is why step 2 comes first;</item>
     /// <item>join the pump thread (bounded), then complete the output channel so any consumer's
     /// <c>await foreach</c> ends;</item>
     /// <item>detach and dispose the exit observer, and complete <see cref="ExitTask"/> if the child's exit
@@ -642,13 +655,28 @@ public sealed class PtySession : IDisposable
                 "PtySession.Dispose must not be called from the output pump thread: Dispose joins that thread.");
         }
 
-        _teardownRequested = true;
+        // A reentrant Dispose (a subscriber of Exited - which step 1 below can raise - calling back into
+        // us) and a concurrent second Dispose both stop here. The winner owns the whole teardown,
+        // *including* setting _teardownRequested: a loser must not set that flag, because the winner may
+        // be inside step 1 right now deciding whether the child's exit predates this teardown.
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
         {
             return;
         }
 
-        // 1.
+        // 1. Observe an exit that has already happened, BEFORE declaring teardown. If the child is
+        // already gone at the moment Dispose is called then this teardown plainly did not cause its exit,
+        // so the reason must freeze as ChildExited. Without this, the frozen-at-observation reason was
+        // still wrong for the most ordinary consumer shape there is: a consumer whose `await foreach` over
+        // Output ends at EOF (i.e. because the child died) and which then disposes the session. The
+        // Process.Exited callback is dispatched on a threadpool thread and loses that race essentially
+        // always - measured on this machine, 0 of 20 rounds classified such a self-exit correctly before
+        // this call existed (pty-session-smoke-test check 4 part B).
+        PollForExit();
+
+        _teardownRequested = true;
+
+        // 2.
         try
         {
             _stopCts.Cancel();
@@ -658,17 +686,17 @@ public sealed class PtySession : IDisposable
             // A cancellation callback throwing must not abort the rest of teardown.
         }
 
-        // 2. Serialized against Write so we never close the stream mid-write.
+        // 3. Serialized against Write so we never close the stream mid-write.
         lock (_writeGate)
         {
             _conPty.Dispose();
         }
 
-        // 3.
+        // 4.
         _pump.Join(_pumpJoinTimeout);
         _outputChannel.Writer.TryComplete();
 
-        // 4.
+        // 5.
         if (_childProcess is not null)
         {
             try

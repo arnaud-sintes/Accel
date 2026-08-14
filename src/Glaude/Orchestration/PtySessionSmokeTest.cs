@@ -127,6 +127,15 @@ public static class PtySessionSmokeTest
         output.WriteLine($"  [{(channelCompleted ? "PASS" : "FAIL")}] the output channel completed after Dispose, so a consumer's `await foreach` ends (chunks seen={collector.ChunkCount})");
         ok &= channelCompleted;
 
+        // Separate assertion, and not implied by the one above: Dispose completes the channel itself, so a
+        // completed channel proves nothing about the pump thread. This session was idle at a cmd prompt,
+        // i.e. the pump was parked inside a blocking OS read with no data coming, which is precisely the
+        // shape that could leak the thread - measured, neither cancelling the token nor closing the read
+        // handle unblocks a synchronous ReadFile; only ClosePseudoConsole does, which is why
+        // ConPtySession's close order (pseudoconsole before the output read end) is load-bearing here.
+        output.WriteLine($"  [{(session.PumpThreadFinished ? "PASS" : "FAIL")}] the pump thread had terminated by the time Dispose returned, even though it was parked in a blocking read");
+        ok &= session.PumpThreadFinished;
+
         var exitObserved = session.ExitTask.Wait(TimeSpan.FromSeconds(5));
         output.WriteLine($"  [{(exitObserved ? "PASS" : "FAIL")}] ExitTask completed (exitCode={FormatExit(session)}, reason={session.ExitReason})");
         ok &= exitObserved;
@@ -233,7 +242,44 @@ public static class PtySessionSmokeTest
         output.WriteLine($"  [{(ok ? "PASS" : "FAIL")}] the child exited on its own and was reaped without any Dispose (completed={completed}, exitCode={exitCode?.ToString() ?? "null"}, expected 42, reason={reason}, expected ChildExited)");
 
         collector.WaitForCompletion(TimeSpan.FromSeconds(2));
-        return ok;
+
+        // Part B: the exit-reason race. Above, ExitTask is awaited first, so the reason is frozen by the
+        // Process.Exited callback long before Dispose runs - the easy ordering. The hostile ordering is a
+        // consumer that reacts to the *pty* (its `await foreach` ends at EOF) and disposes the session
+        // immediately: the child has provably exited, but Process.Exited is dispatched on a threadpool
+        // thread and may not have run yet, so Dispose is what observes the exit. If Dispose marks
+        // teardown before observing, a genuine self-exit is relabelled TornDown - the same
+        // frozen-vs-recomputed bug class as the original one, one call site further along.
+        //
+        // Each round below proves the child is dead through an INDEPENDENT handle before calling Dispose,
+        // so ChildExited is the only truthful answer; anything else is a misclassification.
+        const int rounds = 20;
+        var selfExits = 0;
+        for (var round = 0; round < rounds; round++)
+        {
+            var racing = PtySession.Start(CmdSpec("/c", "exit", "42"), new PtySessionOptions());
+            try
+            {
+                using (var observer = Process.GetProcessById(racing.ProcessId))
+                {
+                    observer.WaitForExit(10_000);
+                }
+            }
+            catch (ArgumentException)
+            {
+                // PID no longer resolvable - the child is gone, which is all this needed to establish.
+            }
+
+            racing.Dispose();
+            if (racing.ExitReason == PtySessionExitReason.ChildExited)
+            {
+                selfExits++;
+            }
+        }
+
+        var raceOk = selfExits == rounds;
+        output.WriteLine($"  [{(raceOk ? "PASS" : "FAIL")}] a self-exit stays ChildExited even when Dispose is what observes it: {selfExits}/{rounds} rounds reported ChildExited (a TornDown here would be a misclassified self-exit)");
+        return ok && raceOk;
     }
 
     private static bool RunBackpressureAndTeardownCheck(TextWriter output)

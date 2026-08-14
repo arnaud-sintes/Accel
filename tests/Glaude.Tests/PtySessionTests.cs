@@ -121,6 +121,138 @@ public class PtySessionTests
         Assert.Equal("ok\uFFFD", text);
     }
 
+    /// <summary>
+    /// The same truncation, but ended by a <i>read failure</i> (the pty read end closed under the pump)
+    /// rather than by a clean zero-length read. This is the real teardown shape - a child killed
+    /// mid-emoji - and the two exits from the loop are different code paths, so the decoder flush has to
+    /// be reached from both. Nothing may be dropped, nothing may fault the consumer.
+    /// </summary>
+    [Theory]
+    [InlineData(typeof(IOException))]
+    [InlineData(typeof(ObjectDisposedException))]
+    [InlineData(typeof(OperationCanceledException))]
+    public void PumpStillFlushesTheDecoderWhenTheStreamFailsMidMultiByteSequence(Type exceptionType)
+    {
+        Exception exception = exceptionType == typeof(IOException) ? new IOException("pipe broken")
+            : exceptionType == typeof(ObjectDisposedException) ? new ObjectDisposedException("stream")
+            : new OperationCanceledException();
+        var bytes = Encoding.UTF8.GetBytes("ok\U0001F600");
+        var source = new ThrowingStream(exception, bytes[..(bytes.Length - 2)]);
+        var channel = Channel.CreateUnbounded<string>();
+        var pump = new PtyOutputPump(source, channel.Writer, bufferSize: 16);
+
+        pump.RunLoop(CancellationToken.None);
+
+        Assert.Null(pump.Error);
+        Assert.True(pump.SawEof);
+        Assert.Equal("ok�", string.Concat(DrainSync(channel.Reader)));
+        Assert.True(channel.Reader.Completion.IsCompletedSuccessfully);
+    }
+
+    /// <summary>
+    /// Genuinely malformed UTF-8 - not a split valid sequence, but bytes that cannot be valid anywhere: a
+    /// lone continuation byte, an overlong encoding, a UTF-8-encoded surrogate, 0xFF/0xFE (never legal in
+    /// UTF-8), and a truncated sequence followed by ASCII. A buggy or hostile child can emit any of these,
+    /// and the pump must substitute U+FFFD and keep going rather than throw: <see cref="Encoding.UTF8"/>
+    /// carries a <see cref="DecoderReplacementFallback"/>, so a
+    /// <see cref="DecoderFallbackException"/> is impossible here - but only as long as the decoder comes
+    /// from <see cref="Encoding.UTF8"/> and not from a <c>new UTF8Encoding(false, throwOnInvalidBytes: true)</c>,
+    /// which is exactly what this test pins down.
+    /// </summary>
+    [Theory]
+    [InlineData(new byte[] { 0x80 })]                                     // lone continuation byte
+    [InlineData(new byte[] { 0xC0, 0x80 })]                               // overlong encoding of NUL
+    [InlineData(new byte[] { 0xED, 0xA0, 0x80 })]                         // UTF-8-encoded surrogate D800
+    [InlineData(new byte[] { 0xFF, 0xFE })]                               // never legal in UTF-8
+    [InlineData(new byte[] { 0xF0, 0x9F, 0x41 })]                         // 4-byte lead, then ASCII
+    [InlineData(new byte[] { 0xF5, 0x80, 0x80, 0x80 })]                   // above U+10FFFF
+    [InlineData(new byte[] { 0xE0, 0x80, 0x80 })]                         // overlong 3-byte
+    [InlineData(new byte[] { 0x41, 0xC3, 0x28, 0x42 })]                   // bad continuation between ASCII
+    public async Task PumpSubstitutesReplacementCharactersForMalformedUtf8InsteadOfThrowing(byte[] malformed)
+    {
+        var payload = new byte[malformed.Length + 4];
+        Encoding.UTF8.GetBytes("[").CopyTo(payload, 0);
+        malformed.CopyTo(payload, 1);
+        Encoding.UTF8.GetBytes("]ok").CopyTo(payload, malformed.Length + 1);
+
+        var (chunks, pump) = await PumpChunks(new ChunkedStream(payload));
+        var text = string.Concat(chunks);
+
+        Assert.Null(pump.Error); // no DecoderFallbackException, no anything
+        Assert.True(pump.SawEof);
+        Assert.StartsWith("[", text, StringComparison.Ordinal);
+        Assert.EndsWith("]ok", text, StringComparison.Ordinal);
+        Assert.Contains('�', text);
+
+        // The streaming decode must agree with a one-shot decode of the same bytes: whatever the
+        // maximal-subpart rule decides, the pump must not add or lose replacement characters just
+        // because the bytes arrived in one read rather than another.
+        Assert.Equal(Encoding.UTF8.GetString(payload), text);
+    }
+
+    /// <summary>
+    /// A brute-force version of the two tests above: random bytes (so a healthy share of them are invalid
+    /// UTF-8), delivered in random-sized reads, through a read buffer small enough that the pump's own
+    /// buffer keeps splitting sequences. Two invariants: the pump never throws, and the streamed decode is
+    /// byte-for-byte identical to a one-shot decode of the whole input.
+    ///
+    /// <para>It also exercises the output-buffer sizing. The pump allocates
+    /// <c>GetMaxCharCount(bufferSize) + 4</c> chars, and worst-case malformed input produces one U+FFFD per
+    /// byte <i>plus</i> whatever the decoder was holding from the previous read - if that slack were wrong,
+    /// <c>Decoder.GetChars</c> would throw <see cref="ArgumentException"/> here rather than silently
+    /// truncate.</para>
+    /// </summary>
+    [Fact]
+    public async Task PumpNeverThrowsAndMatchesAOneShotDecodeForRandomlySplitRandomBytes()
+    {
+        var random = new Random(20260814); // fixed seed: a failure must be reproducible
+        for (var iteration = 0; iteration < 200; iteration++)
+        {
+            var all = new byte[random.Next(1, 300)];
+            random.NextBytes(all);
+
+            var reads = new List<byte[]>();
+            for (var offset = 0; offset < all.Length;)
+            {
+                var take = Math.Min(random.Next(1, 9), all.Length - offset);
+                reads.Add(all[offset..(offset + take)]);
+                offset += take;
+            }
+
+            var (chunks, pump) = await PumpChunks(new ChunkedStream(reads.ToArray()), bufferSize: 4);
+
+            Assert.Null(pump.Error);
+            Assert.Equal(all.Length, pump.BytesRead);
+            Assert.Equal(Encoding.UTF8.GetString(all), string.Concat(chunks));
+            Assert.DoesNotContain(string.Empty, chunks);
+        }
+    }
+
+    /// <summary>
+    /// Write-after-complete on the pump thread: if the channel is completed by anyone else (a consumer
+    /// calling <c>Complete</c>, or <see cref="PtySession.Dispose"/> completing it after the pump join timed
+    /// out), the pump's next write must be swallowed as "cannot publish any more" rather than throwing
+    /// <see cref="ChannelClosedException"/> on a thread with no handler. The pump must still drain the pipe
+    /// to EOF, because that is what stops <c>ClosePseudoConsole</c> wedging.
+    /// </summary>
+    [Fact]
+    public void PumpSurvivesTheChannelBeingCompletedUnderneathItAndStillDrainsToEof()
+    {
+        var chunks = Enumerable.Range(0, 20).Select(_ => Encoding.UTF8.GetBytes("cccc")).ToArray();
+        var channel = Channel.CreateUnbounded<string>();
+        var pump = new PtyOutputPump(new ChunkedStream(chunks), channel.Writer, bufferSize: 4);
+
+        channel.Writer.Complete(); // the race, made deterministic
+
+        pump.RunLoop(CancellationToken.None); // must not throw
+
+        Assert.Null(pump.Error);
+        Assert.True(pump.SawEof);
+        Assert.Equal(chunks.Length * 4, pump.BytesRead);
+        Assert.Equal(0, pump.ChunksPublished);
+        Assert.True(pump.ChunksDiscarded > 0);
+    }
+
     /// <summary>A chunk larger than the read buffer is split by the pump itself, which is the same
     /// boundary problem from the other direction.</summary>
     [Fact]
@@ -409,6 +541,45 @@ public class PtySessionTests
         Assert.Contains(shimPath, exception.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The shim guard must not be bypassable by spellings of the same path that Win32 resolves to the same
+    /// file. Measured on this machine: <c>File.Exists(@"...\claude.cmd.")</c> and
+    /// <c>File.Exists(@"...\claude.cmd ")</c> are both true, because Win32 path normalisation strips
+    /// trailing dots and spaces from the last path component - while
+    /// <see cref="Path.GetExtension(string)"/> reports <c>"."</c> and <c>".cmd "</c> respectively and so
+    /// would not match <c>".cmd"</c>. Forward slashes and <c>..</c> segments do not change the extension
+    /// but are covered here so a future path-normalisation change cannot silently open a hole.
+    /// </summary>
+    [Theory]
+    [InlineData(@"C:\npm\claude.cmd.")]
+    [InlineData(@"C:\npm\claude.cmd...")]
+    [InlineData("C:\\npm\\claude.cmd ")]
+    [InlineData("C:\\npm\\claude.CMD. ")]
+    [InlineData("C:/npm/claude.bat")]
+    [InlineData(@"C:\npm\..\npm\claude.ps1")]
+    [InlineData(@"\\?\C:\npm\claude.cmd")]
+    [InlineData(@"claude.cmd")]
+    public void ValidateRefusesShimPathsSpelledSoTheExtensionCheckCouldBeEvaded(string shimPath)
+    {
+        var spec = new PtyLaunchSpec { ExecutablePath = shimPath };
+
+        var exception = Assert.Throws<PtySessionLaunchException>(spec.Validate);
+        Assert.Contains("shim", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>The trailing-dot/space trimming must not start rejecting legitimate executables whose name
+    /// merely contains a shim extension somewhere.</summary>
+    [Theory]
+    [InlineData(@"C:\bin\claude.exe")]
+    [InlineData(@"C:\bin\claude.cmd.exe")]
+    [InlineData(@"C:\cmd\claude.exe")]
+    [InlineData(@"C:\bin\node.exe")]
+    [InlineData(@"C:\bin\claude.exe ")]
+    public void ValidateAcceptsNativeExecutablesThatOnlyLookLikeShims(string path)
+    {
+        new PtyLaunchSpec { ExecutablePath = path }.Validate();
+    }
+
     [Fact]
     public void StartRefusesAShimBeforeAllocatingAnyOsResource()
     {
@@ -605,6 +776,19 @@ public class PtySessionTests
     {
         var (chunks, _) = await PumpChunks(source, bufferSize);
         return string.Concat(chunks);
+    }
+
+    /// <summary>Drains an already-completed channel synchronously (no await, so it can be used from a
+    /// non-async test).</summary>
+    private static List<string> DrainSync(ChannelReader<string> reader)
+    {
+        var chunks = new List<string>();
+        while (reader.TryRead(out var chunk))
+        {
+            chunks.Add(chunk);
+        }
+
+        return chunks;
     }
 
     private static async Task<(List<string> Chunks, PtyOutputPump Pump)> PumpChunks(Stream source, int bufferSize = 4096)
