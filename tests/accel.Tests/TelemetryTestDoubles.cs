@@ -160,7 +160,9 @@ internal sealed class FakeTelemetryFeed : ITelemetryFeed
 /// </summary>
 internal static class TelemetryFixtures
 {
-    public static AgentTreeDto Agent(string agentId, string status = "live", string? name = null) => new(
+    public static AgentTreeDto Agent(
+        string agentId, string status = "live", string? name = null,
+        long? durationMs = null, long? consumedTokens = null) => new(
         AgentId: agentId,
         Name: name,
         AgentType: "general-purpose",
@@ -175,13 +177,17 @@ internal static class TelemetryFixtures
         UsedPercentage: 0.5,
         Status: status,
         Source: "subagentStatusLine",
-        AsOf: new DateTime(2026, 8, 14, 10, 0, 0, DateTimeKind.Utc));
+        AsOf: new DateTime(2026, 8, 14, 10, 0, 0, DateTimeKind.Utc),
+        DurationMs: durationMs,
+        ConsumedTokens: consumedTokens);
 
     public static SessionTreeDto Session(
         string sessionId,
         bool isLive = false,
         AgentTreeDto[]? agents = null,
-        string name = "a session") => new(
+        string name = "a session",
+        long? durationMs = null,
+        long? consumedTokens = null) => new(
         SessionId: sessionId,
         Name: name,
         NameSource: "first_message",
@@ -199,7 +205,9 @@ internal static class TelemetryFixtures
         Source: isLive ? "statusLine" : "transcript",
         AsOf: new DateTime(2026, 8, 14, 10, 0, 0, DateTimeKind.Utc),
         LastActivityUtc: new DateTime(2026, 8, 14, 10, 0, 0, DateTimeKind.Utc),
-        Agents: agents ?? Array.Empty<AgentTreeDto>());
+        Agents: agents ?? Array.Empty<AgentTreeDto>(),
+        DurationMs: durationMs,
+        ConsumedTokens: consumedTokens);
 
     public static RootTreeDto Root(string path, params SessionTreeDto[] sessions) =>
         new(Path: path, Exists: true, Sessions: sessions);

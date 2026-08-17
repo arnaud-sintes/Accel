@@ -101,7 +101,7 @@ switch (parsed.Verb)
 
     case Verb.Unknown:
         Console.Error.WriteLine($"Unknown argument: '{parsed.UnknownVerbText}'");
-        Console.Error.WriteLine("Usage: accel [--port <n>] [--uninstall] | accel doctor");
+        Console.Error.WriteLine("Usage: accel [--port <n>] [--uninstall] [--verbose] | accel doctor");
         return 1;
 
     case Verb.Start:
@@ -111,7 +111,7 @@ switch (parsed.Verb)
             return UninstallCommand.Run(Console.Out);
         }
 
-        return await RunCombinedAsync(parsed.Port, parsed.DumpRawDir);
+        return await RunCombinedAsync(parsed.Port, parsed.DumpRawDir, parsed.Verbose);
 }
 
 // Installs hooks (best-effort), starts the Kestrel host in-process, and runs the WPF shell on a
@@ -119,15 +119,17 @@ switch (parsed.Verb)
 // cleanly so no listener is left orphaned on the port - see project plan's "Process lifecycle for
 // combined start" section for why this exact shape (StartAsync, not the blocking RunAsync, so
 // this async Main can join the STA thread and still shut Kestrel down afterwards).
-static async Task<int> RunCombinedAsync(int port, string? dumpRawDir)
+static async Task<int> RunCombinedAsync(int port, string? dumpRawDir, bool verbose = false)
 {
     // Best-effort install: InstallCommand.Run already prints its own warning and returns 1 on
     // refusal (e.g. settings.json unwritable) - that refusal must never abort the whole process,
-    // it just means hooks weren't (re)registered this run.
-    InstallCommand.Run(port, Console.Out);
+    // it just means hooks weren't (re)registered this run. A regular (non-verbose) launch only
+    // surfaces the lines that matter at startup - a refusal, or a repaired port drift - through
+    // StartupOnlyWriter below; --verbose gets InstallCommand's full per-run summary unfiltered.
+    InstallCommand.Run(port, verbose ? Console.Out : new StartupOnlyWriter(Console.Out));
 
     var server = new EventServer();
-    var app = server.BuildApp(port, dumpRawDir);
+    var app = server.BuildApp(port, dumpRawDir, verbose);
     await app.StartAsync();
     Console.WriteLine($"Accel listening on http://127.0.0.1:{port}");
     if (dumpRawDir is not null)
@@ -157,12 +159,27 @@ static async Task<int> RunCombinedAsync(int port, string? dumpRawDir)
         var selection = new Accel.App.Services.SessionSelectionService();
         var sessionRegistry = new Accel.Orchestration.PtyRegistry();
         var rootsPanel = new Accel.App.ViewModels.RootsPanelViewModel(feed, dispatcher, selection: selection);
-        var tabs = new Accel.App.ViewModels.TabsViewModel(sessionRegistry, selection.AcquireWriter(), dispatcher);
 
-        mainWindow = new Accel.App.MainWindow(rootsPanel, server.PtySessions, port, tabs, sessionRegistry, selection);
+        // Panel E: a second reader on the same feed/dispatcher/selection triple as rootsPanel - never
+        // a filtered view of rootsPanel's own tree (design doc "claude-agentgraph.md" §7.1/§7.7).
+        var agentGraph = new Accel.App.ViewModels.AgentGraphViewModel(feed, dispatcher, selection);
+        // statusPollInterval: re-checks the selected tab's Claude Code status file for a session id
+        // that has drifted from the launch-time tabId (e.g. the user typed /clear) - see
+        // TabsViewModel.PollFocusedSessionId's remarks for why panel A would otherwise show that
+        // session as a permanently unfocused, disconnected row.
+        var tabs = new Accel.App.ViewModels.TabsViewModel(
+            sessionRegistry,
+            selection.AcquireWriter(),
+            dispatcher,
+            statusPollInterval: TimeSpan.FromSeconds(1));
+
+        mainWindow = new Accel.App.MainWindow(rootsPanel, server.PtySessions, port, tabs, sessionRegistry, selection, agentGraph);
         mainWindow.Loaded += (_, _) => rootsPanel.Start();
         mainWindow.Closed += (_, _) =>
         {
+            // Disposed immediately before rootsPanel.Dispose() - before feed.Dispose() - so the panel
+            // unhooks from a feed that still exists.
+            agentGraph.Dispose();
             rootsPanel.Dispose();
             feed.Dispose();
 
@@ -213,4 +230,33 @@ static async Task<int> RunCombinedAsync(int port, string? dumpRawDir)
 
     await server.StopAsync();
     return 0;
+}
+
+/// <summary>
+/// Wraps a regular launch's <see cref="InstallCommand.Run(int, TextWriter)"/> call so only the
+/// lines that actually matter at startup reach the console: a refusal (an error - install was
+/// aborted, nothing was written) or a repaired port drift (the port Accel is about to listen on
+/// silently changed from what was previously installed). Every other line
+/// <see cref="InstallCommand"/> writes on a normal, nothing-to-report run (its full per-field
+/// "Installed/Already installed/..." summary) is deliberately swallowed here - that detail is
+/// only useful with <c>--verbose</c>, which bypasses this writer entirely (see
+/// <c>RunCombinedAsync</c>) in favor of the real <see cref="Console.Out"/>.
+/// </summary>
+sealed class StartupOnlyWriter : TextWriter
+{
+    private static readonly string[] AlwaysPass = { "Refused", "Port drift repaired" };
+
+    private readonly TextWriter _inner;
+
+    public StartupOnlyWriter(TextWriter inner) => _inner = inner;
+
+    public override System.Text.Encoding Encoding => _inner.Encoding;
+
+    public override void WriteLine(string? value)
+    {
+        if (value is not null && Array.Exists(AlwaysPass, marker => value.Contains(marker, StringComparison.Ordinal)))
+        {
+            _inner.WriteLine(value);
+        }
+    }
 }

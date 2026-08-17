@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 
@@ -5,10 +6,13 @@ namespace Accel.Metrics;
 
 /// <summary>
 /// The fields Accel extracts from the *head* of a transcript JSONL file: the session's
-/// starting <c>cwd</c> and the raw text of the first "real" user message (see
-/// <see cref="TranscriptHeadReader.DeriveLabel"/> for how that text becomes a display label).
+/// starting <c>cwd</c>, the raw text of the first "real" user message (see
+/// <see cref="TranscriptHeadReader.DeriveLabel"/> for how that text becomes a display label),
+/// and (see section 6.2 of claude-agentgraph.md) the first parseable top-level <c>timestamp</c>
+/// found scanning forward through the head window - a durable, immutable-per-file "session
+/// started at" signal, in the same spirit as <see cref="Cwd"/>.
 /// </summary>
-public sealed record TranscriptHeadInfo(string? Cwd, string? FirstUserMessageText);
+public sealed record TranscriptHeadInfo(string? Cwd, string? FirstUserMessageText, DateTime? FirstTimestampUtc = null);
 
 /// <summary>
 /// Bounded head-reader for transcript JSONL files. Reads only the first ~64KB of the file
@@ -130,6 +134,7 @@ public static class TranscriptHeadReader
             : rawLines.Length - 2;
 
         string? cwd = null;
+        DateTime? firstTimestampUtc = null;
         var userLines = new List<string>();
 
         for (int i = 0; i <= lastUsableIndex && i < rawLines.Length; i++)
@@ -161,6 +166,17 @@ public static class TranscriptHeadReader
                     cwd = cwdProp.GetString();
                 }
 
+                // "First parseable timestamp wins", scanning forward - not "the first line's
+                // timestamp" - for the same reason the cwd probe above scans forward: the very
+                // first line on this machine is typically a mode-marker with no such field.
+                if (firstTimestampUtc is null
+                    && root.TryGetProperty("timestamp", out var tsProp)
+                    && tsProp.ValueKind == JsonValueKind.String
+                    && TryParseIso8601Utc(tsProp.GetString(), out DateTime parsedTimestamp))
+                {
+                    firstTimestampUtc = parsedTimestamp;
+                }
+
                 if (userLines.Count < MaxUserCandidates
                     && root.TryGetProperty("type", out var typeProp)
                     && typeProp.ValueKind == JsonValueKind.String
@@ -190,7 +206,56 @@ public static class TranscriptHeadReader
             break;
         }
 
-        return new TranscriptHeadInfo(cwd, firstUserMessageText);
+        return new TranscriptHeadInfo(cwd, firstUserMessageText, firstTimestampUtc);
+    }
+
+    /// <summary>
+    /// Tolerant ISO-8601 -&gt; UTC parse used for a transcript line's <c>timestamp</c> field:
+    /// never throws (returns false on anything unparseable), normalizes any offset to UTC, and
+    /// rejects results outside a sanity window (<c>[2020-01-01, now + 1 day]</c>) as a
+    /// clock-skew / junk-line guard - out-of-range degrades to "no timestamp", exactly like a
+    /// malformed string does.
+    /// </summary>
+    /// <summary>Internal (not private) so <see cref="MetricsPipeline"/>'s tier-2
+    /// <c>GetTaskDateTime</c> helper can reuse the exact same tolerant parse/sanity-gate logic
+    /// rather than duplicating it - see claude-agentgraph.md section 6.3.</summary>
+    internal static bool TryParseIso8601Utc(string? s, out DateTime utc)
+    {
+        utc = default;
+
+        if (string.IsNullOrEmpty(s))
+        {
+            return false;
+        }
+
+        // Note: claude-agentgraph.md section 6.2 suggested combining RoundtripKind with
+        // AdjustToUniversal, but .NET rejects that combination at runtime
+        // (DateTimeStyles.RoundtripKind cannot be used with AdjustToUniversal) - AdjustToUniversal
+        // alone already normalizes any parsed offset (including "Z") to UTC, which is all this
+        // needs.
+        if (!DateTime.TryParse(
+                s,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.AdjustToUniversal,
+                out DateTime parsed))
+        {
+            return false;
+        }
+
+        if (parsed.Kind != DateTimeKind.Utc)
+        {
+            parsed = parsed.ToUniversalTime();
+        }
+
+        DateTime sanityFloor = new DateTime(2020, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        DateTime sanityCeiling = DateTime.UtcNow.AddDays(1);
+        if (parsed < sanityFloor || parsed > sanityCeiling)
+        {
+            return false;
+        }
+
+        utc = parsed;
+        return true;
     }
 
     private static bool StartsWithAnySkipPrefix(string text)

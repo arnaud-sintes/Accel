@@ -13,7 +13,11 @@ using Xunit;
 /// </summary>
 public class MonitorTreeBuilderTests
 {
-    private static SessionTreeDto LiveSession(string id = "22b04584-99e9-4343-b36d-8937b69321da", AgentTreeDto[]? agents = null) => new(
+    private static SessionTreeDto LiveSession(
+        string id = "22b04584-99e9-4343-b36d-8937b69321da",
+        AgentTreeDto[]? agents = null,
+        long? durationMs = null,
+        long? consumedTokens = null) => new(
         SessionId: id,
         Name: "Build session monitoring application",
         NameSource: "status_line",
@@ -31,7 +35,9 @@ public class MonitorTreeBuilderTests
         Source: "statusLine",
         AsOf: DateTime.UtcNow,
         LastActivityUtc: DateTime.UtcNow,
-        Agents: agents ?? Array.Empty<AgentTreeDto>());
+        Agents: agents ?? Array.Empty<AgentTreeDto>(),
+        DurationMs: durationMs,
+        ConsumedTokens: consumedTokens);
 
     private static SessionTreeDto HistoricalSession(string id = "hist-session-000000000000") => new(
         SessionId: id,
@@ -53,7 +59,7 @@ public class MonitorTreeBuilderTests
         LastActivityUtc: DateTime.UtcNow,
         Agents: Array.Empty<AgentTreeDto>());
 
-    private static AgentTreeDto LiveAgent(string id = "abc123") => new(
+    private static AgentTreeDto LiveAgent(string id = "abc123", long? durationMs = null, long? consumedTokens = null) => new(
         AgentId: id,
         Name: "Audit project-ui.md",
         AgentType: "general-purpose",
@@ -68,7 +74,9 @@ public class MonitorTreeBuilderTests
         UsedPercentage: 20.6,
         Status: "live",
         Source: "subagentStatusLine",
-        AsOf: DateTime.UtcNow);
+        AsOf: DateTime.UtcNow,
+        DurationMs: durationMs,
+        ConsumedTokens: consumedTokens);
 
     private static AgentTreeDto StaleAgent(string id = "stale-agent") => new(
         AgentId: id,
@@ -745,5 +753,115 @@ public class MonitorTreeBuilderTests
         Assert.Equal("claude-sonnet-5", columns.Model);
         Assert.Equal("medium", columns.Effort);
         Assert.Equal("20.6% of 200K (assumed)", columns.Context);
+    }
+
+    // ---- Duration/Tokens columns (claude-agentgraph.md section 6.6) ----------------------
+
+    [Fact]
+    public void Build_SessionColumns_DurationAndTokensAreFormatted()
+    {
+        var session = LiveSession(durationMs: 424_000, consumedTokens: 148_223); // 7m 04s, 148.2K
+        var dto = new RootsTreeDto(
+            Roots: new[] { new RootTreeDto(@"C:\projects", true, new[] { session }) },
+            UnattributedSessions: Array.Empty<SessionTreeDto>(),
+            UnattributedAgents: Array.Empty<AgentTreeDto>(),
+            GeneratedAtUtc: DateTime.UtcNow,
+            ScanMs: 1);
+
+        var tree = MonitorTreeBuilder.Build(dto);
+        var sessionNode = tree.Roots[0].Sessions[0];
+
+        Assert.Equal("7m 04s", sessionNode.Columns.Duration);
+        Assert.Equal("148.2K", sessionNode.Columns.Tokens);
+        Assert.Equal(424_000, sessionNode.DurationMs);
+        Assert.Equal(148_223, sessionNode.ConsumedTokens);
+    }
+
+    [Fact]
+    public void Build_AgentColumns_DurationAndTokensAreFormatted()
+    {
+        var session = LiveSession(agents: new[] { LiveAgent(durationMs: 65_000, consumedTokens: 842) }); // 1m 05s, 842
+        var dto = new RootsTreeDto(
+            Roots: new[] { new RootTreeDto(@"C:\projects", true, new[] { session }) },
+            UnattributedSessions: Array.Empty<SessionTreeDto>(),
+            UnattributedAgents: Array.Empty<AgentTreeDto>(),
+            GeneratedAtUtc: DateTime.UtcNow,
+            ScanMs: 1);
+
+        var tree = MonitorTreeBuilder.Build(dto);
+        var agentNode = tree.Roots[0].Sessions[0].Agents[0];
+
+        Assert.Equal("1m 05s", agentNode.Columns.Duration);
+        Assert.Equal("842", agentNode.Columns.Tokens);
+        Assert.Equal(65_000, agentNode.DurationMs);
+        Assert.Equal(842, agentNode.ConsumedTokens);
+    }
+
+    [Fact]
+    public void Build_NullDurationAndTokens_RenderEmDash()
+    {
+        var session = LiveSession(durationMs: null, consumedTokens: null);
+        var dto = new RootsTreeDto(
+            Roots: new[] { new RootTreeDto(@"C:\projects", true, new[] { session }) },
+            UnattributedSessions: Array.Empty<SessionTreeDto>(),
+            UnattributedAgents: Array.Empty<AgentTreeDto>(),
+            GeneratedAtUtc: DateTime.UtcNow,
+            ScanMs: 1);
+
+        var tree = MonitorTreeBuilder.Build(dto);
+        var sessionNode = tree.Roots[0].Sessions[0];
+
+        Assert.Equal("—", sessionNode.Columns.Duration);
+        Assert.Equal("—", sessionNode.Columns.Tokens);
+        Assert.Null(sessionNode.DurationMs);
+        Assert.Null(sessionNode.ConsumedTokens);
+    }
+
+    [Fact]
+    public void Build_SessionNode_CarriesRawDurationMsAndConsumedTokens()
+    {
+        var session = LiveSession(durationMs: 1_500, consumedTokens: 5_000_000);
+        var dto = new RootsTreeDto(
+            Roots: new[] { new RootTreeDto(@"C:\projects", true, new[] { session }) },
+            UnattributedSessions: Array.Empty<SessionTreeDto>(),
+            UnattributedAgents: Array.Empty<AgentTreeDto>(),
+            GeneratedAtUtc: DateTime.UtcNow,
+            ScanMs: 1);
+
+        var tree = MonitorTreeBuilder.Build(dto);
+        var sessionNode = tree.Roots[0].Sessions[0];
+
+        Assert.Equal(1_500, sessionNode.DurationMs);
+        Assert.Equal(5_000_000, sessionNode.ConsumedTokens);
+        Assert.Equal("1s", sessionNode.Columns.Duration); // 1500ms truncates to 1 whole second
+        Assert.Equal("5.0M", sessionNode.Columns.Tokens);
+    }
+
+    [Theory]
+    [InlineData(null, "—")]
+    [InlineData(0L, "0s")]
+    [InlineData(12_000L, "12s")]
+    [InlineData(59_000L, "59s")]
+    [InlineData(60_000L, "1m 00s")]
+    [InlineData(424_000L, "7m 04s")]
+    [InlineData(3_599_000L, "59m 59s")]
+    [InlineData(3_600_000L, "1h 00m")]
+    [InlineData(5_000_000L, "1h 23m")]
+    public void FormatDuration_ProducesExpectedStrings(long? ms, string expected)
+    {
+        Assert.Equal(expected, MonitorTreeBuilder.FormatDuration(ms));
+    }
+
+    [Theory]
+    [InlineData(null, "—")]
+    [InlineData(0L, "0")]
+    [InlineData(842L, "842")]
+    [InlineData(999L, "999")]
+    [InlineData(148_200L, "148.2K")]
+    [InlineData(999_999L, "1000.0K")]
+    [InlineData(1_400_000L, "1.4M")]
+    public void FormatTokenCount_ProducesExpectedStrings(long? tokens, string expected)
+    {
+        Assert.Equal(expected, MonitorTreeBuilder.FormatTokenCount(tokens));
     }
 }

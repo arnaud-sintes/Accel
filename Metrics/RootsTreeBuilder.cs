@@ -38,11 +38,26 @@ public sealed class RootsTreeBuilder
     // when that key changes, per project-ui.md's "Per-tick cost and caching" section.
     private readonly ConcurrentDictionary<string, TailCacheEntry> _tailCache = new(StringComparer.OrdinalIgnoreCase);
 
+    // Tier-1 agent-start cache (claude-agentgraph.md section 6.3): keyed by agent_id (globally
+    // unique, immutable value once found), NOT by path - a path-derivation change never needs to
+    // invalidate this. A hit with a non-null StartedAtUtc is permanent. A miss (the transcript
+    // file doesn't exist yet - the common race where an agent appears in tasks[] before its
+    // transcript is written) is retried at most once every 10 seconds via LastAttemptUtc, so a
+    // live agent whose file never materializes costs one bounded 64KB read per 10s rather than
+    // one per ~2s telemetry tick.
+    private readonly ConcurrentDictionary<string, AgentStartCacheEntry> _agentStartCache = new(StringComparer.Ordinal);
+
+    private sealed record AgentStartCacheEntry(DateTime? StartedAtUtc, DateTime LastAttemptUtc);
+
     /// <summary>Number of distinct file paths with a permanently-cached head read. Test hook.</summary>
     public int HeadCacheCount => _headCache.Count;
 
     /// <summary>Number of distinct file paths with a cached tail read. Test hook.</summary>
     public int TailCacheCount => _tailCache.Count;
+
+    /// <summary>Number of distinct agent ids with a cached tier-1 start-time attempt (hit or
+    /// miss). Test hook, matching <see cref="HeadCacheCount"/>/<see cref="TailCacheCount"/>.</summary>
+    public int AgentStartCacheCount => _agentStartCache.Count;
 
     private static readonly IReadOnlyDictionary<string, SessionOverride> EmptySessionOverrides =
         new Dictionary<string, SessionOverride>();
@@ -68,6 +83,10 @@ public sealed class RootsTreeBuilder
         IReadOnlyDictionary<string, SessionOverride>? sessionOverrides = null)
     {
         var stopwatch = Stopwatch.StartNew();
+        // Section 6.5 of claude-agentgraph.md: one DateTime.UtcNow captured once, reused for
+        // every row's DurationMs computation plus GeneratedAtUtc below - so no two rows in the
+        // same document are measured against different clocks.
+        DateTime nowUtc = DateTime.UtcNow;
         roots ??= Array.Empty<string>();
         sessionOverrides ??= EmptySessionOverrides;
 
@@ -108,7 +127,7 @@ public sealed class RootsTreeBuilder
                         SessionTreeDto? sessionDto = null;
                         try
                         {
-                            sessionDto = BuildSessionDto(file, projectDirName, state, sessionOverrides);
+                            sessionDto = BuildSessionDto(file, projectDirName, state, sessionOverrides, nowUtc);
                         }
                         catch
                         {
@@ -151,10 +170,10 @@ public sealed class RootsTreeBuilder
 
         foreach (var bucket in sessionsByRoot.Values)
         {
-            AttachAgents(bucket, liveAgentsByParent);
+            AttachAgents(bucket, liveAgentsByParent, projectsDir, nowUtc);
         }
 
-        AttachAgents(unattributedSessions, liveAgentsByParent);
+        AttachAgents(unattributedSessions, liveAgentsByParent, projectsDir, nowUtc);
 
         var unattributedAgents = new List<AgentTreeDto>();
         foreach (var (parentId, agents) in liveAgentsByParent)
@@ -163,7 +182,9 @@ public sealed class RootsTreeBuilder
             {
                 foreach (var agent in agents)
                 {
-                    unattributedAgents.Add(ToAgentDto(agent));
+                    // No owning session directory to derive a convention subagents path from -
+                    // these agents resolve start time at tier 2/3 only (section 6.3).
+                    unattributedAgents.Add(ToAgentDto(agent, subagentsDir: null, nowUtc));
                 }
             }
         }
@@ -181,11 +202,15 @@ public sealed class RootsTreeBuilder
             Roots: rootDtos,
             UnattributedSessions: SortSessions(unattributedSessions),
             UnattributedAgents: unattributedAgents.OrderByDescending(a => a.AsOf).ToArray(),
-            GeneratedAtUtc: DateTime.UtcNow,
+            GeneratedAtUtc: nowUtc,
             ScanMs: stopwatch.ElapsedMilliseconds);
     }
 
-    private void AttachAgents(List<SessionTreeDto> sessions, Dictionary<string, List<AgentRecord>> liveAgentsByParent)
+    private void AttachAgents(
+        List<SessionTreeDto> sessions,
+        Dictionary<string, List<AgentRecord>> liveAgentsByParent,
+        string projectsDir,
+        DateTime nowUtc)
     {
         for (int i = 0; i < sessions.Count; i++)
         {
@@ -197,9 +222,14 @@ public sealed class RootsTreeBuilder
 
             if (liveAgentsByParent.TryGetValue(session.SessionId, out var agents) && agents.Count > 0)
             {
+                // Convention subagents path (section 6.3): <projectsDir>\<ProjectDir>\<SessionId>\subagents\
+                // - record.TranscriptPath (when SubagentStop supplied one) still takes
+                // precedence over this at resolution time inside ToAgentDto.
+                string subagentsDir = Path.Combine(projectsDir, session.ProjectDir, session.SessionId, "subagents");
+
                 sessions[i] = session with
                 {
-                    Agents = agents.Select(ToAgentDto).OrderByDescending(a => a.AsOf).ToArray(),
+                    Agents = agents.Select(a => ToAgentDto(a, subagentsDir, nowUtc)).OrderByDescending(a => a.AsOf).ToArray(),
                 };
             }
         }
@@ -209,7 +239,8 @@ public sealed class RootsTreeBuilder
         string filePath,
         string projectDirName,
         SessionState state,
-        IReadOnlyDictionary<string, SessionOverride> sessionOverrides)
+        IReadOnlyDictionary<string, SessionOverride> sessionOverrides,
+        DateTime nowUtc)
     {
         string sessionId = Path.GetFileNameWithoutExtension(filePath);
         TranscriptHeadInfo headInfo = GetHeadInfoCached(filePath);
@@ -331,6 +362,21 @@ public sealed class RootsTreeBuilder
             }
         }
 
+        // Section 6.1/6.2: sessions never store a StartedAtUtc field of their own - it is
+        // derived here, every call, from the permanent head cache (identical in nature to Cwd).
+        DateTime? startedAtUtc = headInfo.FirstTimestampUtc;
+        string? startedAtSource = startedAtUtc is not null ? "transcript" : null;
+
+        // Section 6.5: end = IsLive ? nowUtc : LastActivityUtc, clamped to >= 0.
+        long? durationMs = ComputeDurationMs(startedAtUtc, isLive, lastActivityUtc, nowUtc);
+
+        // Section 6.4: a session's ConsumedTokens is just UsedTokens (input+cache, no output -
+        // statusLine's context_window.current_usage has no output-token field), flagged
+        // ConsumedTokensIsContextOnly=true unconditionally - a constant of the session data
+        // source (both the live statusLine path and the historical transcript-tail path are
+        // equally output-less), not a per-row condition.
+        long? consumedTokens = usedTokens;
+
         return new SessionTreeDto(
             SessionId: sessionId,
             Name: name,
@@ -349,10 +395,15 @@ public sealed class RootsTreeBuilder
             Source: source,
             AsOf: asOf,
             LastActivityUtc: lastActivityUtc,
-            Agents: Array.Empty<AgentTreeDto>());
+            Agents: Array.Empty<AgentTreeDto>(),
+            StartedAtUtc: startedAtUtc,
+            StartedAtSource: startedAtSource,
+            DurationMs: durationMs,
+            ConsumedTokens: consumedTokens,
+            ConsumedTokensIsContextOnly: true);
     }
 
-    private AgentTreeDto ToAgentDto(AgentRecord record)
+    private AgentTreeDto ToAgentDto(AgentRecord record, string? subagentsDir, DateTime nowUtc)
     {
         int tableWindow = ModelWindowTable.Resolve(record.ModelId, out bool matched);
         int windowSize = record.ContextWindowSize > 0 ? record.ContextWindowSize : tableWindow;
@@ -366,6 +417,16 @@ public sealed class RootsTreeBuilder
 
         long usedTokens = (long)record.InputTokens + record.CacheCreationInputTokens + record.CacheReadInputTokens;
         double? usedPercentage = ComputePercentage(usedTokens, windowSize);
+
+        var (startedAtUtc, startedAtSource) = ResolveAgentStartedAt(record, subagentsDir, nowUtc);
+
+        bool isLive = record.Status == AgentStatus.Live;
+        long? durationMs = ComputeDurationMs(startedAtUtc, isLive, record.ReceivedAtUtc, nowUtc);
+
+        // Section 6.4: an agent's ConsumedTokens genuinely includes output tokens (unlike a
+        // session's), computed as long since four ints can overflow int on a long-running agent.
+        long consumedTokens = (long)record.InputTokens + record.OutputTokens
+            + record.CacheCreationInputTokens + record.CacheReadInputTokens;
 
         return new AgentTreeDto(
             AgentId: record.AgentId,
@@ -382,7 +443,80 @@ public sealed class RootsTreeBuilder
             UsedPercentage: usedPercentage,
             Status: StatusToString(record.Status),
             Source: record.Source,
-            AsOf: record.ReceivedAtUtc);
+            AsOf: record.ReceivedAtUtc,
+            StartedAtUtc: startedAtUtc,
+            StartedAtSource: startedAtSource,
+            DurationMs: durationMs,
+            ConsumedTokens: consumedTokens);
+    }
+
+    /// <summary>
+    /// Resolves an agent's start time via the three-tier ladder (claude-agentgraph.md section
+    /// 6.3): tier 1 (this method's own convention/record-transcript-path head read, cached by
+    /// agent id) first; if that misses, falls back to whatever <paramref name="record"/> already
+    /// carries from tier 2 (subagentStatusLine task startTime) or tier 3 (earliest-seen receipt
+    /// time), both already resolved into <see cref="AgentRecord.StartedAtUtc"/>/
+    /// <see cref="AgentRecord.StartedAtSource"/> by <see cref="SessionState.UpdateAgentRecord"/>'s
+    /// merge.
+    /// </summary>
+    private (DateTime? StartedAtUtc, string? StartedAtSource) ResolveAgentStartedAt(
+        AgentRecord record, string? subagentsDir, DateTime nowUtc)
+    {
+        string? path = record.TranscriptPath;
+        if (string.IsNullOrEmpty(path) && !string.IsNullOrEmpty(subagentsDir))
+        {
+            path = Path.Combine(subagentsDir, $"agent-{record.AgentId}.jsonl");
+        }
+
+        if (!string.IsNullOrEmpty(path))
+        {
+            DateTime? tier1 = GetAgentStartCached(record.AgentId, path, nowUtc);
+            if (tier1 is not null)
+            {
+                return (tier1, "transcript");
+            }
+        }
+
+        return (record.StartedAtUtc, record.StartedAtSource);
+    }
+
+    private DateTime? GetAgentStartCached(string agentId, string path, DateTime nowUtc)
+    {
+        if (_agentStartCache.TryGetValue(agentId, out var cached))
+        {
+            if (cached.StartedAtUtc is not null)
+            {
+                return cached.StartedAtUtc; // Permanent hit - never re-read.
+            }
+
+            // Miss: retried at most once every 10 seconds, per section 6.3's read-cost control.
+            if (nowUtc - cached.LastAttemptUtc < TimeSpan.FromSeconds(10))
+            {
+                return null;
+            }
+        }
+
+        TranscriptHeadInfo info = TranscriptHeadReader.Read(path);
+        _agentStartCache[agentId] = new AgentStartCacheEntry(info.FirstTimestampUtc, nowUtc);
+        return info.FirstTimestampUtc;
+    }
+
+    /// <summary>
+    /// Section 6.5's single shared duration formula for both sessions and agents:
+    /// <c>end = isLive ? nowUtc : endUtc</c>, <c>DurationMs = startedAtUtc is null ? null :
+    /// max(0, (end - startedAtUtc).TotalMilliseconds)</c> - the <c>Math.Max(0, …)</c> clamps the
+    /// clock-skew case (e.g. a file's LastWriteTimeUtc legitimately preceding a transcript
+    /// timestamp) to zero rather than a negative duration.
+    /// </summary>
+    private static long? ComputeDurationMs(DateTime? startedAtUtc, bool isLive, DateTime endUtc, DateTime nowUtc)
+    {
+        if (startedAtUtc is null)
+        {
+            return null;
+        }
+
+        DateTime end = isLive ? nowUtc : endUtc;
+        return (long)Math.Max(0, (end - startedAtUtc.Value).TotalMilliseconds);
     }
 
     private static string StatusToString(AgentStatus status) => status switch
@@ -471,8 +605,14 @@ public sealed class RootsTreeBuilder
         return Math.Round((double)usedTokens.Value / windowSize.Value * 100.0, 1);
     }
 
+    // Stable by construction: StartedAtUtc is fixed for a session's whole lifetime (section 6.1/6.2),
+    // unlike LastActivityUtc, which nudges on every status-line tick and previously made the panel's
+    // running sessions constantly swap positions relative to each other. Sessions with no resolved
+    // start time (rare - see StartedAtUtc's own doc) sort last within their live/ended bucket, tied
+    // by the old LastActivityUtc-descending order.
     private static SessionTreeDto[] SortSessions(IEnumerable<SessionTreeDto> sessions) => sessions
         .OrderByDescending(s => s.IsLive)
+        .ThenBy(s => s.StartedAtUtc ?? DateTime.MaxValue)
         .ThenByDescending(s => s.LastActivityUtc)
         .ToArray();
 
@@ -604,7 +744,12 @@ public sealed record SessionTreeDto(
     [property: JsonPropertyName("source")] string Source,
     [property: JsonPropertyName("as_of")] DateTime AsOf,
     [property: JsonPropertyName("last_activity_utc")] DateTime LastActivityUtc,
-    [property: JsonPropertyName("agents")] AgentTreeDto[] Agents);
+    [property: JsonPropertyName("agents")] AgentTreeDto[] Agents,
+    [property: JsonPropertyName("started_at_utc")] DateTime? StartedAtUtc = null,
+    [property: JsonPropertyName("started_at_source")] string? StartedAtSource = null,
+    [property: JsonPropertyName("duration_ms")] long? DurationMs = null,
+    [property: JsonPropertyName("consumed_tokens")] long? ConsumedTokens = null,
+    [property: JsonPropertyName("consumed_tokens_is_context_only")] bool ConsumedTokensIsContextOnly = false);
 
 /// <summary>One live sub-agent row nested under a live <see cref="SessionTreeDto"/>.</summary>
 public sealed record AgentTreeDto(
@@ -622,7 +767,11 @@ public sealed record AgentTreeDto(
     [property: JsonPropertyName("used_percentage")] double? UsedPercentage,
     [property: JsonPropertyName("status")] string Status,
     [property: JsonPropertyName("source")] string Source,
-    [property: JsonPropertyName("as_of")] DateTime AsOf);
+    [property: JsonPropertyName("as_of")] DateTime AsOf,
+    [property: JsonPropertyName("started_at_utc")] DateTime? StartedAtUtc = null,
+    [property: JsonPropertyName("started_at_source")] string? StartedAtSource = null,
+    [property: JsonPropertyName("duration_ms")] long? DurationMs = null,
+    [property: JsonPropertyName("consumed_tokens")] long? ConsumedTokens = null);
 
 /// <summary>One configured root folder's node, per project-ui.md's example.</summary>
 public sealed record RootTreeDto(

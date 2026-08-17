@@ -7,6 +7,8 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Media;
 using System.Windows.Threading;
 using Accel.App.Services;
 using Accel.App.ViewModels;
@@ -92,9 +94,10 @@ public static class TabsE2ESmokeTest
         var registry = new PtyRegistry();
         var feed = new InertTelemetryFeed();
         var rootsPanel = new RootsPanelViewModel(feed, dispatcher, selection: selection);
+        var agentGraph = new AgentGraphViewModel(feed, dispatcher, selection);
         var tabs = new TabsViewModel(registry, selection.AcquireWriter(), dispatcher);
 
-        var window = new MainWindow(rootsPanel, server.PtySessions, port, tabs, registry)
+        var window = new MainWindow(rootsPanel, server.PtySessions, port, tabs, registry, selection, agentGraph)
         {
             Width = 1100,
             Height = 700,
@@ -109,7 +112,7 @@ public static class TabsE2ESmokeTest
                 var ok = false;
                 try
                 {
-                    ok = await RunChecksAsync(output, window, tabs, selection, rootsPanel, registry, server, port);
+                    ok = await RunChecksAsync(output, window, tabs, selection, rootsPanel, agentGraph, registry, server, port);
                 }
                 catch (Exception ex)
                 {
@@ -143,8 +146,12 @@ public static class TabsE2ESmokeTest
         };
 
         // Everything blocking is torn down before Close() (see the finally above); this only drops the
-        // panel-A subscription.
-        window.Closed += (_, _) => rootsPanel.Dispose();
+        // panel-A/panel-E subscriptions.
+        window.Closed += (_, _) =>
+        {
+            agentGraph.Dispose();
+            rootsPanel.Dispose();
+        };
 
         wpfApp.Run(window);
     }
@@ -155,6 +162,7 @@ public static class TabsE2ESmokeTest
         TabsViewModel tabs,
         SessionSelectionService selection,
         RootsPanelViewModel rootsPanel,
+        AgentGraphViewModel agentGraph,
         PtyRegistry registry,
         EventServer server,
         int port)
@@ -222,6 +230,52 @@ public static class TabsE2ESmokeTest
         var followsSwitch = nodeOne is { IsFocused: false } && nodeTwo is { IsFocused: true };
         ok &= followsSwitch;
         output.WriteLine($"  [{Pf(followsSwitch)}] after switching to session two (no Rebuild): node one={nodeOne?.IsFocused}, node two={nodeTwo?.IsFocused}");
+
+        // --- Panel E's real AgentGraphControl, against a fixture snapshot carrying a live sub-agent ---
+        // Selection is currently idTwo (the SelectTab(idTwo) call just above).
+        var agentId = Guid.NewGuid().ToString();
+        agentGraph.Rebuild(FixtureTreeWithAgent(idTwo, agentId, idOne));
+
+        output.WriteLine();
+        output.WriteLine("== check 7: panel E's graph re-targets when the focused tab changes ==");
+        var initialNode = agentGraph.Nodes.Count > 0 ? agentGraph.Nodes[0] : null;
+        var initialTarget = string.Equals(initialNode?.Key, idTwo, StringComparison.OrdinalIgnoreCase);
+        ok &= initialTarget;
+        output.WriteLine($"  [{Pf(initialTarget)}] Nodes[0].Key={initialNode?.Key} (expected the focused session {idTwo})");
+
+        // A focus change with no new telemetry must still re-target the graph (design doc §7.1's
+        // third change-signal row) - re-projecting the SAME cached snapshot is the whole cost.
+        tabs.SelectTab(idOne);
+        await Task.Yield();
+        var retargetedNode = agentGraph.Nodes.Count > 0 ? agentGraph.Nodes[0] : null;
+        var retargeted = string.Equals(retargetedNode?.Key, idOne, StringComparison.OrdinalIgnoreCase);
+        ok &= retargeted;
+        output.WriteLine($"  [{Pf(retargeted)}] after switching to session one (no Rebuild): Nodes[0].Key={retargetedNode?.Key} (expected {idOne})");
+
+        // Switch back and re-project the fixture that actually carries the sub-agent, so checks 8/9
+        // below have a real parent+child graph to walk in the visual tree.
+        tabs.SelectTab(idTwo);
+        await Task.Yield();
+        window.AgentGraph.UpdateLayout();
+
+        output.WriteLine();
+        output.WriteLine("== check 8: panel E renders one card container per node ==");
+        var cardCount = CountRealizedCardContainers(window);
+        var expectedCards = agentGraph.Nodes.Count;
+        var oneCardPerNode = cardCount == expectedCards && expectedCards == 2;
+        ok &= oneCardPerNode;
+        output.WriteLine($"  [{Pf(oneCardPerNode)}] realized card containers={cardCount} (expected {expectedCards}: 1 parent + 1 agent)");
+
+        output.WriteLine();
+        output.WriteLine("== check 9: panel E renders one bezier connector per child ==");
+        var connectors = window.AgentGraph.ConnectorLayer.Children.OfType<System.Windows.Shapes.Shape>().ToArray();
+        var oneConnectorPerChild = connectors.Length == agentGraph.Nodes.Count - 1;
+        var allBezier = connectors.All(p => p.RenderedGeometry is PathGeometry { Figures.Count: 1 } geometry
+            && geometry.Figures[0].Segments.Count == 1
+            && geometry.Figures[0].Segments[0] is BezierSegment);
+        ok &= oneConnectorPerChild && allBezier;
+        output.WriteLine($"  [{Pf(oneConnectorPerChild)}] connector count={connectors.Length} (expected {agentGraph.Nodes.Count - 1})");
+        output.WriteLine($"  [{Pf(allBezier)}] every connector's Data is a PathGeometry whose single PathFigure has a single BezierSegment");
 
         // --- Closing a tab routes through PtyRegistry ---
         output.WriteLine();
@@ -354,6 +408,100 @@ public static class TabsE2ESmokeTest
             Array.Empty<AgentTreeDto>(),
             now,
             0);
+    }
+
+    /// <summary>Like <see cref="FixtureTree"/>, but <paramref name="sessionWithAgentId"/> carries one
+    /// live sub-agent and <paramref name="otherSessionId"/> carries none - checks 7/8/9 need both a
+    /// real parent+child graph to project/walk AND a second session present in the same cached
+    /// snapshot, so switching focus to it (and back) exercises re-targeting without a second
+    /// <see cref="AgentGraphViewModel.Rebuild"/> call.</summary>
+    private static RootsTreeDto FixtureTreeWithAgent(string sessionWithAgentId, string agentId, string otherSessionId)
+    {
+        var now = DateTime.UtcNow;
+        var agent = new AgentTreeDto(
+            AgentId: agentId,
+            Name: "check7 agent",
+            AgentType: "general-purpose",
+            ModelId: "claude-sonnet-5",
+            EffortLevel: "medium",
+            InputTokens: 100,
+            OutputTokens: 20,
+            CacheCreationInputTokens: 0,
+            CacheReadInputTokens: 0,
+            ContextWindowSize: 200_000,
+            ContextWindowSizeAssumed: true,
+            UsedPercentage: 0.1,
+            Status: "live",
+            Source: "smoke",
+            AsOf: now);
+
+        SessionTreeDto MakeSession(string id, AgentTreeDto[] agents) => new(
+            SessionId: id,
+            Name: $"smoke {id[..8]}",
+            NameSource: "explicit",
+            Cwd: Path.GetTempPath(),
+            ProjectDir: Path.GetTempPath(),
+            IsLive: true,
+            Status: "idle",
+            ModelId: "claude-sonnet-5",
+            ModelDisplayName: "Sonnet",
+            EffortLevel: "medium",
+            ContextWindowSize: 200_000,
+            ContextWindowSizeAssumed: false,
+            UsedTokens: 1_000,
+            UsedPercentage: 0.5,
+            Source: "smoke",
+            AsOf: now,
+            LastActivityUtc: now,
+            Agents: agents);
+
+        var sessions = new[]
+        {
+            MakeSession(sessionWithAgentId, new[] { agent }),
+            MakeSession(otherSessionId, Array.Empty<AgentTreeDto>()),
+        };
+
+        return new RootsTreeDto(
+            new[] { new RootTreeDto(Path.GetTempPath(), true, sessions) },
+            Array.Empty<SessionTreeDto>(),
+            Array.Empty<AgentTreeDto>(),
+            now,
+            0);
+    }
+
+    /// <summary>Walks the real visual tree under <c>window.AgentGraph</c>'s card <c>ItemsControl</c>
+    /// and counts realized <see cref="ContentPresenter"/>s - proof the cards actually rendered, not
+    /// merely that the ViewModel's collection has the right count.</summary>
+    private static int CountRealizedCardContainers(MainWindow window)
+    {
+        // Find the ItemsControl's own items-host Panel (IsItemsHost=true) and count its DIRECT
+        // children only - each one is exactly one realized item container. Walking the whole visual
+        // tree and matching "ContentPresenter with the item's DataContext" over-counts: a card's own
+        // EffortBarsControl is a UserControl, whose default ControlTemplate is itself a
+        // ContentPresenter that inherits the same ambient DataContext.
+        Panel? itemsHost = null;
+        void Walk(DependencyObject node)
+        {
+            if (itemsHost is not null)
+            {
+                return;
+            }
+
+            if (node is Panel { IsItemsHost: true } panel)
+            {
+                itemsHost = panel;
+                return;
+            }
+
+            int childCount = VisualTreeHelper.GetChildrenCount(node);
+            for (int i = 0; i < childCount; i++)
+            {
+                Walk(VisualTreeHelper.GetChild(node, i));
+            }
+        }
+
+        Walk(window.AgentGraph);
+        return itemsHost?.Children.Count ?? 0;
     }
 
     private static async Task<bool> WaitForAsync(Func<Task<bool>> condition, TimeSpan timeout)

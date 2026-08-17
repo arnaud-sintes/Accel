@@ -51,6 +51,22 @@ public static class MetricsPipeline
             string? effortLevel = entry?.EffortLevel ?? topLevelEffortLevel;
             int windowSize = ModelWindowTable.Resolve(modelId);
 
+            // Tier 1 of the three-tier agent-start ladder (claude-agentgraph.md section 6.3):
+            // the agent's own transcript head-window timestamp. Best-effort - a missing/locked/
+            // malformed transcript degrades to null here and falls through to tier 2/3 at
+            // RootsTreeBuilder/SessionState.UpdateAgentRecord time.
+            DateTime? startedAtUtc = null;
+            string? startedAtSource = null;
+            if (!string.IsNullOrEmpty(agentTranscriptPath))
+            {
+                TranscriptHeadInfo headInfo = TranscriptHeadReader.Read(agentTranscriptPath);
+                if (headInfo.FirstTimestampUtc is not null)
+                {
+                    startedAtUtc = headInfo.FirstTimestampUtc;
+                    startedAtSource = "transcript";
+                }
+            }
+
             var record = new AgentRecord(
                 AgentId: agentId,
                 AgentType: meta?.AgentType ?? agentType,
@@ -64,7 +80,10 @@ public static class MetricsPipeline
                 ContextWindowSize: windowSize,
                 Status: AgentStatus.Live,
                 ReceivedAtUtc: DateTime.UtcNow,
-                Source: "transcript");
+                Source: "transcript",
+                StartedAtUtc: startedAtUtc,
+                StartedAtSource: startedAtSource,
+                TranscriptPath: agentTranscriptPath);
 
             state.UpdateAgentRecord(record);
             state.MarkAgentEnded(agentId);
@@ -234,6 +253,14 @@ public static class MetricsPipeline
                     int tokenCount = GetTaskInt(task, "tokenCount") ?? 0;
                     string? parentSessionId = topLevelSessionId ?? existing?.ParentSessionId;
 
+                    // Tier 2 of the three-tier agent-start ladder (claude-agentgraph.md section
+                    // 6.3): a subagentStatusLine task's own startTime field, if present -
+                    // optional and unverified against a live payload per the design; absent or
+                    // wrong-typed simply yields null and falls through to tier 3 in
+                    // SessionState.UpdateAgentRecord's merge.
+                    DateTime? taskStartedAtUtc = GetTaskDateTime(task, "startTime");
+                    string? taskStartedAtSource = taskStartedAtUtc is not null ? "task_start_time" : null;
+
                     var record = new AgentRecord(
                         AgentId: agentId,
                         AgentType: agentType,
@@ -248,7 +275,9 @@ public static class MetricsPipeline
                         Status: AgentStatus.Live,
                         ReceivedAtUtc: DateTime.UtcNow,
                         Source: "subagentStatusLine",
-                        Name: agentName);
+                        Name: agentName,
+                        StartedAtUtc: taskStartedAtUtc,
+                        StartedAtSource: taskStartedAtSource);
 
                     state.UpdateAgentRecord(record);
                 }
@@ -318,6 +347,24 @@ public static class MetricsPipeline
         }
 
         return null;
+    }
+
+    // Tolerant sibling of GetTaskInt/GetTaskEffort/GetTaskModelId (see class doc comment on
+    // HandleSubagentStatusLine's tier-2 usage): absent or wrong-typed simply yields null, never
+    // throws. Reuses TranscriptHeadReader's own ISO-8601 parse/sanity-gate so there is exactly
+    // one timestamp-parsing implementation in the codebase.
+    private static DateTime? GetTaskDateTime(JsonElement task, string propertyName)
+    {
+        if (task.ValueKind != JsonValueKind.Object
+            || !task.TryGetProperty(propertyName, out var prop)
+            || prop.ValueKind != JsonValueKind.String)
+        {
+            return null;
+        }
+
+        return TranscriptHeadReader.TryParseIso8601Utc(prop.GetString(), out DateTime parsed)
+            ? parsed
+            : null;
     }
 
     private static string? GetEffortLevel(JsonElement root)

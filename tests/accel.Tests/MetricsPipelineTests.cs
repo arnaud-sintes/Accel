@@ -81,6 +81,13 @@ public class MetricsPipelineTests : IAsyncLifetime
         string transcriptPath = NewSubagentTranscriptPath();
         string agentId = $"agent-{Guid.NewGuid():N}";
 
+        string headLine = JsonSerializer.Serialize(new Dictionary<string, object?>
+        {
+            ["type"] = "user",
+            ["timestamp"] = "2026-08-13T10:00:00Z",
+            ["message"] = new Dictionary<string, object?> { ["content"] = "go" },
+        });
+
         string assistantLine = JsonSerializer.Serialize(new Dictionary<string, object?>
         {
             ["type"] = "assistant",
@@ -97,7 +104,7 @@ public class MetricsPipelineTests : IAsyncLifetime
             },
             ["effort"] = new Dictionary<string, object?> { ["level"] = "medium" },
         });
-        File.WriteAllText(transcriptPath, assistantLine + "\n");
+        File.WriteAllText(transcriptPath, headLine + "\n" + assistantLine + "\n");
 
         File.WriteAllText(SiblingMetaPath(transcriptPath), JsonSerializer.Serialize(new Dictionary<string, object?>
         {
@@ -138,6 +145,12 @@ public class MetricsPipelineTests : IAsyncLifetime
         // claude-sonnet-5 now resolves to the verified 1,000,000 window (bug-fix pass UI-H -
         // see ModelWindowTable.cs), not the old 200,000 placeholder default.
         Assert.Equal(1_000_000, record.ContextWindowSize);
+
+        // claude-agentgraph.md section 6.3, tier 1: the agent's own transcript head-window
+        // timestamp, plus the transcript path itself for later convention-path resolution.
+        Assert.Equal(transcriptPath, record.TranscriptPath);
+        Assert.Equal(new DateTime(2026, 8, 13, 10, 0, 0, DateTimeKind.Utc), record.StartedAtUtc);
+        Assert.Equal("transcript", record.StartedAtSource);
     }
 
     [Fact]
@@ -325,6 +338,95 @@ public class MetricsPipelineTests : IAsyncLifetime
         bool found = _server!.State.TryGetAgent(agentId, out var record);
         Assert.True(found);
         Assert.Null(record!.Name);
+    }
+
+    [Fact]
+    public async Task SubagentStatusLine_TaskWithStartTime_PopulatesStartedAtUtcFromTask()
+    {
+        string agentId = $"agent-{Guid.NewGuid():N}";
+
+        string payload = JsonSerializer.Serialize(new Dictionary<string, object?>
+        {
+            ["session_id"] = $"session-{Guid.NewGuid():N}",
+            ["tasks"] = new[]
+            {
+                new Dictionary<string, object?>
+                {
+                    ["id"] = agentId,
+                    ["type"] = "general-purpose",
+                    ["startTime"] = "2026-08-13T10:00:00Z",
+                },
+            },
+        });
+
+        var response = await _client!.PostAsync(
+            "/events/subagent-status-line",
+            new StringContent(payload, Encoding.UTF8, "application/json"));
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+
+        bool found = _server!.State.TryGetAgent(agentId, out var record);
+        Assert.True(found);
+        Assert.Equal(new DateTime(2026, 8, 13, 10, 0, 0, DateTimeKind.Utc), record!.StartedAtUtc);
+        Assert.Equal("task_start_time", record.StartedAtSource);
+    }
+
+    [Fact]
+    public async Task SubagentStatusLine_TaskWithoutStartTime_LeavesStartedAtUtcNull()
+    {
+        string agentId = $"agent-{Guid.NewGuid():N}";
+
+        string payload = JsonSerializer.Serialize(new Dictionary<string, object?>
+        {
+            ["session_id"] = $"session-{Guid.NewGuid():N}",
+            ["tasks"] = new[]
+            {
+                new Dictionary<string, object?> { ["id"] = agentId, ["type"] = "general-purpose" },
+            },
+        });
+
+        var response = await _client!.PostAsync(
+            "/events/subagent-status-line",
+            new StringContent(payload, Encoding.UTF8, "application/json"));
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+
+        bool found = _server!.State.TryGetAgent(agentId, out var record);
+        Assert.True(found);
+        // Falls through to tier 3 (first_seen), never left truly null once the agent exists.
+        Assert.NotNull(record!.StartedAtUtc);
+        Assert.Equal("first_seen", record.StartedAtSource);
+    }
+
+    [Fact]
+    public async Task SubagentStatusLine_MalformedStartTime_IsIgnoredAndDoesNotBreakTheBatch()
+    {
+        string agentId = $"agent-{Guid.NewGuid():N}";
+
+        string payload = JsonSerializer.Serialize(new Dictionary<string, object?>
+        {
+            ["session_id"] = $"session-{Guid.NewGuid():N}",
+            ["tasks"] = new[]
+            {
+                new Dictionary<string, object?>
+                {
+                    ["id"] = agentId,
+                    ["type"] = "general-purpose",
+                    ["startTime"] = "not-a-real-timestamp",
+                },
+            },
+        });
+
+        var response = await _client!.PostAsync(
+            "/events/subagent-status-line",
+            new StringContent(payload, Encoding.UTF8, "application/json"));
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+
+        bool found = _server!.State.TryGetAgent(agentId, out var record);
+        Assert.True(found);
+        // Degrades to tier 3, never throws and never breaks the rest of the batch.
+        Assert.Equal("first_seen", record!.StartedAtSource);
     }
 
     [Fact]

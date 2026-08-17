@@ -56,7 +56,14 @@ public sealed record AgentRecord(
     AgentStatus Status,
     DateTime ReceivedAtUtc,
     string Source,
-    string? Name = null);
+    string? Name = null,
+    // Section 6.1 of claude-agentgraph.md: "first writer wins, earliest wins" - see
+    // SessionState.UpdateAgentRecord's merge for the invariant that protects these three once
+    // set. StartedAtSource records which tier of the three-tier ladder (section 6.3) produced
+    // StartedAtUtc: "transcript" | "task_start_time" | "first_seen".
+    DateTime? StartedAtUtc = null,
+    string? StartedAtSource = null,
+    string? TranscriptPath = null);
 
 /// <summary>
 /// In-memory, non-persisted, thread-safe store of the "current state" map described in
@@ -97,7 +104,24 @@ public sealed class SessionState
         RaiseChanged();
     }
 
-    /// <summary>Overwrites (or inserts) the latest record for a subagent.</summary>
+    /// <summary>
+    /// Overwrites (or inserts) the latest record for a subagent. Every field is replaced
+    /// wholesale from <paramref name="record"/> EXCEPT three - <c>StartedAtUtc</c>,
+    /// <c>StartedAtSource</c>, and <c>TranscriptPath</c> - which are merged rather than
+    /// replaced, per section 6.1 of claude-agentgraph.md:
+    ///
+    /// <list type="bullet">
+    /// <item><c>StartedAtUtc</c>/<c>StartedAtSource</c> are "first writer wins, earliest wins":
+    /// a later update carrying <c>null</c> (e.g. a <c>subagentStatusLine</c> tick with no
+    /// tier-1/tier-2 hit) must never erase a previously-known start time, and a later update
+    /// carrying a LATER timestamp must never push an earlier one forward. If this is the very
+    /// first record ever seen for this <c>agent_id</c> and it carries no start time of its own
+    /// (tiers 1/2 both missed), it falls back to tier 3 - its own <c>ReceivedAtUtc</c>, tagged
+    /// <c>"first_seen"</c> - so every agent record has SOME start time once it exists at all.</item>
+    /// <item><c>TranscriptPath</c> is "known value never overwritten with null" - the same rule
+    /// already applied to <c>ParentSessionId</c> in <c>MetricsPipeline.HandleSubagentStatusLine</c>.</item>
+    /// </list>
+    /// </summary>
     public void UpdateAgentRecord(AgentRecord record)
     {
         if (record is null || string.IsNullOrEmpty(record.AgentId))
@@ -105,8 +129,47 @@ public sealed class SessionState
             return;
         }
 
-        _agents[record.AgentId] = record;
+        _agents.AddOrUpdate(
+            record.AgentId,
+            _ => record.StartedAtUtc is null
+                ? record with { StartedAtUtc = record.ReceivedAtUtc, StartedAtSource = "first_seen" }
+                : record,
+            (_, existing) =>
+            {
+                var (startedAtUtc, startedAtSource) = EarliestStartedAt(
+                    existing.StartedAtUtc, existing.StartedAtSource,
+                    record.StartedAtUtc, record.StartedAtSource);
+
+                return record with
+                {
+                    StartedAtUtc = startedAtUtc,
+                    StartedAtSource = startedAtSource,
+                    TranscriptPath = record.TranscriptPath ?? existing.TranscriptPath,
+                };
+            });
+
         RaiseChanged();
+    }
+
+    /// <summary>"Earliest wins" merge for the pair of (StartedAtUtc, StartedAtSource) fields - a
+    /// null side never wins over a non-null side, and between two non-null sides the earlier
+    /// timestamp (and its matching source tag) wins.</summary>
+    private static (DateTime? StartedAtUtc, string? StartedAtSource) EarliestStartedAt(
+        DateTime? existingUtc, string? existingSource, DateTime? incomingUtc, string? incomingSource)
+    {
+        if (existingUtc is null)
+        {
+            return (incomingUtc, incomingSource);
+        }
+
+        if (incomingUtc is null)
+        {
+            return (existingUtc, existingSource);
+        }
+
+        return incomingUtc.Value < existingUtc.Value
+            ? (incomingUtc, incomingSource)
+            : (existingUtc, existingSource);
     }
 
     /// <summary>

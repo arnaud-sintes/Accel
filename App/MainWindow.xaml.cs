@@ -70,10 +70,12 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// P3-T3: <paramref name="selection"/> feeds panels B/E's stub <see cref="FocusedSessionStubViewModel"/>
-    /// readers - the same read-only <see cref="ISessionSelectionService"/> panel A already consumes for
+    /// P3-T3: <paramref name="selection"/> feeds panel B's stub <see cref="FocusedSessionStubViewModel"/>
+    /// reader - the same read-only <see cref="ISessionSelectionService"/> panel A already consumes for
     /// <c>IsFocused</c>. Null degrades exactly like every other optional parameter here: the panel keeps its
-    /// P1-T1b placeholder text with no status line beneath it.
+    /// P1-T1b placeholder text with no status line beneath it. Panel E is wired by the
+    /// <see cref="AgentGraphViewModel"/> overload below; this overload leaves it unset (null degrades to
+    /// no DataContext, same as every other optional parameter).
     /// </summary>
     public MainWindow(
         RootsPanelViewModel? rootsPanel,
@@ -82,6 +84,26 @@ public partial class MainWindow : Window
         TabsViewModel? tabs,
         PtyRegistry? sessionRegistry,
         ISessionSelectionService? selection)
+        : this(rootsPanel, ptyRouteRegistry, ptyWebSocketPort, tabs, sessionRegistry, selection, null)
+    {
+    }
+
+    /// <summary>
+    /// Phase 6's real composition: <paramref name="agentGraph"/> is panel E's
+    /// <see cref="AgentGraphViewModel"/> - a second <see cref="Accel.App.Services.ITelemetryFeed"/> reader
+    /// and a second read-only <see cref="ISessionSelectionService"/> reader, fed the same
+    /// feed/dispatcher/selection triple as <paramref name="rootsPanel"/> (design doc
+    /// "claude-agentgraph.md" §7.7). Null degrades exactly like every other optional parameter: panel E
+    /// keeps no DataContext, same as the pure-scaffolding paths above.
+    /// </summary>
+    public MainWindow(
+        RootsPanelViewModel? rootsPanel,
+        PtyRouteRegistry? ptyRouteRegistry,
+        int ptyWebSocketPort,
+        TabsViewModel? tabs,
+        PtyRegistry? sessionRegistry,
+        ISessionSelectionService? selection,
+        AgentGraphViewModel? agentGraph)
     {
         InitializeComponent();
 
@@ -112,22 +134,27 @@ public partial class MainWindow : Window
 
         if (selection is not null)
         {
-            // Two independent instances, not one shared DataContext: each is a plain reader with no
-            // panel-specific state yet, and Phases 5/6 replace both outright rather than share them.
+            // Panel B still gets the P3-T3 stub - real file-tree content is Phase 5. Panel E now gets a
+            // real ViewModel (below) instead of sharing this stub.
             _panelBStub = new FocusedSessionStubViewModel(selection);
-            _panelEStub = new FocusedSessionStubViewModel(selection);
             PanelB.DataContext = _panelBStub;
-            PanelE.DataContext = _panelEStub;
+        }
+
+        if (agentGraph is not null)
+        {
+            // Scoped to panel E only, never Window.DataContext, per the rule quoted above.
+            AgentGraphVm = agentGraph;
+            PanelE.DataContext = agentGraph;
         }
 
         Closed += (_, _) =>
         {
             // No session teardown here any more: PtyRegistry is the single owner of PtySession.Dispose
             // (P3-T2) and app-exit teardown is P3-T4's job (CloseAllAsync/Dispose around the app loop).
-            // This only drops the tab strip's registry subscription plus panels B/E's own.
+            // This only drops the tab strip's registry subscription plus panel B's own; AgentGraphViewModel
+            // is disposed by Program.cs's composition root (mirrors how rootsPanel is never disposed here).
             Tabs?.Dispose();
             _panelBStub?.Dispose();
-            _panelEStub?.Dispose();
         };
 
         // Custom-chrome maximize fix. Two earlier revisions of this fix were both wrong in the
@@ -476,10 +503,14 @@ public partial class MainWindow : Window
     }
 
     private readonly FocusedSessionStubViewModel? _panelBStub;
-    private readonly FocusedSessionStubViewModel? _panelEStub;
 
     /// <summary>Panel A's ViewModel, or null when the window was constructed as bare scaffolding.</summary>
     public RootsPanelViewModel? RootsPanel { get; }
+
+    /// <summary>Panel E's ViewModel, or null when the window was constructed without one (every
+    /// overload but the seven-parameter one above). Exposed so a smoke test can assert against it
+    /// directly, the same way <see cref="RootsPanel"/> is.</summary>
+    public AgentGraphViewModel? AgentGraphVm { get; }
 
     /// <summary>Panel C's ViewModel (the tab strip), or null in the scaffolding paths.</summary>
     public TabsViewModel? Tabs { get; }

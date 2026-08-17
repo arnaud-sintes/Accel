@@ -432,6 +432,20 @@ public sealed class PtyRegistry : IPtySessionHost, IDisposable
     /// <summary>Just the tab ids, in no particular order.</summary>
     public IReadOnlyList<string> TabIds() => _sessions.Keys.ToArray();
 
+    /// <summary>The child process id registered under <paramref name="tabId"/>, or null for an unknown
+    /// or already-closing tabId. See <see cref="IPtySessionHost.TryGetProcessId"/> for why this is safe
+    /// to hand out despite the "never hand out a session" rule - it is captured once at registration
+    /// (<see cref="Entry.ProcessId"/>) and confers no write/dispose capability.</summary>
+    public int? TryGetProcessId(string tabId)
+    {
+        if (string.IsNullOrEmpty(tabId))
+        {
+            return null;
+        }
+
+        return _sessions.TryGetValue(tabId, out var entry) ? entry.ProcessId : null;
+    }
+
     /// <summary>
     /// The one and only path to <see cref="PtySession.Dispose"/>: removes the session from the registry
     /// first, disposes it, waits <see cref="PtyRegistryOptions.CloseTimeout"/> for the child process to

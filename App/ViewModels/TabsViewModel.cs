@@ -116,6 +116,8 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
     private readonly IPtySessionHost _host;
     private readonly ISessionSelectionWriter _selection;
     private readonly IUiThreadDispatcher _dispatcher;
+    private readonly Func<int, ClaudeSessionStatusSnapshot?> _statusReader;
+    private readonly System.Threading.Timer? _statusPollTimer;
     private bool _disposed;
 
     /// <summary>
@@ -132,14 +134,36 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
     /// </summary>
     private readonly HashSet<string> _stopping = new(StringComparer.OrdinalIgnoreCase);
 
-    public TabsViewModel(IPtySessionHost host, ISessionSelectionWriter selection, IUiThreadDispatcher dispatcher)
+    /// <param name="host">The registry projection (add/remove/close/pid lookup).</param>
+    /// <param name="selection">This class's single write capability over the focused session id.</param>
+    /// <param name="dispatcher">UI-thread marshalling for signals that arrive on a thread-pool thread.</param>
+    /// <param name="statusReader">Test seam: overrides how a pid's Claude Code status snapshot is read
+    /// (see <see cref="PollFocusedSessionId"/>). Production callers leave this null, which reads the
+    /// real <c>~/.claude/sessions/&lt;pid&gt;.json</c> via <see cref="ClaudeSessionStatusFile.TryRead"/>.</param>
+    /// <param name="statusPollInterval">How often the selected tab's status file is re-checked for a
+    /// drifted session id (see <see cref="PollFocusedSessionId"/>'s remarks for why this is needed at
+    /// all). Null (the default) disables the timer entirely - tests call
+    /// <see cref="PollFocusedSessionId"/> directly instead of waiting on a real clock; production
+    /// callers pass a real interval.</param>
+    public TabsViewModel(
+        IPtySessionHost host,
+        ISessionSelectionWriter selection,
+        IUiThreadDispatcher dispatcher,
+        Func<int, ClaudeSessionStatusSnapshot?>? statusReader = null,
+        TimeSpan? statusPollInterval = null)
     {
         _host = host ?? throw new ArgumentNullException(nameof(host));
         _selection = selection ?? throw new ArgumentNullException(nameof(selection));
         _dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
+        _statusReader = statusReader ?? (pid => ClaudeSessionStatusFile.TryRead(pid));
 
         _host.SessionEnded += OnSessionEnded;
         SyncFromHost();
+
+        if (statusPollInterval is { } interval && interval > TimeSpan.Zero)
+        {
+            _statusPollTimer = new System.Threading.Timer(_ => PollFocusedSessionId(), null, interval, interval);
+        }
     }
 
     /// <summary>The tabs, in the order they were opened.</summary>
@@ -305,6 +329,65 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
         SelectedTab ??= Tabs.FirstOrDefault(t => !t.HasEnded);
     }
 
+    /// <summary>
+    /// Re-derives the focused session id for the currently selected tab from Claude Code's own
+    /// per-pid status file, and re-broadcasts it if it has drifted away from the tabId this class
+    /// broadcast at selection time.
+    ///
+    /// <para><b>Why this exists.</b> <see cref="ISessionSelectionService.FocusedSessionId"/> - and
+    /// therefore panel A's highlight - is written as <c>tabId</c> on every selection change (see
+    /// <see cref="OnSelectedTabChanged"/>), because a tabId <i>is</i> the <c>--session-id</c> Claude Code
+    /// was launched or resumed with. That equivalence holds only until the user types <c>/clear</c> (or
+    /// <c>/compact</c>) in that terminal: Claude Code itself starts a brand-new transcript under a new
+    /// session id on the very same pid, and nothing about the pty (tabId, pid, registration) changes to
+    /// tell Accel this happened - the old tabId keeps being broadcast as focused, panel A's live-scanned
+    /// tree shows the new session id as a wholly separate, never-focused row, and the resumed tab looks
+    /// permanently disconnected from whatever the terminal is now actually running.
+    /// <c>~/.claude/sessions/&lt;pid&gt;.json</c> is Claude Code's own live status file for that pid, and
+    /// its <c>sessionId</c> field is exactly what changes the instant <c>/clear</c> takes effect - the
+    /// same file <see cref="Orchestration.SlashCommandDriver"/> already polls to gate slash-command
+    /// injection. Polling it here for the selected tab only (not every tab) keeps the cost to at most
+    /// one file read per tick, matching this codebase's existing per-pid status-file read pattern.</para>
+    /// </summary>
+    internal void PollFocusedSessionId()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        var tab = SelectedTab;
+        if (tab is null || tab.HasEnded)
+        {
+            return;
+        }
+
+        int? pid = _host.TryGetProcessId(tab.TabId);
+        if (pid is not { } processId)
+        {
+            return;
+        }
+
+        var snapshot = _statusReader(processId);
+        string? currentSessionId = snapshot?.SessionId;
+        if (string.IsNullOrEmpty(currentSessionId))
+        {
+            return;
+        }
+
+        _dispatcher.Post(() =>
+        {
+            if (_disposed || !ReferenceEquals(SelectedTab, tab))
+            {
+                // The tab was closed, or selection moved on, while this hopped threads - applying a
+                // stale resolution now would clobber whatever OnSelectedTabChanged has since written.
+                return;
+            }
+
+            _selection.SetFocused(currentSessionId);
+        });
+    }
+
     private async Task AttachSafelyAsync(string tabId)
     {
         try
@@ -413,5 +496,6 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
 
         _disposed = true;
         _host.SessionEnded -= OnSessionEnded;
+        _statusPollTimer?.Dispose();
     }
 }

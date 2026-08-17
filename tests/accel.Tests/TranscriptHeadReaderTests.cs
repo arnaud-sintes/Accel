@@ -23,15 +23,24 @@ public class TranscriptHeadReaderTests : IDisposable
         }
     }
 
-    private static string ModeLine(string sessionId = "x") =>
-        JsonSerializer.Serialize(new Dictionary<string, object?>
+    private static string ModeLine(string sessionId = "x", string? timestamp = null)
+    {
+        var payload = new Dictionary<string, object?>
         {
             ["type"] = "mode",
             ["mode"] = "normal",
             ["sessionId"] = sessionId,
-        });
+        };
 
-    private static string UserStringLine(string content, string? cwd = null)
+        if (timestamp is not null)
+        {
+            payload["timestamp"] = timestamp;
+        }
+
+        return JsonSerializer.Serialize(payload);
+    }
+
+    private static string UserStringLine(string content, string? cwd = null, string? timestamp = null)
     {
         var payload = new Dictionary<string, object?>
         {
@@ -47,10 +56,15 @@ public class TranscriptHeadReaderTests : IDisposable
             payload["cwd"] = cwd;
         }
 
+        if (timestamp is not null)
+        {
+            payload["timestamp"] = timestamp;
+        }
+
         return JsonSerializer.Serialize(payload);
     }
 
-    private static string UserArrayLine(string text, string? cwd = null)
+    private static string UserArrayLine(string text, string? cwd = null, string? timestamp = null)
     {
         var payload = new Dictionary<string, object?>
         {
@@ -67,6 +81,11 @@ public class TranscriptHeadReaderTests : IDisposable
         if (cwd is not null)
         {
             payload["cwd"] = cwd;
+        }
+
+        if (timestamp is not null)
+        {
+            payload["timestamp"] = timestamp;
         }
 
         return JsonSerializer.Serialize(payload);
@@ -345,6 +364,78 @@ public class TranscriptHeadReaderTests : IDisposable
 
         Assert.Equal(@"C:\projects", info.Cwd);
         Assert.Equal("Hello world", info.FirstUserMessageText);
+    }
+
+    // ---- FirstTimestampUtc (claude-agentgraph.md section 6.2) ----
+
+    [Fact]
+    public void Read_FirstLineWithTimestamp_ReturnsItAsFirstTimestampUtc()
+    {
+        string path = NewTempFile();
+        string content =
+            ModeLine(timestamp: "2026-08-13T10:00:00Z") + "\n" +
+            UserStringLine("Hello world", cwd: @"C:\projects") + "\n";
+        File.WriteAllText(path, content);
+
+        var info = TranscriptHeadReader.Read(path);
+
+        Assert.Equal(new DateTime(2026, 8, 13, 10, 0, 0, DateTimeKind.Utc), info.FirstTimestampUtc);
+    }
+
+    [Fact]
+    public void Read_FirstLineWithoutTimestampSecondWithOne_ReturnsTheSecond()
+    {
+        // Mirrors the cwd probe's own forward-scan rationale: the first line on this machine is
+        // typically a mode-marker with no timestamp field at all.
+        string path = NewTempFile();
+        string content =
+            ModeLine() + "\n" +
+            UserStringLine("Hello world", cwd: @"C:\projects", timestamp: "2026-08-13T10:05:30Z") + "\n";
+        File.WriteAllText(path, content);
+
+        var info = TranscriptHeadReader.Read(path);
+
+        Assert.Equal(new DateTime(2026, 8, 13, 10, 5, 30, DateTimeKind.Utc), info.FirstTimestampUtc);
+    }
+
+    [Fact]
+    public void Read_MalformedTimestampString_YieldsNullNotThrow()
+    {
+        string path = NewTempFile();
+        string content =
+            ModeLine(timestamp: "not-a-date") + "\n" +
+            UserStringLine("Hello world", cwd: @"C:\projects") + "\n";
+        File.WriteAllText(path, content);
+
+        var info = TranscriptHeadReader.Read(path);
+
+        Assert.Null(info.FirstTimestampUtc);
+        Assert.Equal(@"C:\projects", info.Cwd);
+    }
+
+    [Fact]
+    public void Read_TimestampOutsideSanityRange_YieldsNull()
+    {
+        string path = NewTempFile();
+        string content = ModeLine(timestamp: "2001-01-01T00:00:00Z") + "\n";
+        File.WriteAllText(path, content);
+
+        var info = TranscriptHeadReader.Read(path);
+
+        Assert.Null(info.FirstTimestampUtc);
+    }
+
+    [Fact]
+    public void Read_NonUtcOffsetTimestamp_IsNormalizedToUtc()
+    {
+        string path = NewTempFile();
+        // +02:00 -> 08:00Z.
+        string content = ModeLine(timestamp: "2026-08-13T10:00:00+02:00") + "\n";
+        File.WriteAllText(path, content);
+
+        var info = TranscriptHeadReader.Read(path);
+
+        Assert.Equal(new DateTime(2026, 8, 13, 8, 0, 0, DateTimeKind.Utc), info.FirstTimestampUtc);
     }
 
     // ---- DeriveLabel ----

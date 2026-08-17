@@ -97,7 +97,8 @@ public class EventServer
         string[]? roots = null,
         RootsTreeBuilder? rootsTree = null,
         string? projectsDirOverride = null,
-        PtyRouteRegistry? ptySessions = null)
+        PtyRouteRegistry? ptySessions = null,
+        bool verbose = false)
     {
         var builder = WebApplication.CreateBuilder();
 
@@ -116,7 +117,7 @@ public class EventServer
         RootsTreeBuilder effectiveRootsTree = rootsTree ?? new RootsTreeBuilder();
         PtyRouteRegistry effectivePtySessions = ptySessions ?? new PtyRouteRegistry();
 
-        MapRoutes(app, capture, effectiveState, effectiveRoots, effectiveRootsTree, projectsDirOverride, effectivePtySessions);
+        MapRoutes(app, capture, effectiveState, effectiveRoots, effectiveRootsTree, projectsDirOverride, effectivePtySessions, verbose);
 
         return app;
     }
@@ -125,10 +126,11 @@ public class EventServer
     /// Instance form of <see cref="Build"/> that wires this instance's <see cref="State"/>,
     /// <see cref="Roots"/>, <see cref="RootsTree"/>, and <see cref="PtySessions"/> into the routes,
     /// so callers (Program.cs's `run` verb, and metrics tests) can read the resulting session/agent
-    /// records back out afterwards.
+    /// records back out afterwards. <paramref name="verbose"/> is `--verbose` (default off): a
+    /// regular launch stays silent, only printing the per-event lifecycle lines when opted in.
     /// </summary>
-    public WebApplication BuildApp(int port, string? dumpRawDir = null) =>
-        Build(port, dumpRawDir, State, Roots, RootsTree, ProjectsDirOverride, PtySessions);
+    public WebApplication BuildApp(int port, string? dumpRawDir = null, bool verbose = false) =>
+        Build(port, dumpRawDir, State, Roots, RootsTree, ProjectsDirOverride, PtySessions, verbose);
 
     private static void MapRoutes(
         WebApplication app,
@@ -137,12 +139,13 @@ public class EventServer
         string[] roots,
         RootsTreeBuilder rootsTree,
         string? projectsDirOverride,
-        PtyRouteRegistry ptySessions)
+        PtyRouteRegistry ptySessions,
+        bool verbose = false)
     {
-        app.MapPost("/events/session-start", ctx => HandleEventAsync(ctx, "SessionStart", capture, state));
-        app.MapPost("/events/session-end", ctx => HandleEventAsync(ctx, "SessionEnd", capture, state));
-        app.MapPost("/events/subagent-start", ctx => HandleEventAsync(ctx, "SubagentStart", capture, state));
-        app.MapPost("/events/subagent-stop", ctx => HandleEventAsync(ctx, "SubagentStop", capture, state));
+        app.MapPost("/events/session-start", ctx => HandleEventAsync(ctx, "SessionStart", capture, state, verbose));
+        app.MapPost("/events/session-end", ctx => HandleEventAsync(ctx, "SessionEnd", capture, state, verbose));
+        app.MapPost("/events/subagent-start", ctx => HandleEventAsync(ctx, "SubagentStart", capture, state, verbose));
+        app.MapPost("/events/subagent-stop", ctx => HandleEventAsync(ctx, "SubagentStop", capture, state, verbose));
         app.MapPost("/events/status-line", ctx => HandleStatusLineAsync(ctx, capture, state));
         app.MapPost("/events/subagent-status-line", ctx => HandleSubagentStatusLineAsync(ctx, capture, state));
 
@@ -165,10 +168,14 @@ public class EventServer
     // Hook processes (and this project's own curl/statusline callers) never look at the
     // response body, and per project.md, hook processes must never see anything that
     // could be misparsed as a hook control object - so we never throw, never write a body.
-    private static async Task HandleEventAsync(HttpContext ctx, string eventName, RawPayloadCapture? capture, SessionState state)
+    private static async Task HandleEventAsync(HttpContext ctx, string eventName, RawPayloadCapture? capture, SessionState state, bool verbose = false)
     {
         string body = await ReadBodyAsync(ctx.Request);
-        SafePrint(() => EventPrinter.PrintEvent(eventName, body));
+        if (verbose)
+        {
+            SafePrint(() => EventPrinter.PrintEvent(eventName, body));
+        }
+
         capture?.TryWrite(eventName, body);
 
         // Phase 3b-ii: SubagentStop is the only event that additionally triggers transcript

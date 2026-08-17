@@ -37,4 +37,17 @@ public interface IPtySessionHost
     /// <summary>See <see cref="PtyRegistry.CloseAsync"/>: removes, disposes, verifies, force-kills if
     /// needed. Never throws, and a repeat/unknown close is a no-op.</summary>
     Task<PtyCloseResult> CloseAsync(string tabId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// The child process id registered under <paramref name="tabId"/>, or null for an unknown tabId.
+    /// Read-only - unlike a <see cref="PtySession"/> reference, a bare pid confers no way to write to,
+    /// resize, or dispose the session, so handing it out does not weaken the ownership rule above.
+    ///
+    /// <para>Exists so a tab ViewModel can correlate its own tabId (fixed for the pty's whole lifetime,
+    /// per <c>TabsViewModel</c>'s remarks) against Claude Code's own per-pid status file
+    /// (<see cref="ClaudeSessionStatusFile"/>), whose <c>sessionId</c> field can drift away from the
+    /// launch-time tabId - e.g. the user typing <c>/clear</c>, which starts a new transcript under a new
+    /// session id on the very same pid.</para>
+    /// </summary>
+    int? TryGetProcessId(string tabId);
 }

@@ -1,0 +1,240 @@
+<UserControl x:Class="Accel.App.Controls.AgentGraphControl"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:conv="clr-namespace:Accel.App.Converters"
+             xmlns:controls="clr-namespace:Accel.App.Controls"
+             xmlns:vm="clr-namespace:Accel.App.ViewModels"
+             SnapsToDevicePixels="True">
+    <!--
+        Design doc claude-agentgraph.md §7.4/§7.7: an ItemsControl over a Canvas ItemsPanel for the
+        cards (everything a DataTemplate can express - badge chip, EffortBarsControl, ellipsis-
+        trimmed name), plus a second Canvas underneath for the bezier connectors, built in code-
+        behind (Relayout/BuildConnector) exactly the way EffortBarsControl.xaml.cs builds its arc -
+        there is no OnRender override anywhere in App/, so this control does not invent one either.
+
+        DataContext is the AgentGraphViewModel set as Panel E's DataContext by MainWindow (never
+        Window.DataContext) - every {Binding} below with no RelativeSource is against that
+        ViewModel, ambient through the visual tree exactly like Nodes="{Binding Nodes}" at this
+        control's own use site in MainWindow.xaml.
+    -->
+    <UserControl.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="../Theme.xaml" />
+            </ResourceDictionary.MergedDictionaries>
+
+            <conv:HexToBrushConverter x:Key="HexToBrush" />
+            <BooleanToVisibilityConverter x:Key="BoolToVis" />
+
+            <!--
+                Same four IsRunning x IsFocused colours as MainWindow.xaml's panel-A state brushes
+                (SessionVisualStateResolver's *ColorHex constants are the tested, WPF-free source of
+                truth) - duplicated here rather than shared, per design doc §7.4: panel E is a third
+                consumer of the same mapping, not a fifth colour.
+            -->
+            <SolidColorBrush x:Key="RunningFocusedBrush" Color="#FF4FC3F7" />
+            <SolidColorBrush x:Key="RunningBrush" Color="#FF66BB6A" />
+            <SolidColorBrush x:Key="IdleFocusedBrush" Color="#FF9FA8DA" />
+            <SolidColorBrush x:Key="IdleBrush" Color="#FF9E9E9E" />
+
+            <!--
+                Never colour-only for state (CLAUDE_DESIGN.md §4): BorderThickness/the accent bar
+                carry IsFocused independently of colour, and the name text's FontWeight (below)
+                carries IsRunning independently of both.
+            -->
+            <Style x:Key="AgentGraphCardBorderStyle" TargetType="Border">
+                <Setter Property="BorderBrush" Value="{StaticResource StrokeBrush}" />
+                <Setter Property="BorderThickness" Value="1" />
+                <Style.Triggers>
+                    <MultiDataTrigger>
+                        <MultiDataTrigger.Conditions>
+                            <Condition Binding="{Binding IsRunning}" Value="True" />
+                            <Condition Binding="{Binding IsFocused}" Value="True" />
+                        </MultiDataTrigger.Conditions>
+                        <Setter Property="BorderBrush" Value="{StaticResource RunningFocusedBrush}" />
+                        <Setter Property="BorderThickness" Value="2" />
+                    </MultiDataTrigger>
+                    <MultiDataTrigger>
+                        <MultiDataTrigger.Conditions>
+                            <Condition Binding="{Binding IsRunning}" Value="True" />
+                            <Condition Binding="{Binding IsFocused}" Value="False" />
+                        </MultiDataTrigger.Conditions>
+                        <Setter Property="BorderBrush" Value="{StaticResource RunningBrush}" />
+                        <Setter Property="BorderThickness" Value="1" />
+                    </MultiDataTrigger>
+                    <MultiDataTrigger>
+                        <MultiDataTrigger.Conditions>
+                            <Condition Binding="{Binding IsRunning}" Value="False" />
+                            <Condition Binding="{Binding IsFocused}" Value="True" />
+                        </MultiDataTrigger.Conditions>
+                        <Setter Property="BorderBrush" Value="{StaticResource IdleFocusedBrush}" />
+                        <Setter Property="BorderThickness" Value="2" />
+                    </MultiDataTrigger>
+                </Style.Triggers>
+            </Style>
+
+            <Style x:Key="AgentGraphNodeNameTextStyle" TargetType="TextBlock">
+                <Setter Property="FontSize" Value="{StaticResource FontSizeBody}" />
+                <Setter Property="VerticalAlignment" Value="Center" />
+                <Setter Property="FontWeight" Value="Normal" />
+                <Setter Property="Foreground" Value="{StaticResource IdleBrush}" />
+                <Style.Triggers>
+                    <MultiDataTrigger>
+                        <MultiDataTrigger.Conditions>
+                            <Condition Binding="{Binding IsRunning}" Value="True" />
+                            <Condition Binding="{Binding IsFocused}" Value="True" />
+                        </MultiDataTrigger.Conditions>
+                        <Setter Property="FontWeight" Value="Bold" />
+                        <Setter Property="Foreground" Value="{StaticResource RunningFocusedBrush}" />
+                    </MultiDataTrigger>
+                    <MultiDataTrigger>
+                        <MultiDataTrigger.Conditions>
+                            <Condition Binding="{Binding IsRunning}" Value="True" />
+                            <Condition Binding="{Binding IsFocused}" Value="False" />
+                        </MultiDataTrigger.Conditions>
+                        <Setter Property="FontWeight" Value="Bold" />
+                        <Setter Property="Foreground" Value="{StaticResource RunningBrush}" />
+                    </MultiDataTrigger>
+                    <MultiDataTrigger>
+                        <MultiDataTrigger.Conditions>
+                            <Condition Binding="{Binding IsRunning}" Value="False" />
+                            <Condition Binding="{Binding IsFocused}" Value="True" />
+                        </MultiDataTrigger.Conditions>
+                        <Setter Property="FontWeight" Value="Bold" />
+                        <Setter Property="Foreground" Value="{StaticResource IdleFocusedBrush}" />
+                    </MultiDataTrigger>
+                </Style.Triggers>
+            </Style>
+
+            <!--
+                Stroke is a DynamicResource, never set inline - decorative connectors reuse
+                Theme.xaml's palette (CLAUDE_DESIGN.md §4). Code-behind overrides Stroke to
+                AccentBrush for a running child's edge only (AgentGraphControl.xaml.cs.BuildConnector).
+            -->
+            <Style x:Key="AgentGraphConnectorPathStyle" TargetType="Shape">
+                <Setter Property="Stroke" Value="{DynamicResource StrokeStrongBrush}" />
+                <Setter Property="StrokeThickness" Value="1.5" />
+                <Setter Property="StrokeEndLineCap" Value="Round" />
+                <Setter Property="IsHitTestVisible" Value="False" />
+                <Setter Property="Focusable" Value="False" />
+            </Style>
+
+            <!-- The card: 176x52, per §7.4's 2-row x 4-column grid. -->
+            <DataTemplate DataType="{x:Type vm:AgentGraphNodeViewModel}">
+                <Border Width="176" Height="52" Padding="8,6" CornerRadius="{StaticResource RadiusMedium}"
+                        Background="{StaticResource SurfaceElevatedBrush}"
+                        Style="{StaticResource AgentGraphCardBorderStyle}"
+                        ToolTip="{Binding TooltipText}"
+                        AutomationProperties.Name="{Binding AutomationDescription}">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+
+                        <!-- State glyph: filled/hollow circle, never colour-only (see VisualState). -->
+                        <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding VisualState.Glyph}"
+                                   Margin="0,0,6,0" VerticalAlignment="Center"
+                                   FontSize="{StaticResource FontSizeCaption}"
+                                   Foreground="{Binding VisualState.ColorHex, Converter={StaticResource HexToBrush}}" />
+
+                        <!-- Model badge: letter-in-chip, reused verbatim from panel A. -->
+                        <Border Grid.Row="0" Grid.Column="1" Width="18" Height="18" CornerRadius="4" Margin="0,0,8,0"
+                                Background="{Binding ModelBadge.ColorHex, Converter={StaticResource HexToBrush}}">
+                            <TextBlock Text="{Binding ModelBadge.Letter}" Foreground="White" FontSize="10" FontWeight="Bold"
+                                       HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+
+                        <!-- Effort ring: reused verbatim from panel A. -->
+                        <controls:EffortBarsControl Grid.Row="0" Grid.Column="2" Level="{Binding EffortLevel}"
+                                                     Margin="0,0,8,0" VerticalAlignment="Center" />
+
+                        <!-- Name: Star-width, ellipsis-trimmed. -->
+                        <TextBlock Grid.Row="0" Grid.Column="3" Text="{Binding DisplayName}"
+                                   TextTrimming="CharacterEllipsis" Style="{StaticResource AgentGraphNodeNameTextStyle}" />
+
+                        <!-- Row 1: the focused-state left accent bar, plus "duration · tokens · context". -->
+                        <Rectangle Grid.Row="1" Grid.Column="0" Width="3" Height="18" Margin="0,4,0,0"
+                                   HorizontalAlignment="Left" RadiusX="1.5" RadiusY="1.5"
+                                   Fill="{Binding VisualState.ColorHex, Converter={StaticResource HexToBrush}}"
+                                   Visibility="{Binding IsFocused, Converter={StaticResource BoolToVis}}" />
+                        <TextBlock Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="3" Text="{Binding DetailText}"
+                                   Margin="0,4,0,0" TextTrimming="CharacterEllipsis"
+                                   FontSize="{StaticResource FontSizeCaption}"
+                                   Foreground="{StaticResource TextMutedBrush}" />
+                    </Grid>
+                </Border>
+            </DataTemplate>
+        </ResourceDictionary>
+    </UserControl.Resources>
+
+    <!--
+        §7.6: the container carries the accessible name for the whole graph; the empty-state hints
+        get LiveSetting="Polite" so a status change is announced without stealing focus.
+    -->
+    <Grid AutomationProperties.Name="Agent graph for the focused session">
+        <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled"
+                      Visibility="{Binding HasGraph, Converter={StaticResource BoolToVis}}">
+            <Grid x:Name="ContentHost">
+                <!-- Connector layer sits BENEATH the cards, in the same Grid cell, so cards always paint over edges. -->
+                <Canvas x:Name="ConnectorLayer" Background="Transparent" IsHitTestVisible="False" />
+
+                <ItemsControl x:Name="NodesList" ItemsSource="{Binding Nodes}">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <Canvas />
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemContainerStyle>
+                        <Style TargetType="ContentPresenter">
+                            <Setter Property="Canvas.Left" Value="{Binding X}" />
+                            <Setter Property="Canvas.Top" Value="{Binding Y}" />
+                        </Style>
+                    </ItemsControl.ItemContainerStyle>
+                </ItemsControl>
+
+                <!-- §7.5: 0 live agents - the parent renders alone, this hint sits where the first
+                     child column would begin, vertically centred, so the empty branch reads as
+                     "nothing here yet" rather than a broken layout. -->
+                <TextBlock Text="No sub-agents running"
+                           Margin="244,0,0,0" VerticalAlignment="Center" HorizontalAlignment="Left"
+                           AutomationProperties.LiveSetting="Polite" Visibility="Collapsed">
+                    <TextBlock.Style>
+                        <Style TargetType="TextBlock" BasedOn="{StaticResource SecondaryTextStyle}">
+                            <Style.Triggers>
+                                <MultiDataTrigger>
+                                    <MultiDataTrigger.Conditions>
+                                        <Condition Binding="{Binding HasGraph}" Value="True" />
+                                        <Condition Binding="{Binding HasAgents}" Value="False" />
+                                    </MultiDataTrigger.Conditions>
+                                    <Setter Property="Visibility" Value="Visible" />
+                                </MultiDataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </TextBlock.Style>
+                </TextBlock>
+            </Grid>
+        </ScrollViewer>
+
+        <!-- §7.5: no snapshot yet / no session focused / focused session absent from the snapshot. -->
+        <TextBlock Text="{Binding StatusText}"
+                   TextWrapping="Wrap" Margin="16" HorizontalAlignment="Left" VerticalAlignment="Center"
+                   AutomationProperties.LiveSetting="Polite" Visibility="Visible">
+            <TextBlock.Style>
+                <Style TargetType="TextBlock" BasedOn="{StaticResource SecondaryTextStyle}">
+                    <Style.Triggers>
+                        <DataTrigger Binding="{Binding HasGraph}" Value="True">
+                            <Setter Property="Visibility" Value="Collapsed" />
+                        </DataTrigger>
+                    </Style.Triggers>
+                </Style>
+            </TextBlock.Style>
+        </TextBlock>
+    </Grid>
+</UserControl>

@@ -20,6 +20,7 @@ using Xunit;
 internal sealed class FakePtySessionHost : IPtySessionHost
 {
     private readonly List<string> _tabIds;
+    private readonly Dictionary<string, int> _pidsByTabId = new(StringComparer.OrdinalIgnoreCase);
 
     public FakePtySessionHost(params string[] tabIds) => _tabIds = tabIds.ToList();
 
@@ -33,6 +34,13 @@ internal sealed class FakePtySessionHost : IPtySessionHost
     public bool HasSubscribers => SessionEnded is not null;
 
     public IReadOnlyList<string> TabIds() => _tabIds.ToArray();
+
+    /// <summary>Test setup for <see cref="PollFocusedSessionId"/>-driven tests: registers a pid for a
+    /// tabId, so <see cref="TryGetProcessId"/> stops returning null for it.</summary>
+    public void SetProcessId(string tabId, int pid) => _pidsByTabId[tabId] = pid;
+
+    public int? TryGetProcessId(string tabId) =>
+        !string.IsNullOrEmpty(tabId) && _pidsByTabId.TryGetValue(tabId, out int pid) ? pid : null;
 
     public void Add(string tabId) => _tabIds.Add(tabId);
 
@@ -429,6 +437,118 @@ public class TabsViewModelTests
 
         Assert.False(host.HasSubscribers);
         Assert.Empty(host.Closed); // disposing a ViewModel must never tear a session down (P3-T4's job)
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // PollFocusedSessionId: /clear rotates the session id Claude Code reports for a pid without
+    // touching the pty/tabId at all - see the method's own remarks for the full scenario.
+    // ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void PollFocusedSessionId_ReFocusesToTheCurrentSessionId_WhenTheStatusFileHasDrifted()
+    {
+        var host = new FakePtySessionHost("tab-a");
+        host.SetProcessId("tab-a", 4321);
+        var selection = new SessionSelectionService();
+        var dispatcher = new RecordingUiThreadDispatcher();
+        var tabs = new TabsViewModel(
+            host,
+            selection.AcquireWriter(),
+            dispatcher,
+            statusReader: pid => pid == 4321
+                ? new ClaudeSessionStatusSnapshot(pid, "new-session-after-clear", null, null, "idle", null)
+                : null);
+
+        tabs.SelectTab("tab-a");
+        Assert.Equal("tab-a", selection.FocusedSessionId); // unchanged at selection time
+
+        tabs.PollFocusedSessionId();
+
+        Assert.Equal("new-session-after-clear", selection.FocusedSessionId);
+    }
+
+    [Fact]
+    public void PollFocusedSessionId_IsANoOp_WhenTheSelectedTabHasNoKnownPid()
+    {
+        var host = new FakePtySessionHost("tab-a"); // no SetProcessId call
+        var selection = new SessionSelectionService();
+        var tabs = new TabsViewModel(host, selection.AcquireWriter(), new RecordingUiThreadDispatcher());
+
+        tabs.SelectTab("tab-a");
+        tabs.PollFocusedSessionId();
+
+        Assert.Equal("tab-a", selection.FocusedSessionId);
+    }
+
+    [Fact]
+    public void PollFocusedSessionId_IsANoOp_WhenTheStatusFileHasNoSessionId()
+    {
+        var host = new FakePtySessionHost("tab-a");
+        host.SetProcessId("tab-a", 4321);
+        var selection = new SessionSelectionService();
+        var tabs = new TabsViewModel(
+            host,
+            selection.AcquireWriter(),
+            new RecordingUiThreadDispatcher(),
+            statusReader: _ => null); // status file missing/unreadable - degrade to "unknown", not a guess
+
+        tabs.SelectTab("tab-a");
+        tabs.PollFocusedSessionId();
+
+        Assert.Equal("tab-a", selection.FocusedSessionId);
+    }
+
+    [Fact]
+    public void PollFocusedSessionId_NeverAppliesAcrossATabSwitch()
+    {
+        var host = new FakePtySessionHost("tab-a", "tab-b");
+        host.SetProcessId("tab-a", 111);
+        var selection = new SessionSelectionService();
+        var dispatcher = new RecordingUiThreadDispatcher { RunInline = false };
+        var tabs = new TabsViewModel(
+            host,
+            selection.AcquireWriter(),
+            dispatcher,
+            statusReader: pid => pid == 111 ? new ClaudeSessionStatusSnapshot(pid, "rotated-id", null, null, "idle", null) : null);
+
+        tabs.SelectTab("tab-a");
+        tabs.PollFocusedSessionId(); // queued on the dispatcher, not yet applied
+        tabs.SelectTab("tab-b"); // selection moves on before the queued post runs
+
+        dispatcher.Drain();
+
+        // The stale resolution for tab-a must not clobber the newer tab-b selection.
+        Assert.Equal("tab-b", selection.FocusedSessionId);
+    }
+
+    [Fact]
+    public void PollFocusedSessionId_IsANoOp_WhenNothingIsSelected()
+    {
+        var host = new FakePtySessionHost();
+        var selection = new SessionSelectionService();
+        var tabs = new TabsViewModel(host, selection.AcquireWriter(), new RecordingUiThreadDispatcher());
+
+        tabs.PollFocusedSessionId();
+
+        Assert.Null(selection.FocusedSessionId);
+    }
+
+    [Fact]
+    public void Dispose_StopsThePollTimer_AndDoesNotThrow()
+    {
+        var host = new FakePtySessionHost("tab-a");
+        var selection = new SessionSelectionService();
+        var tabs = new TabsViewModel(
+            host,
+            selection.AcquireWriter(),
+            new RecordingUiThreadDispatcher(),
+            statusPollInterval: TimeSpan.FromMilliseconds(20));
+
+        tabs.Dispose();
+
+        // No crash from a timer callback firing after disposal - PollFocusedSessionId's own _disposed
+        // check makes any race here harmless even before the timer is actually torn down.
+        Thread.Sleep(50);
     }
 
     [Fact]

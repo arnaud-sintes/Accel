@@ -49,7 +49,9 @@ public sealed partial class RootsPanelNodeViewModel : ObservableObject
         MonitorRowColumns columns,
         RootsPanelViewModel? owner = null,
         bool isFocused = false,
-        string projectDir = "")
+        string projectDir = "",
+        long? durationMs = null,
+        long? consumedTokens = null)
     {
         Key = key ?? string.Empty;
         Text = text ?? string.Empty;
@@ -57,6 +59,8 @@ public sealed partial class RootsPanelNodeViewModel : ObservableObject
         State = state;
         Columns = columns ?? MonitorRowColumns.Empty;
         ProjectDir = projectDir ?? string.Empty;
+        DurationMs = durationMs;
+        ConsumedTokens = consumedTokens;
         _owner = owner;
         _isFocused = isFocused;
 
@@ -122,6 +126,22 @@ public sealed partial class RootsPanelNodeViewModel : ObservableObject
     /// <c>projectDir</c> parameter) without a second disk scan.
     /// </summary>
     public string ProjectDir { get; }
+
+    /// <summary>Raw, unformatted duration/consumed-tokens values behind
+    /// <see cref="DurationText"/>/<see cref="TokensText"/> - null for rows with no data (root/
+    /// placeholder rows, or a session/agent whose start time couldn't be resolved), distinct
+    /// from a real <c>0</c>, mirroring <see cref="MonitorSessionNode"/>/<see cref="MonitorAgentNode"/>.</summary>
+    public long? DurationMs { get; }
+
+    /// <summary>See <see cref="DurationMs"/>.</summary>
+    public long? ConsumedTokens { get; }
+
+    /// <summary>The already-formatted duration string (e.g. "7m 04s", or "—" when unknown) - binding
+    /// symmetry with the existing <see cref="Columns"/>-derived surface.</summary>
+    public string DurationText => Columns.Duration;
+
+    /// <summary>The already-formatted consumed-tokens string (e.g. "148.2K", or "—" when unknown).</summary>
+    public string TokensText => Columns.Tokens;
 
     /// <summary>Whether this row currently represents a live/running session or agent - the
     /// "IsRunning" half of P1-T4 / locked-in decision 9's IsRunning x IsFocused visual-state axis.
@@ -229,9 +249,27 @@ public sealed partial class RootsPanelNodeViewModel : ObservableObject
         string model = string.IsNullOrEmpty(Columns.Model) ? "unknown-model" : Columns.Model;
         string effort = string.IsNullOrEmpty(Columns.Effort) ? "?" : Columns.Effort;
 
-        return string.IsNullOrEmpty(Columns.Context)
+        string tooltip = string.IsNullOrEmpty(Columns.Context)
             ? $"{kindLabel} {Columns.Id} — {model} — effort={effort}"
             : $"{kindLabel} {Columns.Id} — {model} — effort={effort} — {Columns.Context}";
+
+        // Appended only when there is actual data - "" (root/placeholder rows built with the
+        // legacy 6-arg MonitorRowColumns constructor) and the formatted "no data" em dash
+        // (MonitorTreeBuilder.FormatDuration/FormatTokenCount's null -> "—") both mean "nothing
+        // to show" here, so the tooltip string for a row without duration/tokens data is
+        // byte-for-byte unchanged - a compatibility guarantee pinned by RootsPanelViewModelTests.
+        const string noData = "—";
+        if (!string.IsNullOrEmpty(Columns.Duration) && Columns.Duration != noData)
+        {
+            tooltip += $" — {Columns.Duration}";
+        }
+
+        if (!string.IsNullOrEmpty(Columns.Tokens) && Columns.Tokens != noData)
+        {
+            tooltip += $" — {Columns.Tokens}";
+        }
+
+        return tooltip;
     }
 
     public override string ToString() => Text;
@@ -714,7 +752,9 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
 
     private RootsPanelNodeViewModel BuildSessionNode(MonitorSessionNode session)
     {
-        var node = new RootsPanelNodeViewModel(session.SessionId, session.Text, RootsPanelNodeKind.Session, session.State, session.Columns, this, projectDir: session.ProjectDir);
+        var node = new RootsPanelNodeViewModel(
+            session.SessionId, session.Text, RootsPanelNodeKind.Session, session.State, session.Columns, this,
+            projectDir: session.ProjectDir, durationMs: session.DurationMs, consumedTokens: session.ConsumedTokens);
 
         foreach (var agent in session.Agents)
         {
@@ -725,7 +765,8 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
     }
 
     private RootsPanelNodeViewModel BuildAgentNode(MonitorAgentNode agent) =>
-        new(agent.AgentId, agent.Text, RootsPanelNodeKind.Agent, agent.State, agent.Columns, this);
+        new(agent.AgentId, agent.Text, RootsPanelNodeKind.Agent, agent.State, agent.Columns, this,
+            durationMs: agent.DurationMs, consumedTokens: agent.ConsumedTokens);
 
     public void Dispose()
     {

@@ -174,6 +174,163 @@ public class SessionStateTests
         }
     }
 
+    // ---- AgentRecord.StartedAtUtc/StartedAtSource/TranscriptPath merge (claude-agentgraph.md
+    // section 6.1) ------------------------------------------------------------------------
+
+    [Fact]
+    public void UpdateAgentRecord_FirstRecordWithNoStartedAt_FallsBackToFirstSeenTier()
+    {
+        var state = new SessionState();
+        var receivedAt = new DateTime(2026, 8, 13, 9, 0, 0, DateTimeKind.Utc);
+        var record = new AgentRecord(
+            "agent-1", "general-purpose", "session-1", "claude-sonnet-5", "medium",
+            10, 20, 0, 0, 200_000, AgentStatus.Live, receivedAt, "subagentStatusLine");
+
+        state.UpdateAgentRecord(record);
+
+        state.TryGetAgent("agent-1", out var readBack);
+        Assert.Equal(receivedAt, readBack!.StartedAtUtc);
+        Assert.Equal("first_seen", readBack.StartedAtSource);
+    }
+
+    [Fact]
+    public void UpdateAgentRecord_FirstRecordWithTierOneStartedAt_KeepsIt()
+    {
+        var state = new SessionState();
+        var startedAt = new DateTime(2026, 8, 13, 8, 0, 0, DateTimeKind.Utc);
+        var record = new AgentRecord(
+            "agent-1", "general-purpose", "session-1", "claude-sonnet-5", "medium",
+            10, 20, 0, 0, 200_000, AgentStatus.Live, DateTime.UtcNow, "transcript",
+            StartedAtUtc: startedAt, StartedAtSource: "transcript");
+
+        state.UpdateAgentRecord(record);
+
+        state.TryGetAgent("agent-1", out var readBack);
+        Assert.Equal(startedAt, readBack!.StartedAtUtc);
+        Assert.Equal("transcript", readBack.StartedAtSource);
+    }
+
+    [Fact]
+    public void UpdateAgentRecord_LaterUpdateWithNullStartedAt_KeepsTheOriginal()
+    {
+        var state = new SessionState();
+        var startedAt = new DateTime(2026, 8, 13, 8, 0, 0, DateTimeKind.Utc);
+        state.UpdateAgentRecord(new AgentRecord(
+            "agent-1", "general-purpose", "session-1", "claude-sonnet-5", "medium",
+            10, 20, 0, 0, 200_000, AgentStatus.Live, DateTime.UtcNow, "task_start_time",
+            StartedAtUtc: startedAt, StartedAtSource: "task_start_time"));
+
+        // A later subagentStatusLine tick that this time didn't carry a task startTime.
+        state.UpdateAgentRecord(new AgentRecord(
+            "agent-1", "general-purpose", "session-1", "claude-sonnet-5", "medium",
+            50, 20, 0, 0, 200_000, AgentStatus.Live, DateTime.UtcNow, "subagentStatusLine",
+            StartedAtUtc: null, StartedAtSource: null));
+
+        state.TryGetAgent("agent-1", out var readBack);
+        Assert.Equal(startedAt, readBack!.StartedAtUtc);
+        Assert.Equal("task_start_time", readBack.StartedAtSource);
+        // Non-start-time fields still update normally.
+        Assert.Equal(50, readBack.InputTokens);
+    }
+
+    [Fact]
+    public void UpdateAgentRecord_LaterUpdateWithLaterStartedAt_KeepsTheEarlier()
+    {
+        var state = new SessionState();
+        var earlier = new DateTime(2026, 8, 13, 8, 0, 0, DateTimeKind.Utc);
+        var later = new DateTime(2026, 8, 13, 9, 0, 0, DateTimeKind.Utc);
+
+        state.UpdateAgentRecord(new AgentRecord(
+            "agent-1", "general-purpose", "session-1", "claude-sonnet-5", "medium",
+            10, 20, 0, 0, 200_000, AgentStatus.Live, DateTime.UtcNow, "transcript",
+            StartedAtUtc: earlier, StartedAtSource: "transcript"));
+
+        state.UpdateAgentRecord(new AgentRecord(
+            "agent-1", "general-purpose", "session-1", "claude-sonnet-5", "medium",
+            10, 20, 0, 0, 200_000, AgentStatus.Live, DateTime.UtcNow, "task_start_time",
+            StartedAtUtc: later, StartedAtSource: "task_start_time"));
+
+        state.TryGetAgent("agent-1", out var readBack);
+        Assert.Equal(earlier, readBack!.StartedAtUtc);
+        Assert.Equal("transcript", readBack.StartedAtSource);
+    }
+
+    [Fact]
+    public void UpdateAgentRecord_LaterUpdateWithEarlierStartedAt_AdoptsTheEarlierOne()
+    {
+        var state = new SessionState();
+        var later = new DateTime(2026, 8, 13, 9, 0, 0, DateTimeKind.Utc);
+        var earlier = new DateTime(2026, 8, 13, 8, 0, 0, DateTimeKind.Utc);
+
+        state.UpdateAgentRecord(new AgentRecord(
+            "agent-1", "general-purpose", "session-1", "claude-sonnet-5", "medium",
+            10, 20, 0, 0, 200_000, AgentStatus.Live, DateTime.UtcNow, "task_start_time",
+            StartedAtUtc: later, StartedAtSource: "task_start_time"));
+
+        state.UpdateAgentRecord(new AgentRecord(
+            "agent-1", "general-purpose", "session-1", "claude-sonnet-5", "medium",
+            10, 20, 0, 0, 200_000, AgentStatus.Live, DateTime.UtcNow, "transcript",
+            StartedAtUtc: earlier, StartedAtSource: "transcript"));
+
+        state.TryGetAgent("agent-1", out var readBack);
+        Assert.Equal(earlier, readBack!.StartedAtUtc);
+        Assert.Equal("transcript", readBack.StartedAtSource);
+    }
+
+    [Fact]
+    public void UpdateAgentRecord_LaterUpdateWithNullTranscriptPath_KeepsTheKnownPath()
+    {
+        var state = new SessionState();
+        state.UpdateAgentRecord(new AgentRecord(
+            "agent-1", "general-purpose", "session-1", "claude-sonnet-5", "medium",
+            10, 20, 0, 0, 200_000, AgentStatus.Live, DateTime.UtcNow, "transcript",
+            TranscriptPath: @"C:\some\agent-1.jsonl"));
+
+        state.UpdateAgentRecord(new AgentRecord(
+            "agent-1", "general-purpose", "session-1", "claude-sonnet-5", "medium",
+            50, 20, 0, 0, 200_000, AgentStatus.Live, DateTime.UtcNow, "subagentStatusLine",
+            TranscriptPath: null));
+
+        state.TryGetAgent("agent-1", out var readBack);
+        Assert.Equal(@"C:\some\agent-1.jsonl", readBack!.TranscriptPath);
+    }
+
+    [Fact]
+    public void MarkAgentEnded_PreservesStartedAtUtc()
+    {
+        var state = new SessionState();
+        var startedAt = new DateTime(2026, 8, 13, 8, 0, 0, DateTimeKind.Utc);
+        state.UpdateAgentRecord(new AgentRecord(
+            "agent-1", "general-purpose", "session-1", "claude-sonnet-5", "medium",
+            10, 20, 0, 0, 200_000, AgentStatus.Live, DateTime.UtcNow, "transcript",
+            StartedAtUtc: startedAt, StartedAtSource: "transcript"));
+
+        state.MarkAgentEnded("agent-1");
+
+        state.TryGetAgent("agent-1", out var readBack);
+        Assert.Equal(AgentStatus.Ended, readBack!.Status);
+        Assert.Equal(startedAt, readBack.StartedAtUtc);
+        Assert.Equal("transcript", readBack.StartedAtSource);
+    }
+
+    [Fact]
+    public void ReconcileLiveAgents_StalePathPreservesStartedAtUtc()
+    {
+        var state = new SessionState();
+        var startedAt = new DateTime(2026, 8, 13, 8, 0, 0, DateTimeKind.Utc);
+        state.UpdateAgentRecord(new AgentRecord(
+            "agent-1", "general-purpose", "session-1", "claude-sonnet-5", "medium",
+            10, 20, 0, 0, 200_000, AgentStatus.Live, DateTime.UtcNow, "subagentStatusLine",
+            StartedAtUtc: startedAt, StartedAtSource: "task_start_time"));
+
+        state.ReconcileLiveAgents(new HashSet<string>()); // agent-1 no longer visible -> Stale
+
+        state.TryGetAgent("agent-1", out var readBack);
+        Assert.Equal(AgentStatus.Stale, readBack!.Status);
+        Assert.Equal(startedAt, readBack.StartedAtUtc);
+        Assert.Equal("task_start_time", readBack.StartedAtSource);
+    }
+
     // ---- Changed event: the primary push signal MonitorForm subscribes to directly ------
 
     [Fact]

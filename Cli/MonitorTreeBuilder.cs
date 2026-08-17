@@ -18,23 +18,36 @@ public enum MonitorNodeState
     Stale,
 }
 
-/// <summary>The six-column data ("ID | Name | Type | Model | Effort | Context") available per row -
-/// a pure, testable projection kept separate from the legacy single-line <c>Text</c> (still
-/// produced alongside it for existing callers/tests).</summary>
-public sealed record MonitorRowColumns(string Id, string Name, string Type, string Model, string Effort, string Context)
+/// <summary>The six/eight-column data ("ID | Name | Type | Model | Effort | Context | Duration |
+/// Tokens") available per row - a pure, testable projection kept separate from the legacy
+/// single-line <c>Text</c> (still produced alongside it for existing callers/tests).
+/// <see cref="Duration"/>/<see cref="Tokens"/> are appended, defaulted display strings (see
+/// <see cref="MonitorTreeBuilder.FormatDuration"/>/<see cref="MonitorTreeBuilder.FormatTokenCount"/>),
+/// consistent with every other member of this record - <see cref="Context"/> is already a
+/// pre-formatted string in the same style.</summary>
+public sealed record MonitorRowColumns(
+    string Id, string Name, string Type, string Model, string Effort, string Context,
+    string Duration = "", string Tokens = "")
 {
     public static readonly MonitorRowColumns Empty = new(string.Empty, string.Empty, string.Empty, string.Empty, string.Empty, string.Empty);
 }
 
-/// <summary>One rendered sub-agent leaf.</summary>
-public sealed record MonitorAgentNode(string AgentId, string Text, MonitorNodeState State, MonitorRowColumns Columns);
+/// <summary>One rendered sub-agent leaf. <see cref="DurationMs"/>/<see cref="ConsumedTokens"/> are
+/// the raw, unformatted values behind <see cref="MonitorRowColumns.Duration"/>/<c>.Tokens</c> -
+/// carried through so a future graph control can scale bars/edges without parsing formatted
+/// strings back into numbers.</summary>
+public sealed record MonitorAgentNode(string AgentId, string Text, MonitorNodeState State, MonitorRowColumns Columns,
+    long? DurationMs = null, long? ConsumedTokens = null);
 
 /// <summary>One rendered session node, with its (already live-filtered by the server) sub-agents.
 /// <see cref="ProjectDir"/> is the transcript's project slug (<c>SessionTreeDto.ProjectDir</c>) -
 /// carried through purely so P4-T4's "Remove session" action can resolve
 /// <c>projects/&lt;slug&gt;/&lt;sessionId&gt;[.jsonl]</c> without a second disk scan; nothing here
-/// otherwise needed it.</summary>
-public sealed record MonitorSessionNode(string SessionId, string Text, MonitorNodeState State, MonitorAgentNode[] Agents, MonitorRowColumns Columns, string ProjectDir = "");
+/// otherwise needed it. <see cref="DurationMs"/>/<see cref="ConsumedTokens"/> mirror
+/// <see cref="MonitorAgentNode"/>'s raw-value fields.</summary>
+public sealed record MonitorSessionNode(string SessionId, string Text, MonitorNodeState State, MonitorAgentNode[] Agents,
+    MonitorRowColumns Columns, string ProjectDir = "",
+    long? DurationMs = null, long? ConsumedTokens = null);
 
 /// <summary>One rendered root-folder node. <see cref="OrphanAgents"/> is only ever non-empty for
 /// the synthetic "(unattributed)" root - a normal configured root's agents are always nested
@@ -116,11 +129,15 @@ public static class MonitorTreeBuilder
 
         string text = $"{prefix}{name} — {id}… — {model} — effort={effort} — {pct}% of {window}{assumed}";
         string context = $"{pct}% of {window}{assumed}";
-        var columns = new MonitorRowColumns(id, name, "session", model, effort, context);
+        string durationText = FormatDuration(session.DurationMs);
+        string tokensText = FormatTokenCount(session.ConsumedTokens);
+        var columns = new MonitorRowColumns(id, name, "session", model, effort, context, durationText, tokensText);
 
         var agents = (session.Agents ?? Array.Empty<AgentTreeDto>()).Select(BuildAgentNode).ToArray();
 
-        return new MonitorSessionNode(session.SessionId ?? string.Empty, text, state, agents, columns, session.ProjectDir ?? string.Empty);
+        return new MonitorSessionNode(
+            session.SessionId ?? string.Empty, text, state, agents, columns, session.ProjectDir ?? string.Empty,
+            session.DurationMs, session.ConsumedTokens);
     }
 
     private static MonitorAgentNode BuildAgentNode(AgentTreeDto agent)
@@ -151,9 +168,11 @@ public static class MonitorTreeBuilder
         string id = TruncateId(agent.AgentId);
         string name = agent.Name ?? string.Empty;
         string context = $"{pct}% of {window}{assumed}";
-        var columns = new MonitorRowColumns(id, name, type, model, effort, context);
+        string durationText = FormatDuration(agent.DurationMs);
+        string tokensText = FormatTokenCount(agent.ConsumedTokens);
+        var columns = new MonitorRowColumns(id, name, type, model, effort, context, durationText, tokensText);
 
-        return new MonitorAgentNode(agent.AgentId ?? string.Empty, text, state, columns);
+        return new MonitorAgentNode(agent.AgentId ?? string.Empty, text, state, columns, agent.DurationMs, agent.ConsumedTokens);
     }
 
     /// <summary>The leading state glyph rendered as its own small element (e.g. in the ID
@@ -180,6 +199,60 @@ public static class MonitorTreeBuilder
 
     private static string FormatPercentage(double? value) =>
         (value ?? 0).ToString("0.0", CultureInfo.InvariantCulture);
+
+    /// <summary><c>null</c> -&gt; <see cref="EmDash"/>; &lt; 60s -&gt; <c>"12s"</c>; &lt; 60min
+    /// -&gt; <c>"7m 04s"</c>; else -&gt; <c>"1h 23m"</c>. Public static so the future graph
+    /// control can reuse it rather than re-deriving - like <see cref="GlyphFor"/>.</summary>
+    public static string FormatDuration(long? ms)
+    {
+        if (!ms.HasValue)
+        {
+            return EmDash;
+        }
+
+        long totalSeconds = ms.Value / 1000;
+        if (totalSeconds < 60)
+        {
+            return totalSeconds.ToString(CultureInfo.InvariantCulture) + "s";
+        }
+
+        long totalMinutes = totalSeconds / 60;
+        long seconds = totalSeconds % 60;
+        if (totalMinutes < 60)
+        {
+            return string.Create(CultureInfo.InvariantCulture, $"{totalMinutes}m {seconds:D2}s");
+        }
+
+        long hours = totalMinutes / 60;
+        long minutes = totalMinutes % 60;
+        return string.Create(CultureInfo.InvariantCulture, $"{hours}h {minutes:D2}m");
+    }
+
+    /// <summary><c>null</c> -&gt; <see cref="EmDash"/>; &lt; 1000 -&gt; the raw count (e.g.
+    /// <c>"842"</c>); &lt; 1,000,000 -&gt; <c>"148.2K"</c>; else -&gt; <c>"1.4M"</c>. Deliberately
+    /// not reusing <see cref="FormatWindowSize"/>, whose exact-multiple-only rule is right for
+    /// round window sizes and useless for arbitrary token counts. Public static for the same
+    /// reuse reason as <see cref="FormatDuration"/>.</summary>
+    public static string FormatTokenCount(long? tokens)
+    {
+        if (!tokens.HasValue)
+        {
+            return EmDash;
+        }
+
+        long v = tokens.Value;
+        if (v < 1000)
+        {
+            return v.ToString(CultureInfo.InvariantCulture);
+        }
+
+        if (v < 1_000_000)
+        {
+            return (v / 1000.0).ToString("0.0", CultureInfo.InvariantCulture) + "K";
+        }
+
+        return (v / 1_000_000.0).ToString("0.0", CultureInfo.InvariantCulture) + "M";
+    }
 
     /// <summary>"1000000" -&gt; "1M", "200000" -&gt; "200K", anything else -&gt; the raw number,
     /// null -&gt; "?". Deliberately simple (exact-multiple check only) - <c>ModelWindowTable</c>'s

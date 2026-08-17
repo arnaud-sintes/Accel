@@ -41,6 +41,13 @@ public sealed class ParsedCommand
     /// CLI surface (see project plan) but kept since it costs nothing to retain.</summary>
     public string? DumpRawDir { get; init; }
 
+    /// <summary>`--verbose`: opts a regular <see cref="Verb.Start"/> run into the diagnostic
+    /// console output normal runs no longer print (per-event lifecycle lines, the full install
+    /// summary) - see <c>Program.cs</c>'s <c>RunCombinedAsync</c>. Off by default: a regular
+    /// launch stays silent except for errors and startup-relevant facts (listening port, a
+    /// refused install, a repaired port drift).</summary>
+    public bool Verbose { get; init; }
+
     /// <summary>The raw, unrecognised token — only set when <see cref="Verb"/> is <see cref="Verb.Unknown"/>.</summary>
     public string? UnknownVerbText { get; init; }
 }
@@ -56,6 +63,7 @@ public static class ArgParser
     private const string PortFlag = "--port";
     private const string UninstallFlag = "--uninstall";
     private const string DumpRawFlag = "--dump-raw";
+    private const string VerboseFlag = "--verbose";
 
     /// <summary>Parses argv. Never throws — an unparseable `--port` value is ignored (default kept).</summary>
     public static ParsedCommand Parse(string[] args)
@@ -74,6 +82,7 @@ public static class ArgParser
 
         var port = AccelHookSpec.DefaultPort;
         var uninstall = false;
+        var verbose = false;
         string? dumpRawDir = null;
 
         for (; i < args.Length; i++)
@@ -91,6 +100,10 @@ public static class ArgParser
             {
                 uninstall = true;
             }
+            else if (string.Equals(args[i], VerboseFlag, StringComparison.Ordinal))
+            {
+                verbose = true;
+            }
             else if (string.Equals(args[i], DumpRawFlag, StringComparison.Ordinal) && i + 1 < args.Length)
             {
                 dumpRawDir = args[i + 1];
@@ -104,6 +117,7 @@ public static class ArgParser
             Port = port,
             Uninstall = uninstall,
             DumpRawDir = dumpRawDir,
+            Verbose = verbose,
             UnknownVerbText = unknownText,
         };
     }

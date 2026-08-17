@@ -915,6 +915,60 @@ public class RootsPanelViewModelTests
     }
 
     [Fact]
+    public void Rebuild_SessionNode_ExposesDurationAndConsumedTokens()
+    {
+        var (vm, feed, _) = Build();
+        feed.Publish(TelemetryFixtures.Tree(new[]
+        {
+            TelemetryFixtures.Root(RootPath, TelemetryFixtures.Session("s-1", isLive: true, durationMs: 424_000, consumedTokens: 148_223)),
+        }));
+
+        var node = Node(vm, "s-1");
+
+        Assert.Equal(424_000, node.DurationMs);
+        Assert.Equal(148_223, node.ConsumedTokens);
+        Assert.Equal("7m 04s", node.DurationText);
+        Assert.Equal("148.2K", node.TokensText);
+    }
+
+    [Fact]
+    public void TooltipText_WithDurationAndTokens_AppendsThem()
+    {
+        var (vm, feed, _) = Build();
+        feed.Publish(TelemetryFixtures.Tree(new[]
+        {
+            TelemetryFixtures.Root(RootPath, TelemetryFixtures.Session("s-1", isLive: true, durationMs: 424_000, consumedTokens: 148_223)),
+        }));
+
+        var node = Node(vm, "s-1");
+
+        Assert.EndsWith($" — {node.Columns.Duration} — {node.Columns.Tokens}", node.TooltipText);
+    }
+
+    [Fact]
+    public void TooltipText_WithoutDurationAndTokens_IsUnchanged()
+    {
+        // Pins backward compatibility: a row with no duration/tokens data (the ordinary case for
+        // most existing fixtures/tests) must produce the exact same tooltip string it always has -
+        // claude-agentgraph.md section 6.6's explicit compatibility guarantee.
+        var (vmBaseline, feedBaseline, _) = Build();
+        feedBaseline.Publish(TelemetryFixtures.Tree(new[]
+        {
+            TelemetryFixtures.Root(RootPath, TelemetryFixtures.Session("s-1", isLive: true)),
+        }));
+        string baselineTooltip = Node(vmBaseline, "s-1").TooltipText;
+
+        var (vm, feed, _) = Build();
+        feed.Publish(TelemetryFixtures.Tree(new[]
+        {
+            TelemetryFixtures.Root(RootPath, TelemetryFixtures.Session("s-1", isLive: true, durationMs: null, consumedTokens: null)),
+        }));
+        string tooltip = Node(vm, "s-1").TooltipText;
+
+        Assert.Equal(baselineTooltip, tooltip);
+    }
+
+    [Fact]
     public void AgentNode_AlsoResolvesModelBadgeAndEffortBars()
     {
         var (vm, feed, _) = Build();

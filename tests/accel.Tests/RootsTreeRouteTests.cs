@@ -73,16 +73,32 @@ public class RootsTreeRouteTests : IAsyncLifetime
         return path;
     }
 
-    private static string ModeLine() =>
-        JsonSerializer.Serialize(new Dictionary<string, object?> { ["type"] = "mode", ["mode"] = "normal" });
+    private static string ModeLine(string? timestamp = null)
+    {
+        var payload = new Dictionary<string, object?> { ["type"] = "mode", ["mode"] = "normal" };
+        if (timestamp is not null)
+        {
+            payload["timestamp"] = timestamp;
+        }
 
-    private static string UserLine(string text, string cwd) =>
-        JsonSerializer.Serialize(new Dictionary<string, object?>
+        return JsonSerializer.Serialize(payload);
+    }
+
+    private static string UserLine(string text, string cwd, string? timestamp = null)
+    {
+        var payload = new Dictionary<string, object?>
         {
             ["type"] = "user",
             ["cwd"] = cwd,
             ["message"] = new Dictionary<string, object?> { ["content"] = text },
-        });
+        };
+        if (timestamp is not null)
+        {
+            payload["timestamp"] = timestamp;
+        }
+
+        return JsonSerializer.Serialize(payload);
+    }
 
     private static string AssistantLine(string model, string effort, int input, int output, int cacheCreate = 0, int cacheRead = 0) =>
         JsonSerializer.Serialize(new Dictionary<string, object?>
@@ -637,5 +653,161 @@ public class RootsTreeRouteTests : IAsyncLifetime
         var thirdSession = third.UnattributedSessions.Single(s => s.SessionId == sessionId);
         Assert.Equal(1, builder.TailCacheCount);
         Assert.Equal("Updated title", thirdSession.Name);
+    }
+
+    // ---- StartedAtUtc / DurationMs / ConsumedTokens (claude-agentgraph.md section 6) --------
+
+    [Fact]
+    public async Task RootsTree_SessionWithTranscriptTimestamp_ExposesStartedAtUtcAndDurationMs()
+    {
+        string sessionId = $"session-{Guid.NewGuid():N}";
+        WriteSessionFile("C--projects", sessionId, new[]
+        {
+            UserLine("Audit the UI design doc please", @"C:\projects", timestamp: "2020-01-01T00:00:00Z"),
+            AssistantLine("claude-sonnet-5", "medium", 1000, 200, 50, 25),
+        });
+
+        await StartServerAsync(new[] { @"C:\projects" });
+
+        var response = await _client!.GetAsync("/roots/tree");
+        using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var session = FindSession(doc.RootElement, @"C:\projects", sessionId);
+
+        Assert.Equal("transcript", session.GetProperty("started_at_source").GetString());
+        var startedAtUtc = session.GetProperty("started_at_utc").GetDateTime();
+        Assert.Equal(new DateTime(2020, 1, 1, 0, 0, 0, DateTimeKind.Utc), startedAtUtc);
+
+        long durationMs = session.GetProperty("duration_ms").GetInt64();
+        Assert.True(durationMs > 0, "duration_ms should be positive for a start time far in the past");
+    }
+
+    [Fact]
+    public async Task RootsTree_SessionWithoutAnyTimestamp_ExposesNullStartedAtAndNullDuration()
+    {
+        string sessionId = $"session-{Guid.NewGuid():N}";
+        WriteSessionFile("C--projects", sessionId, new[]
+        {
+            ModeLine(),
+            UserLine("hello", @"C:\projects"),
+        });
+
+        await StartServerAsync(new[] { @"C:\projects" });
+
+        var response = await _client!.GetAsync("/roots/tree");
+        using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var session = FindSession(doc.RootElement, @"C:\projects", sessionId);
+
+        Assert.Equal(JsonValueKind.Null, session.GetProperty("started_at_utc").ValueKind);
+        Assert.Equal(JsonValueKind.Null, session.GetProperty("started_at_source").ValueKind);
+        Assert.Equal(JsonValueKind.Null, session.GetProperty("duration_ms").ValueKind);
+    }
+
+    [Fact]
+    public async Task RootsTree_LiveSession_DurationIsMeasuredAgainstGeneratedAtUtc()
+    {
+        string sessionId = $"session-{Guid.NewGuid():N}";
+        WriteSessionFile("C--projects", sessionId, new[]
+        {
+            UserLine("hello", @"C:\projects", timestamp: "2020-01-01T00:00:00Z"),
+        });
+
+        await StartServerAsync(new[] { @"C:\projects" });
+
+        _server!.State.UpdateSessionSnapshot(new SessionSnapshot(
+            SessionId: sessionId, ModelId: "claude-opus-5", ModelDisplayName: "Opus", EffortLevel: "high",
+            ContextWindowSize: 200_000, UsedTokens: 1000, UsedPercentage: 0.5, RemainingPercentage: 99.5,
+            CostUsd: null, PayloadVersion: null, ReceivedAtUtc: DateTime.UtcNow));
+
+        var response = await _client!.GetAsync("/roots/tree");
+        using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var session = FindSession(doc.RootElement, @"C:\projects", sessionId);
+        var generatedAtUtc = doc.RootElement.GetProperty("generated_at_utc").GetDateTime();
+
+        long durationMs = session.GetProperty("duration_ms").GetInt64();
+        var startedAtUtc = session.GetProperty("started_at_utc").GetDateTime();
+
+        // Live session: end = nowUtc (== the same captured GeneratedAtUtc, section 6.5).
+        long expectedMs = (long)Math.Max(0, (generatedAtUtc - startedAtUtc).TotalMilliseconds);
+        Assert.Equal(expectedMs, durationMs);
+    }
+
+    [Fact]
+    public async Task RootsTree_HistoricalSession_DurationIsMeasuredAgainstLastActivity()
+    {
+        string sessionId = $"session-{Guid.NewGuid():N}";
+        WriteSessionFile("C--projects", sessionId, new[]
+        {
+            UserLine("hello", @"C:\projects", timestamp: "2020-01-01T00:00:00Z"),
+            AssistantLine("claude-sonnet-5", "medium", 10, 5),
+        });
+
+        await StartServerAsync(new[] { @"C:\projects" });
+
+        var response = await _client!.GetAsync("/roots/tree");
+        using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var session = FindSession(doc.RootElement, @"C:\projects", sessionId);
+
+        var startedAtUtc = session.GetProperty("started_at_utc").GetDateTime();
+        var lastActivityUtc = session.GetProperty("last_activity_utc").GetDateTime();
+        long durationMs = session.GetProperty("duration_ms").GetInt64();
+
+        long expectedMs = (long)Math.Max(0, (lastActivityUtc - startedAtUtc).TotalMilliseconds);
+        Assert.Equal(expectedMs, durationMs);
+    }
+
+    [Fact]
+    public async Task RootsTree_SessionConsumedTokens_IsFlaggedContextOnly()
+    {
+        string sessionId = $"session-{Guid.NewGuid():N}";
+        WriteSessionFile("C--projects", sessionId, new[]
+        {
+            ModeLine(),
+            UserLine("hello", @"C:\projects"),
+            AssistantLine("claude-sonnet-5", "medium", 100, 20, 5, 3),
+        });
+
+        await StartServerAsync(new[] { @"C:\projects" });
+
+        var response = await _client!.GetAsync("/roots/tree");
+        using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var session = FindSession(doc.RootElement, @"C:\projects", sessionId);
+
+        Assert.True(session.GetProperty("consumed_tokens_is_context_only").GetBoolean());
+        Assert.Equal(
+            session.GetProperty("used_tokens").GetInt64(),
+            session.GetProperty("consumed_tokens").GetInt64());
+    }
+
+    [Fact]
+    public async Task RootsTree_LiveAgent_ExposesDurationAndConsumedTokens()
+    {
+        string sessionId = $"session-{Guid.NewGuid():N}";
+        WriteSessionFile("C--projects", sessionId, new[] { ModeLine(), UserLine("hi", @"C:\projects") });
+
+        await StartServerAsync(new[] { @"C:\projects" });
+
+        _server!.State.UpdateSessionSnapshot(new SessionSnapshot(
+            SessionId: sessionId, ModelId: "claude-opus-5", ModelDisplayName: "Opus", EffortLevel: "high",
+            ContextWindowSize: 200_000, UsedTokens: 1000, UsedPercentage: 0.5, RemainingPercentage: 99.5,
+            CostUsd: null, PayloadVersion: null, ReceivedAtUtc: DateTime.UtcNow));
+
+        string agentId = $"agent-{Guid.NewGuid():N}";
+        _server.State.UpdateAgentRecord(new AgentRecord(
+            AgentId: agentId, AgentType: "general-purpose", ParentSessionId: sessionId,
+            ModelId: "claude-sonnet-5", EffortLevel: "medium", InputTokens: 100, OutputTokens: 20,
+            CacheCreationInputTokens: 5, CacheReadInputTokens: 3, ContextWindowSize: 200_000,
+            Status: AgentStatus.Live, ReceivedAtUtc: DateTime.UtcNow, Source: "subagentStatusLine"));
+
+        var response = await _client!.GetAsync("/roots/tree");
+        using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var session = FindSession(doc.RootElement, @"C:\projects", sessionId);
+        var agent = session.GetProperty("agents").EnumerateArray().Single(a => a.GetProperty("agent_id").GetString() == agentId);
+
+        // No transcript file exists at the convention path, so tier 1 misses and this falls back
+        // to tier 3 (first_seen) - never left entirely null.
+        Assert.Equal("first_seen", agent.GetProperty("started_at_source").GetString());
+        Assert.NotEqual(JsonValueKind.Null, agent.GetProperty("started_at_utc").ValueKind);
+        Assert.NotEqual(JsonValueKind.Null, agent.GetProperty("duration_ms").ValueKind);
+        Assert.Equal(128, agent.GetProperty("consumed_tokens").GetInt64());
     }
 }
