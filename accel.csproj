@@ -1,0 +1,152 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <UseWPF>true</UseWPF>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <!--
+      InvariantGlobalization was removed: WPF's text-input pipeline resolves the keyboard layout's
+      own culture (e.g. LCID 1036/fr-FR on a French keyboard) on every keystroke into any TextBox,
+      independently of FrameworkElement.Language (which only affects markup/binding culture
+      resolution - the various Window.Language="" workarounds elsewhere in this codebase do not
+      help here). Under invariant mode that throws CultureNotFoundException the instant a user
+      types on a non-English keyboard - reproduced via the "Create session" dialog's Display Name
+      box. A desktop WPF app with real user-facing text input cannot use invariant globalization;
+      this is not a per-control workaround, it is a hard SDK-level conflict.
+    -->
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+
+    <!--
+      P1-T4: Microsoft.NET.Sdk.Web (needed only for the in-process Kestrel EventServer - this
+      app has no ASP.NET Core MVC controllers at all, see grep for AddControllers/ApplicationPart)
+      defaults GenerateMvcApplicationPartsAssemblyAttributes to true for any Exe output. That
+      target's discovery pass runs again inside the "wpftmp" temporary project MSBuild generates
+      to markup-compile XAML that references local (same-assembly) clr-namespace types - which
+      panel A's P1-T4 styling (Converters/Controls referenced from MainWindow.xaml) newly does -
+      and hits a long-standing SDK bug there (missing 'FusionName' metadata on
+      Microsoft.WindowsDesktop.App.Ref's Accessibility.dll reference-pack assembly), failing the
+      whole build. Disabling it is safe (nothing in this app uses MVC parts discovery) and avoids
+      the bug entirely rather than working around it per-XAML-file.
+    -->
+    <GenerateMvcApplicationPartsAssemblyAttributes>false</GenerateMvcApplicationPartsAssemblyAttributes>
+
+    <!-- Acceleration-themed app icon (dark rounded square, orange->teal forward chevrons). -->
+    <ApplicationIcon>App\accel.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Resource Include="App\accel.ico" />
+  </ItemGroup>
+
+  <!--
+    Microsoft.NET.Sdk.Web's default implicit-usings profile includes System.IO and
+    System.Net.Http (used implicitly across Metrics/Server code such as
+    RootsTreeBuilder.cs, TranscriptReader.cs, RawPayloadCapture.cs, RootFoldersConfig.cs,
+    EventServer.cs, SubagentStatusLineCommand.cs). Enabling UseWPF pulls in the
+    WindowsDesktop SDK overlay, whose own implicit-usings profile (for UseWindowsForms /
+    UseWPF apps) replaces rather than merges with the Web SDK's list, silently dropping
+    System.IO and System.Net.Http and breaking every file that relied on them being
+    implicit. Restore them explicitly here instead of editing every affected file.
+  -->
+  <ItemGroup>
+    <Using Include="System.IO" />
+    <Using Include="System.Net.Http" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.0" />
+
+    <!--
+      P2-T5: WebView2 host for App/Controls/TerminalView.xaml. Pinned to the exact latest stable
+      (non-prerelease) version on nuget.org at the time of writing - deliberately not floated.
+      See the comment below (right after this ItemGroup) for how its native WebView2Loader.dll
+      loader interacts with PublishSingleFile.
+    -->
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4129.50" />
+  </ItemGroup>
+
+  <!--
+    P2-T5: WebView2Loader.dll (the package's native loader, added by its own build\Common.targets
+    as a Content item under runtimes\win-x64\native\, CopyToOutputDirectory=PreserveNewest) is
+    left at its package default here - no ExcludeFromSingleFile override was needed. In a plain
+    build it lands as a loose file next to Accel.exe (also copied to the output root by the
+    .NET runtime-asset resolution for a self-contained win-x64 build). In the PublishSingleFile
+    output, this project's existing IncludeNativeLibrariesForSelfExtract=true bundles it into the
+    single-file payload instead (Content is not the same as embedded managed resources, but native
+    RuntimeCopyLocal assets get folded in under that flag) - the documented WebView2Loader.dll
+    self-locating-lookup problem some report with PublishSingleFile did NOT reproduce here: the
+    published exe's own real startup run (see this task's report) rendered panel D and read back
+    document.title successfully, so no extra fix (e.g. explicit ExcludeFromSingleFile) was
+    required for this WebView2/SDK version combination.
+  -->
+
+  <!--
+    P2-T5: xterm.js + the FitAddon, vendored offline (see App/Controls/wwwroot/xterm/
+    THIRD_PARTY_NOTICES.txt for exact versions/licenses), served to the WebView2 control via
+    CoreWebView2.SetVirtualHostNameToFolderMapping (TerminalView.xaml.cs) rather than embedded as
+    true assembly EmbeddedResource + runtime extraction - see that file's doc comment for why.
+    Explicit Content items (with an explicit output <Link>) rather than relying on
+    Microsoft.NET.Sdk.Web's implicit wwwroot glob, since that implicit glob only covers a
+    project-root-level "wwwroot" folder and this one is nested under App/Controls.
+  -->
+  <ItemGroup>
+    <Content Include="App\Controls\wwwroot\xterm\xterm.js">
+      <Link>wwwroot\xterm\xterm.js</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="App\Controls\wwwroot\xterm\xterm.css">
+      <Link>wwwroot\xterm\xterm.css</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="App\Controls\wwwroot\xterm\addon-fit.js">
+      <Link>wwwroot\xterm\addon-fit.js</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="App\Controls\wwwroot\xterm\index.html">
+      <Link>wwwroot\xterm\index.html</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <!-- P2-T5b: Accel's own glue script (not vendored) - see terminal.js's header comment. -->
+    <Content Include="App\Controls\wwwroot\xterm\terminal.js">
+      <Link>wwwroot\xterm\terminal.js</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+  </ItemGroup>
+
+  <!--
+    P2-T2: the ConPTY interop surface (native struct layouts, flag constants, COORD conversion) must
+    be unit-testable for marshalling correctness - a wrong STARTUPINFOEX size or a wrong
+    PROC_THREAD_ATTRIBUTE value is an AccessViolation at runtime, not a compile error - without
+    turning P/Invoke declarations into public API that callers could bind to. The assembly is not
+    strong named, so the plain assembly name is sufficient.
+  -->
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>Accel.Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+  <!--
+    Accel.csproj lives at the repo root (promoted out of src\Accel\), so the default SDK glob
+    (**/*.cs, **/*.xaml) would otherwise also pull in the sibling tests\Accel.Tests project's
+    files - excluded explicitly since that project is nested underneath this one on disk.
+  -->
+  <ItemGroup>
+    <Compile Remove="tests\**" />
+    <EmbeddedResource Remove="tests\**" />
+    <None Remove="tests\**" />
+    <Page Remove="tests\**" />
+    <ApplicationDefinition Remove="tests\**" />
+  </ItemGroup>
+
+</Project>

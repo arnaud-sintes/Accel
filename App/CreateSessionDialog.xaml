@@ -1,0 +1,161 @@
+<Window x:Class="Accel.App.CreateSessionDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:controls="clr-namespace:Accel.App.Controls"
+        Title="Create session" Height="620" Width="560"
+        WindowStartupLocation="CenterOwner" ResizeMode="NoResize"
+        ShowInTaskbar="False" WindowStyle="None">
+    <!--
+        P2-T6 originally set Language="" here, matching MainWindow.xaml's now-removed workaround -
+        see Accel.csproj's comment on why InvariantGlobalization was removed entirely instead (it
+        also crashed this dialog's own TextBoxes the moment a user typed on a non-English keyboard,
+        which Language="" never addressed). Default Language is fine with real culture data present.
+    -->
+    <Window.Resources>
+        <ResourceDictionary Source="Theme.xaml" />
+    </Window.Resources>
+    <!--
+        Dialog surface: the app's L1 surface rather than the base black, with the custom title bar
+        (L2) on top - the same elevation ladder the main window uses, so a dialog reads as a raised
+        card of the same design system rather than a differently-skinned window.
+    -->
+    <DockPanel LastChildFill="True" Background="{StaticResource SurfaceBrush}">
+        <controls:CustomTitleBar DockPanel.Dock="Top" TitleText="Create session"
+                                  ShowMinimizeButton="False" ShowMaximizeButton="False" />
+        <Grid Margin="24">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" Text="Display name" Style="{StaticResource FieldLabelTextStyle}" />
+        <TextBox x:Name="DisplayNameBox" Grid.Row="1"
+                 Text="{Binding DisplayName, UpdateSourceTrigger=PropertyChanged}"
+                 Margin="0,0,0,16" />
+
+        <TextBlock Grid.Row="2" Text="Model" Style="{StaticResource FieldLabelTextStyle}" />
+        <!--
+            ItemTemplate, not DisplayMemberPath: with this app's custom ComboBox ControlTemplate
+            (Theme.xaml), a DisplayMemberPath-generated template was found (reported bug, permission
+            mode below) to not carry over to the closed-box display (TemplateBinding
+            SelectionBoxItemTemplate) - it fell back to the bound item's own ToString(). An explicit
+            ItemTemplate does not have that failure mode: WPF uses it directly as
+            SelectionBoxItemTemplate too, for both the dropdown list and the closed box.
+        -->
+        <ComboBox x:Name="ModelComboBox" Grid.Row="3"
+                  ItemsSource="{Binding ModelOptions}"
+                  SelectedValuePath="Family"
+                  SelectedValue="{Binding SelectedModelFamily}"
+                  Margin="0,0,0,16">
+            <ComboBox.ItemTemplate>
+                <DataTemplate>
+                    <TextBlock Text="{Binding DisplayName}" />
+                </DataTemplate>
+            </ComboBox.ItemTemplate>
+        </ComboBox>
+
+        <TextBlock Grid.Row="4" Text="Effort" Style="{StaticResource FieldLabelTextStyle}" />
+        <ComboBox x:Name="EffortComboBox" Grid.Row="5"
+                  ItemsSource="{Binding EffortLevels}"
+                  SelectedItem="{Binding SelectedEffortLevel}"
+                  Margin="0,0,0,16" />
+
+        <!--
+            Permission mode as a single line: label followed inline by the combo, not a stacked
+            label-above-control field like the others - it is one setting with one obvious value
+            (default/auto-accept/bypass/plan), so a full field-height block for it read as more
+            complex than it is. Only ever added to the launch as a permission-mode flag
+            (CreateSessionDialogViewModel.BuildArguments via CommonCliFlags) when the choice differs
+            from "Default" - see App/Services/CommonCliFlags.cs.
+
+            SelectedItem (not SelectedValue/SelectedValuePath) binds to
+            CreateSessionDialogViewModel.SelectedPermissionModeChoice - see that property's doc
+            comment for why. An explicit ItemTemplate (not DisplayMemberPath - see ModelComboBox's
+            comment above) is what actually fixes the closed-box display: DisplayMemberPath alone
+            still fell back to the choice record's own ToString() there, even with SelectedItem.
+        -->
+        <StackPanel Grid.Row="6" Orientation="Horizontal" Margin="0,0,0,16">
+            <TextBlock Text="Permission mode:" Style="{StaticResource FieldLabelTextStyle}"
+                       VerticalAlignment="Center" Margin="0,0,10,0" />
+            <ComboBox x:Name="PermissionModeComboBox"
+                      ItemsSource="{Binding PermissionModeChoices}"
+                      SelectedItem="{Binding SelectedPermissionModeChoice}"
+                      MinWidth="200" VerticalAlignment="Center">
+                <ComboBox.ItemTemplate>
+                    <DataTemplate>
+                        <TextBlock Text="{Binding DisplayName}" />
+                    </DataTemplate>
+                </ComboBox.ItemTemplate>
+            </ComboBox>
+        </StackPanel>
+
+        <!--
+            Working directory: pre-filled from panel A's currently selected root
+            (CreateSessionDialogViewModel's initialWorkingDirectory ctor parameter - see
+            MainWindow.CreateSession_Click), still editable/browsable here before confirming. Reuses
+            the same IFolderPickerService panel A's "Add root..." already uses.
+        -->
+        <TextBlock Grid.Row="7" Text="Working directory" Style="{StaticResource FieldLabelTextStyle}" />
+        <Grid Grid.Row="8" Margin="0,0,0,16">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <TextBox x:Name="WorkingDirectoryBox" Grid.Column="0"
+                     Text="{Binding WorkingDirectory, UpdateSourceTrigger=PropertyChanged}"
+                     ToolTip="Defaults to whichever root is selected in panel A; leave blank to use claude's default" />
+            <Button x:Name="BrowseWorkingDirectoryButton" Grid.Column="1" Content="Browse…"
+                    Command="{Binding BrowseWorkingDirectoryCommand}"
+                    Margin="8,0,0,0" />
+        </Grid>
+
+        <!--
+            Advanced/trusted-input flagging (plan requirement): bold, a distinct warning colour, AND
+            the word "Advanced" plus the actual warning sentence - text carries the meaning, not
+            colour alone, so this still reads correctly under a high-contrast theme. Text is set from
+            code-behind to CreateSessionDialogViewModel.AdvancedArgsWarning (the single source of
+            truth for the wording) rather than duplicated as a XAML literal.
+        -->
+        <TextBlock Grid.Row="9" Text="Extra CLI arguments (advanced)" Style="{StaticResource FieldLabelTextStyle}" />
+        <TextBlock x:Name="ExtraArgsWarningText" Grid.Row="10"
+                   Foreground="{StaticResource DangerBrush}" FontWeight="Bold" TextWrapping="Wrap"
+                   FontSize="{StaticResource FontSizeCaption}" Margin="0,0,0,8" />
+        <TextBox x:Name="ExtraArgsBox" Grid.Row="11"
+                 Text="{Binding ExtraArgsText, UpdateSourceTrigger=PropertyChanged}"
+                 AcceptsReturn="False"
+                 FontFamily="{StaticResource FontFamilyMono}"
+                 ToolTip="e.g. --add-dir C:\some\path"
+                 Margin="0,0,0,16" />
+
+        <!-- Validation error: an inset danger card, so it reads as a distinct block rather than stray red text. -->
+        <Border Grid.Row="12" Background="#1FE98F8F" BorderBrush="#4DE98F8F" BorderThickness="1"
+                CornerRadius="6" Padding="12,8"
+                Visibility="{Binding Visibility, ElementName=ErrorText}">
+            <TextBlock x:Name="ErrorText"
+                       Text="{Binding ErrorMessage}"
+                       Foreground="{StaticResource DangerBrush}" TextWrapping="Wrap"
+                       Visibility="Collapsed" />
+        </Border>
+
+        <StackPanel Grid.Row="14" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,20,0,0">
+            <Button x:Name="CancelButton" Content="Cancel" Command="{Binding CancelCommand}"
+                    MinWidth="96" Margin="0,0,10,0" IsCancel="True" />
+            <Button x:Name="CreateButton" Content="Create" Command="{Binding ConfirmCommand}"
+                    Style="{StaticResource PrimaryButtonStyle}" MinWidth="96" IsDefault="True" />
+        </StackPanel>
+        </Grid>
+    </DockPanel>
+</Window>

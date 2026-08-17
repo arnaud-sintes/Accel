@@ -1,0 +1,657 @@
+<Window x:Class="Accel.App.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:conv="clr-namespace:Accel.App.Converters"
+        xmlns:controls="clr-namespace:Accel.App.Controls"
+        Title="Accel" Height="720" Width="1200" WindowState="Maximized" WindowStyle="None"
+        Icon="pack://application:,,,/App/accel.ico">
+    <!--
+        P1-T4 originally set Language="" here to route around a XamlParseException caused by
+        InvariantGlobalization (Accel.csproj) stripping the culture tables FrameworkElement.Language
+        needed. InvariantGlobalization was removed instead (see Accel.csproj's comment) once it
+        turned out to also crash WPF's keyboard-input pipeline on a non-English keyboard - a much
+        more fundamental conflict than the binding-converter symptom this attribute was papering
+        over. With real culture data present again, the default Language is fine.
+    -->
+    <Window.Resources>
+        <ResourceDictionary>
+        <ResourceDictionary.MergedDictionaries>
+            <ResourceDictionary Source="Theme.xaml" />
+        </ResourceDictionary.MergedDictionaries>
+        <conv:HexToBrushConverter x:Key="HexToBrush" />
+        <BooleanToVisibilityConverter x:Key="BoolToVis" />
+
+        <!--
+            P1-T4 / locked-in decision 9: panel A's four IsRunning x IsFocused visual states.
+            These brushes' colours must stay in sync with SessionVisualStateResolver's
+            *ColorHex constants (the tested, WPF-free single source of truth for the mapping) -
+            they are duplicated here rather than referenced via {x:Static} only because
+            SolidColorBrush construction from a plain string constant still needs a XAML-side
+            colour literal; ModelBadgeTableTests/SessionVisualStateResolverTests pin the C# side
+            down, and RootsPanelNodeViewModelTests covers the AutomationDescription text this
+            style's Triggers are matched against.
+        -->
+        <SolidColorBrush x:Key="RunningFocusedBrush" Color="#FF4FC3F7" />
+        <SolidColorBrush x:Key="RunningBrush" Color="#FF66BB6A" />
+        <SolidColorBrush x:Key="IdleFocusedBrush" Color="#FF9FA8DA" />
+        <SolidColorBrush x:Key="IdleBrush" Color="#FF9E9E9E" />
+
+        <!--
+            Never color-only (hard accessibility requirement): FontWeight carries IsFocused
+            (Bold vs Normal) independently of the Foreground colour, and the glyph shape below
+            (filled vs hollow, driven by its own DataTrigger on IsRunning) carries IsRunning
+            independently of both. Removing colour entirely (e.g. a high-contrast theme) still
+            leaves all four states distinguishable via glyph shape + weight alone.
+        -->
+        <Style x:Key="StateTextStyle" TargetType="TextBlock">
+            <Setter Property="FontFamily" Value="{StaticResource FontFamilyBase}" />
+            <Setter Property="FontWeight" Value="Normal" />
+            <Setter Property="FontSize" Value="{StaticResource FontSizeBody}" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+            <Setter Property="Foreground" Value="{StaticResource IdleBrush}" />
+            <Style.Triggers>
+                <MultiDataTrigger>
+                    <MultiDataTrigger.Conditions>
+                        <Condition Binding="{Binding IsRunning}" Value="True" />
+                        <Condition Binding="{Binding IsFocused}" Value="True" />
+                    </MultiDataTrigger.Conditions>
+                    <Setter Property="FontWeight" Value="Bold" />
+                    <Setter Property="Foreground" Value="{StaticResource RunningFocusedBrush}" />
+                </MultiDataTrigger>
+                <!--
+                    Running rows are now emphasized (Bold) even when not focused - the bullet glyph
+                    that used to be the sole "this is running" signal is gone from the row, so weight
+                    (already differing from colour, never colour alone) has to carry that half of the
+                    state on its own.
+                -->
+                <MultiDataTrigger>
+                    <MultiDataTrigger.Conditions>
+                        <Condition Binding="{Binding IsRunning}" Value="True" />
+                        <Condition Binding="{Binding IsFocused}" Value="False" />
+                    </MultiDataTrigger.Conditions>
+                    <Setter Property="FontWeight" Value="Bold" />
+                    <Setter Property="Foreground" Value="{StaticResource RunningBrush}" />
+                </MultiDataTrigger>
+                <MultiDataTrigger>
+                    <MultiDataTrigger.Conditions>
+                        <Condition Binding="{Binding IsRunning}" Value="False" />
+                        <Condition Binding="{Binding IsFocused}" Value="True" />
+                    </MultiDataTrigger.Conditions>
+                    <Setter Property="FontWeight" Value="Bold" />
+                    <Setter Property="Foreground" Value="{StaticResource IdleFocusedBrush}" />
+                </MultiDataTrigger>
+            </Style.Triggers>
+        </Style>
+
+        <!--
+            The tree row's name column reuses StateTextStyle's IsRunning x IsFocused styling for
+            session/agent rows, plus one more override: a root row's path is always
+            IsRunning=False/IsFocused=False (roots are never the focused session), so without this it
+            would render as StateTextStyle's plain muted-idle look. Root paths get their own
+            emphasis instead - bold and full-brightness text - so the directory a user is looking at
+            reads as the most prominent thing in its own subtree.
+        -->
+        <Style x:Key="TreeRowNameTextStyle" TargetType="TextBlock" BasedOn="{StaticResource StateTextStyle}">
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding Kind}" Value="Root">
+                    <Setter Property="FontWeight" Value="Bold" />
+                    <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+        </ResourceDictionary>
+    </Window.Resources>
+    <!--
+        P1-T1b scaffolding only: placeholder panels, no data binding, no behavior. Layout per the
+        project plan - menu bar across the top; below it a horizontal split into panel A (left,
+        session tree) / center area / panel B (right, file tree) via GridSplitters; the center
+        area is itself split into a top area (panel C tab-strip + panel D content) over a bottom
+        area (panel E, agent graph), also via a GridSplitter.
+
+        MinWidth/MinHeight on every column/row (not just the splitters) is deliberate: without it
+        a GridSplitter can be dragged - or, worse, a bad Auto/Star combination can render at -
+        zero size, which a build success alone would not catch. See P1-T1b's verification notes
+        for how this was checked (ActualWidth/ActualHeight measured after Show(), not just "it
+        built").
+    -->
+    <Border x:Name="ChromeRoot" Background="{StaticResource BackgroundBaseBrush}">
+    <DockPanel LastChildFill="True">
+
+        <!--
+            Custom title bar replacing the native OS caption entirely - see App/Theme.xaml's
+            Window style (WindowStyle="None" + a matching WindowChrome) and MainWindow.xaml.cs's
+            WindowProc maximize-to-work-area fix, which this borderless+maximizable window needs.
+        -->
+        <controls:CustomTitleBar DockPanel.Dock="Top" TitleText="Accel" />
+
+        <!--
+            P4-T2: non-modal "rename may not have applied" warning banner (the plan's exact wording
+            for what a rename's completion-poll timeout should surface - the write may well have
+            landed even though the status file never confirmed a matching name within the timeout, so
+            this deliberately never blocks the UI the way a MessageBox would). Collapsed by default;
+            MainWindow.ShowTransientWarning sets the text and shows it, auto-hiding itself again after
+            a few seconds via a DispatcherTimer.
+        -->
+        <Border x:Name="TransientWarningBanner" DockPanel.Dock="Top" Background="{StaticResource WarningBackgroundBrush}"
+                BorderBrush="{StaticResource WarningBorderBrush}" BorderThickness="0,0,0,1" Padding="16,10" Visibility="Collapsed">
+            <TextBlock x:Name="TransientWarningText" TextWrapping="Wrap" FontSize="{StaticResource FontSizeBody}"
+                       Foreground="{StaticResource WarningTextBrush}" />
+        </Border>
+
+        <!-- Horizontal split: Panel A | splitter | center area | splitter | Panel B. -->
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="360" MinWidth="200" />
+                <ColumnDefinition Width="4" />
+                <ColumnDefinition Width="3*" MinWidth="240" />
+                <ColumnDefinition Width="4" />
+                <ColumnDefinition Width="360" MinWidth="200" />
+            </Grid.ColumnDefinitions>
+
+            <!--
+                Panel A - session tree (left). P1-T2 wires this to RootsPanelViewModel (set as
+                PanelA's DataContext by MainWindow's constructor; null in the pure-scaffolding
+                case, in which case the TreeView simply renders empty). Presentation is
+                deliberately plain here - glyphs, model/effort badges, column alignment and the
+                IsRunning x IsFocused visual states are P1-T4's job. This only has to prove the
+                data path: feed -> ViewModel -> bound TreeView.
+            -->
+            <Border x:Name="PanelA" Grid.Column="0" BorderBrush="{StaticResource StrokeSubtleBrush}" BorderThickness="0,0,1,0" Background="{StaticResource SurfaceBrush}">
+                <DockPanel LastChildFill="True">
+                    <TextBlock DockPanel.Dock="Top" Text="SESSIONS" Margin="16,16,16,10"
+                               Style="{StaticResource SectionHeaderTextStyle}" />
+
+                    <!--
+                        P1-T3b: minimal add/remove toolbar. "Add root…" prompts for a folder,
+                        creates it on disk if missing, and appends it to accel-folders.json.
+                        Remove is scoped to a selected root node via the tree's context menu below
+                        (right-click a root row) rather than a toolbar button, since it needs a
+                        target node - see RootsPanelViewModel.RemoveRootCommand.
+                    -->
+                    <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="16,0,16,12">
+                        <Button Content="+  Add root" Command="{Binding AddRootCommand}"
+                                Style="{StaticResource SecondaryButtonStyle}" HorizontalAlignment="Left" />
+                    </StackPanel>
+
+                    <!-- Feed status / counts: makes "working but empty" visibly different from "broken". -->
+                    <Border DockPanel.Dock="Bottom" BorderBrush="{StaticResource StrokeSubtleBrush}" BorderThickness="0,1,0,0"
+                            Padding="16,10">
+                        <TextBlock x:Name="PanelAStatus" TextWrapping="Wrap"
+                                   Style="{StaticResource SecondaryTextStyle}" Text="{Binding StatusText}" />
+                    </Border>
+
+                    <!--
+                        HorizontalScrollBarVisibility="Disabled": every row already ellipsis-trims
+                        into the Grid's Star-width name column instead of needing to scroll to read
+                        it (see the row template below), so a horizontal scrollbar here only ever
+                        got in the way - selecting a row auto-scrolls the TreeView's internal
+                        ScrollViewer to bring the selected TreeViewItem fully into view, which
+                        included horizontal scroll for any row wider than the viewport, producing an
+                        unwanted sideways jump on every click. Disabling it forces genuine (already
+                        intended) clipping/ellipsis instead of ever letting that scroll exist.
+                    -->
+                    <TreeView x:Name="RootsTreeView" ItemsSource="{Binding Roots}" BorderThickness="0" Background="Transparent"
+                              Padding="8,0,8,8" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                        <TreeView.ItemContainerStyle>
+                            <!--
+                                Two-way IsExpanded/IsSelected: the ViewModel is the authority on both
+                                (it re-applies them after every rebuild, keyed on the stable
+                                root-path / session-id / agent-id), and the user's own
+                                expand/collapse/select gestures flow back into it through these
+                                bindings - so the next rebuild preserves them.
+
+                                Tag is stashed with the panel's own DataContext (the
+                                RootsPanelViewModel) purely so the per-item ContextMenu below - a
+                                separate visual tree that can't see this TreeViewItem's ancestors -
+                                can still reach RemoveRootCommand via PlacementTarget.Tag.
+                            -->
+                            <!--
+                                BasedOn the theme's implicit TreeViewItem style: an
+                                ItemContainerStyle REPLACES the implicit style outright rather
+                                than layering on top of it, so without this the tree would silently
+                                fall back to WPF's stock (native-triangle, square-selection)
+                                template while every other control used the new theme.
+                            -->
+                            <Style TargetType="TreeViewItem" BasedOn="{StaticResource {x:Type TreeViewItem}}">
+                                <Setter Property="IsExpanded" Value="{Binding IsExpanded, Mode=TwoWay}" />
+                                <Setter Property="IsSelected" Value="{Binding IsSelected, Mode=TwoWay}" />
+                                <Setter Property="Tag" Value="{Binding RelativeSource={RelativeSource AncestorType=TreeView}, Path=DataContext}" />
+                                <!--
+                                    Stretch (not the TreeViewItem default of Left) so each row's
+                                    Grid below actually fills the available tree width instead of
+                                    sizing to content - that Star-width name column is what lets
+                                    the Name text's ellipsis respond to the real panel width when
+                                    the user drags the panel-A/center-area GridSplitter, instead of
+                                    truncating at a fixed pixel count regardless of how wide the
+                                    panel actually is.
+                                -->
+                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                <!--
+                                    P1-T4 hard accessibility requirement: every row's state is
+                                    also exposed as a plain text description for screen readers,
+                                    not just via glyph/weight/colour - see
+                                    RootsPanelNodeViewModel.AutomationDescription (already includes
+                                    the running/focused text SessionVisualStateResolver produces).
+                                -->
+                                <Setter Property="AutomationProperties.Name" Value="{Binding AutomationDescription}" />
+                                <!--
+                                    Hover tooltip: session id + context-window size, both already
+                                    on Columns (P1-T4 requirement 4) - see
+                                    RootsPanelNodeViewModel.TooltipText.
+                                -->
+                                <Setter Property="ToolTip" Value="{Binding TooltipText}" />
+                                <Setter Property="ContextMenu">
+                                    <Setter.Value>
+                                        <ContextMenu>
+                                            <!--
+                                                Kind-gated (each item/separator below defaults to
+                                                Collapsed and only turns Visible for the row kind it
+                                                actually applies to - a root row and a session row
+                                                never show the other's actions, e.g. "Create session"/
+                                                "Stop monitoring" only make sense over a root, and
+                                                "Rename"/"Resume"/"Remove" only over a session). An
+                                                agent/placeholder row's menu is intentionally empty:
+                                                neither group applies to it.
+
+                                                This is the only way to reach "Create session" now
+                                                that the top menu bar is gone - see
+                                                CreateSessionAtRoot_Click's doc comment.
+                                            -->
+                                            <MenuItem Header="Create session…">
+                                                <MenuItem.Style>
+                                                    <Style TargetType="MenuItem">
+                                                        <Setter Property="Tag" Value="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
+                                                        <Setter Property="Visibility" Value="Collapsed" />
+                                                        <EventSetter Event="MenuItem.Click" Handler="CreateSessionAtRoot_Click" />
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding PlacementTarget.DataContext.Kind, RelativeSource={RelativeSource AncestorType=ContextMenu}}" Value="Root">
+                                                                <Setter Property="Visibility" Value="Visible" />
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </MenuItem.Style>
+                                            </MenuItem>
+                                            <Separator>
+                                                <Separator.Style>
+                                                    <Style TargetType="Separator">
+                                                        <Setter Property="Visibility" Value="Collapsed" />
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding PlacementTarget.DataContext.Kind, RelativeSource={RelativeSource AncestorType=ContextMenu}}" Value="Root">
+                                                                <Setter Property="Visibility" Value="Visible" />
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </Separator.Style>
+                                            </Separator>
+                                            <!--
+                                                RemoveRootCommand itself is also a no-op for a
+                                                session/agent/placeholder node (see its own guard
+                                                clause) - this Visibility trigger is the visual half
+                                                of that same guard, not a replacement for it.
+                                            -->
+                                            <MenuItem Header="Stop monitoring this folder…"
+                                                      Command="{Binding PlacementTarget.Tag.RemoveRootCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                      CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}">
+                                                <MenuItem.Style>
+                                                    <Style TargetType="MenuItem">
+                                                        <Setter Property="Visibility" Value="Collapsed" />
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding PlacementTarget.DataContext.Kind, RelativeSource={RelativeSource AncestorType=ContextMenu}}" Value="Root">
+                                                                <Setter Property="Visibility" Value="Visible" />
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </MenuItem.Style>
+                                            </MenuItem>
+                                            <!--
+                                                P4-T2/T4: the code-behind handlers below also guard on
+                                                Kind == Session (same convention as RemoveRootCommand
+                                                above) - this Visibility trigger is the visual half of
+                                                that same guard, not a replacement for it.
+
+                                                An inline Click="..." attribute directly on a MenuItem
+                                                nested this deep (ContextMenu inside a Style's Setter.Value)
+                                                miscompiles under the WPF markup compiler here - the
+                                                generated IComponentConnector.Connect ends up casting the
+                                                target to the unrelated sibling GridSplitter instead of
+                                                MenuItem (reproduced twice against a fully clean obj/bin,
+                                                so it is a real compiler defect for this specific nesting
+                                                shape, not a stale-build artifact). Each item below uses a
+                                                per-MenuItem Style + EventSetter instead - the exact
+                                                pattern already proven working for the tab strip's
+                                                double-click gesture - which sidesteps whatever in the
+                                                compiler's connectionId numbering trips on the inline
+                                                attribute form.
+                                            -->
+                                            <MenuItem Header="Rename…">
+                                                <MenuItem.Style>
+                                                    <Style TargetType="MenuItem">
+                                                        <Setter Property="Tag" Value="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
+                                                        <Setter Property="Visibility" Value="Collapsed" />
+                                                        <EventSetter Event="MenuItem.Click" Handler="RenameSession_Click" />
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding PlacementTarget.DataContext.Kind, RelativeSource={RelativeSource AncestorType=ContextMenu}}" Value="Session">
+                                                                <Setter Property="Visibility" Value="Visible" />
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </MenuItem.Style>
+                                            </MenuItem>
+                                            <MenuItem Header="Resume">
+                                                <MenuItem.Style>
+                                                    <Style TargetType="MenuItem">
+                                                        <Setter Property="Tag" Value="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
+                                                        <Setter Property="Visibility" Value="Collapsed" />
+                                                        <EventSetter Event="MenuItem.Click" Handler="ResumeSession_Click" />
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding PlacementTarget.DataContext.Kind, RelativeSource={RelativeSource AncestorType=ContextMenu}}" Value="Session">
+                                                                <Setter Property="Visibility" Value="Visible" />
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </MenuItem.Style>
+                                            </MenuItem>
+                                            <MenuItem Header="Resume as fork…">
+                                                <MenuItem.Style>
+                                                    <Style TargetType="MenuItem">
+                                                        <Setter Property="Tag" Value="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
+                                                        <Setter Property="Visibility" Value="Collapsed" />
+                                                        <EventSetter Event="MenuItem.Click" Handler="ResumeSessionAsFork_Click" />
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding PlacementTarget.DataContext.Kind, RelativeSource={RelativeSource AncestorType=ContextMenu}}" Value="Session">
+                                                                <Setter Property="Visibility" Value="Visible" />
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </MenuItem.Style>
+                                            </MenuItem>
+                                            <!--
+                                                Edits App\Services\SessionResumeArgsStore's per-session
+                                                entry - flags appended the next time this session id is
+                                                resumed (see MainWindow.EditSessionArgs_Click). Does not
+                                                touch an already-running `claude` process's own argv,
+                                                which cannot change once launched.
+                                            -->
+                                            <MenuItem Header="Edit launch args…">
+                                                <MenuItem.Style>
+                                                    <Style TargetType="MenuItem">
+                                                        <Setter Property="Tag" Value="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
+                                                        <Setter Property="Visibility" Value="Collapsed" />
+                                                        <EventSetter Event="MenuItem.Click" Handler="EditSessionArgs_Click" />
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding PlacementTarget.DataContext.Kind, RelativeSource={RelativeSource AncestorType=ContextMenu}}" Value="Session">
+                                                                <Setter Property="Visibility" Value="Visible" />
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </MenuItem.Style>
+                                            </MenuItem>
+                                            <Separator>
+                                                <Separator.Style>
+                                                    <Style TargetType="Separator">
+                                                        <Setter Property="Visibility" Value="Collapsed" />
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding PlacementTarget.DataContext.Kind, RelativeSource={RelativeSource AncestorType=ContextMenu}}" Value="Session">
+                                                                <Setter Property="Visibility" Value="Visible" />
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </Separator.Style>
+                                            </Separator>
+                                            <!--
+                                                Remove: disabled (refused, fail-closed) while the session is
+                                                running per locked-in decision 4 / risk register item 3 -
+                                                see MainWindow.RemoveSession_Click. Recycle-bin only from
+                                                this menu; there is deliberately no UI path to
+                                                SessionRemovalMode.PermanentDelete.
+                                            -->
+                                            <MenuItem Header="Remove…">
+                                                <MenuItem.Style>
+                                                    <Style TargetType="MenuItem">
+                                                        <Setter Property="Tag" Value="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
+                                                        <Setter Property="Visibility" Value="Collapsed" />
+                                                        <EventSetter Event="MenuItem.Click" Handler="RemoveSession_Click" />
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding PlacementTarget.DataContext.Kind, RelativeSource={RelativeSource AncestorType=ContextMenu}}" Value="Session">
+                                                                <Setter Property="Visibility" Value="Visible" />
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </MenuItem.Style>
+                                            </MenuItem>
+                                        </ContextMenu>
+                                    </Setter.Value>
+                                </Setter>
+                            </Style>
+                        </TreeView.ItemContainerStyle>
+                        <TreeView.ItemTemplate>
+                            <HierarchicalDataTemplate ItemsSource="{Binding Children}">
+                                <!--
+                                    Grid, not a StackPanel: a StackPanel always sizes itself (and
+                                    every child) to content, so the old fixed MaxWidth="160" on the
+                                    name TextBlock below was the only thing that ever ellipsized it
+                                    - it neither grew to use extra space when panel A was widened
+                                    nor shrank correctly when narrowed. The Name column here is the
+                                    Grid's one Star-width column, so it actually tracks panel A's
+                                    real width (set by the GridSplitter) in both directions.
+                                -->
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <!--
+                                        Model badge: letter-in-chip (O/S/H/F/?), coloured by model
+                                        family - see ModelBadgeTable. Hidden for root/placeholder
+                                        rows (ShowModelBadge=false), which have no model.
+                                    -->
+                                    <Border Grid.Column="0" Width="18" Height="18" CornerRadius="4" Margin="0,0,8,0"
+                                            Background="{Binding ModelBadge.ColorHex, Converter={StaticResource HexToBrush}}"
+                                            Visibility="{Binding ShowModelBadge, Converter={StaticResource BoolToVis}}">
+                                        <TextBlock Text="{Binding ModelBadge.Letter}" Foreground="White" FontSize="10" FontWeight="Bold"
+                                                   HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                    </Border>
+
+                                    <!--
+                                        Effort bars: 1-4 stacked signal bars next to the model
+                                        badge - see EffortBarLevel/EffortBarsControl.
+                                    -->
+                                    <controls:EffortBarsControl Grid.Column="1" Level="{Binding EffortLevel}" Margin="0,0,10,0"
+                                                                 VerticalAlignment="Center"
+                                                                 Visibility="{Binding ShowEffortBars, Converter={StaticResource BoolToVis}}" />
+
+                                    <!--
+                                        Name column: the Grid's Star-width column, so it actually
+                                        grows/shrinks with panel A's real width - ellipsis-truncated
+                                        (requirement 4) rather than wrapping/clipping raw, so long
+                                        session names don't blow out the row height. DisplayText is
+                                        the plain name only (no id/model/effort baked in for
+                                        root/session rows - see RootsPanelNodeViewModel.DisplayText);
+                                        that per-session detail now lives in the row's ToolTip
+                                        (TooltipText, set on the TreeViewItem itself above). A root
+                                        row's own "(N sessions, M running)" summary is different: it
+                                        describes this row's children, not a single session's detail,
+                                        so it stays visible as a second, deliberately un-emphasized
+                                        Run right after the bold path (RootSummarySuffix is empty for
+                                        every non-root row).
+                                    -->
+                                    <TextBlock Grid.Column="2" TextTrimming="CharacterEllipsis"
+                                               Style="{StaticResource TreeRowNameTextStyle}">
+                                        <Run Text="{Binding DisplayText, Mode=OneWay}" />
+                                        <Run Text="{Binding RootSummarySuffix, Mode=OneWay}"
+                                             FontWeight="Normal" Foreground="{StaticResource TextSecondaryBrush}" />
+                                    </TextBlock>
+                                </Grid>
+                            </HierarchicalDataTemplate>
+                        </TreeView.ItemTemplate>
+                    </TreeView>
+                </DockPanel>
+            </Border>
+
+            <GridSplitter Grid.Column="1" Width="4" HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                          Background="{StaticResource SplitterBrush}" ResizeBehavior="PreviousAndNext" />
+
+            <!-- Center area: top (Panel C tab-strip + Panel D content) split over bottom (Panel E, agent graph). -->
+            <Grid Grid.Column="2">
+                <!--
+                    Panel E (agent graph) is still a Phase-6 stub with almost nothing to show, so it
+                    defaults to a much smaller share of the center area than the terminal above it -
+                    still fully resizable via the GridSplitter, and MinHeight keeps it from being
+                    dragged to zero.
+                -->
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="5*" MinHeight="120" />
+                    <RowDefinition Height="4" />
+                    <RowDefinition Height="1*" MinHeight="64" MaxHeight="160" />
+                </Grid.RowDefinitions>
+
+                <!-- Top area: Panel C tab-strip above Panel D content. -->
+                <Grid Grid.Row="0">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" MinHeight="44" />
+                        <RowDefinition Height="*" MinHeight="60" />
+                    </Grid.RowDefinitions>
+
+                    <!--
+                        Panel C - the tab strip (P3-T1), bound to TabsViewModel (set as PanelC's
+                        DataContext by MainWindow's constructor; null in the scaffolding case, where
+                        the empty-state hint below is what renders).
+
+                        A horizontal ListBox rather than a TabControl: panel D's content is a single
+                        shared TerminalView reattached per selection (see TabsViewModel's class
+                        remarks - a TabControl would want one content element per tab, i.e. one
+                        WebView2 per tab), so what is needed here is selection only, which is
+                        exactly what a ListBox with SelectedItem two-way bound gives. Visual polish
+                        (real tab shapes, close-on-middle-click, drag reorder) is explicitly not in
+                        P3-T1's scope.
+                    -->
+                    <Border x:Name="PanelC" Grid.Row="0" BorderBrush="{StaticResource StrokeSubtleBrush}" BorderThickness="0,0,0,1" Background="{StaticResource SurfaceElevatedBrush}">
+                        <Grid>
+                            <TextBlock Text="No sessions open" Margin="16,0" VerticalAlignment="Center"
+                                       Style="{StaticResource SecondaryTextStyle}"
+                                       Visibility="{Binding IsEmpty, Converter={StaticResource BoolToVis}, FallbackValue=Visible}" />
+                            <ListBox x:Name="TabsList" ItemsSource="{Binding Tabs}"
+                                     SelectedItem="{Binding SelectedTab, Mode=TwoWay}"
+                                     Background="Transparent" BorderThickness="0" Padding="8,4"
+                                     ScrollViewer.HorizontalScrollBarVisibility="Auto"
+                                     ScrollViewer.VerticalScrollBarVisibility="Disabled">
+                                <ListBox.ItemsPanel>
+                                    <ItemsPanelTemplate>
+                                        <StackPanel Orientation="Horizontal" />
+                                    </ItemsPanelTemplate>
+                                </ListBox.ItemsPanel>
+                                <ListBox.ItemContainerStyle>
+                                    <!--
+                                        BasedOn the theme's pill-shaped tab container (see
+                                        Theme.xaml's TabItemContainerStyle): an ItemContainerStyle
+                                        replaces rather than layers over the implicit style, so the
+                                        look has to be inherited explicitly here while this style
+                                        keeps its own automation/gesture setters.
+                                    -->
+                                    <Style TargetType="ListBoxItem" BasedOn="{StaticResource TabItemContainerStyle}">
+                                        <!--
+                                            Same accessibility rule as panel A (P1-T4): the tab's
+                                            state is exposed as text, never only as styling - see
+                                            TabViewModel.AutomationDescription.
+                                        -->
+                                        <Setter Property="AutomationProperties.Name" Value="{Binding AutomationDescription}" />
+                                        <!--
+                                            P4-T5: double-click a tab to stop its session - distinct
+                                            from the close (✕) button, which removes the tab outright.
+                                            MainWindow.TabItem_MouseDoubleClick confirms, then calls
+                                            TabsViewModel.StopTabCommand, which kills the session but
+                                            keeps the tab (frozen scrollback + exit banner - see that
+                                            command's own remarks). Control.MouseDoubleClick is a real
+                                            routed event on every Control, ListBoxItem included.
+                                        -->
+                                        <EventSetter Event="Control.MouseDoubleClick" Handler="TabItem_MouseDoubleClick" />
+                                    </Style>
+                                </ListBox.ItemContainerStyle>
+                                <ListBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <StackPanel Orientation="Horizontal">
+                                            <TextBlock Text="{Binding Title}" MaxWidth="180"
+                                                       TextTrimming="CharacterEllipsis" VerticalAlignment="Center">
+                                                <TextBlock.Style>
+                                                    <Style TargetType="TextBlock">
+                                                        <Setter Property="FontSize" Value="{StaticResource FontSizeBody}" />
+                                                        <Style.Triggers>
+                                                            <!-- Ended tabs stay in the strip (never vanish silently) but read as inactive. -->
+                                                            <DataTrigger Binding="{Binding HasEnded}" Value="True">
+                                                                <Setter Property="Foreground" Value="{StaticResource TextMutedBrush}" />
+                                                                <Setter Property="FontStyle" Value="Italic" />
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </TextBlock.Style>
+                                            </TextBlock>
+                                            <TextBlock Text="{Binding StatusSuffix}" Margin="8,0,0,0"
+                                                       FontSize="{StaticResource FontSizeCaption}"
+                                                       Foreground="{StaticResource TextMutedBrush}" VerticalAlignment="Center" />
+                                            <!--
+                                                Close goes through TabsViewModel.CloseTabCommand ->
+                                                PtyRegistry.CloseAsync. Nothing in the ViewModel layer
+                                                can dispose a PtySession (it never holds one).
+                                            -->
+                                            <Button Content="✕" Margin="10,0,0,0"
+                                                    Style="{StaticResource TabCloseButtonStyle}"
+                                                    ToolTip="Close this session"
+                                                    AutomationProperties.Name="Close session tab"
+                                                    Command="{Binding DataContext.CloseTabCommand, RelativeSource={RelativeSource AncestorType=ListBox}}"
+                                                    CommandParameter="{Binding}" />
+                                        </StackPanel>
+                                    </DataTemplate>
+                                </ListBox.ItemTemplate>
+                            </ListBox>
+                        </Grid>
+                    </Border>
+
+                    <!--
+                        Panel D content: the WebView2-hosted xterm.js terminal, attached to a live
+                        PTY per selected tab (see TabsViewModel.AttachTerminalAsync, wired in
+                        MainWindow's constructor). x:Name="Terminal" is also used by
+                        Program.cs's `terminal-e2e-smoke-test` dev verb to await
+                        TerminalView.Initialization and query document.title for proof the page
+                        actually loaded.
+                    -->
+                    <Border x:Name="PanelD" Grid.Row="1" Background="{StaticResource BackgroundBaseBrush}">
+                        <controls:TerminalView x:Name="Terminal" />
+                    </Border>
+                </Grid>
+
+                <GridSplitter Grid.Row="1" Height="4" HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                              Background="{StaticResource SplitterBrush}" ResizeBehavior="PreviousAndNext" />
+
+                <!--
+                    Bottom area: Panel E, agent graph. P3-T3 stub: DataContext is a
+                    FocusedSessionStubViewModel (a read-only ISessionSelectionService subscriber), so this
+                    placeholder shows which session it would reflect - real graph content is Phase 6.
+                -->
+                <Border x:Name="PanelE" Grid.Row="2" BorderBrush="{StaticResource StrokeSubtleBrush}" BorderThickness="0,1,0,0" Background="{StaticResource SurfaceBrush}">
+                    <StackPanel Margin="16">
+                        <TextBlock Text="AGENT GRAPH" TextWrapping="Wrap" Style="{StaticResource SectionHeaderTextStyle}" />
+                        <TextBlock Text="{Binding StatusText}" Style="{StaticResource SecondaryTextStyle}"
+                                   TextWrapping="Wrap" Margin="0,10,0,0" />
+                    </StackPanel>
+                </Border>
+            </Grid>
+
+            <GridSplitter Grid.Column="3" Width="4" HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                          Background="{StaticResource SplitterBrush}" ResizeBehavior="PreviousAndNext" />
+
+            <!--
+                Panel B - file tree (right). P3-T3 stub: same FocusedSessionStubViewModel as panel E - real
+                file-tree content is Phase 5.
+            -->
+            <Border x:Name="PanelB" Grid.Column="4" BorderBrush="{StaticResource StrokeSubtleBrush}" BorderThickness="1,0,0,0" Background="{StaticResource SurfaceBrush}">
+                <StackPanel Margin="16">
+                    <TextBlock Text="FILES" TextWrapping="Wrap" Style="{StaticResource SectionHeaderTextStyle}" />
+                    <TextBlock Text="{Binding StatusText}" Style="{StaticResource SecondaryTextStyle}"
+                               TextWrapping="Wrap" Margin="0,10,0,0" />
+                </StackPanel>
+            </Border>
+        </Grid>
+    </DockPanel>
+    </Border>
+</Window>

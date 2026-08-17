@@ -19,6 +19,7 @@ coverage/
 # User-specific files
 .vscode/
 .idea/
+.serena/
 
 # OS files
 Thumbs.db

@@ -1,10 +1,10 @@
 #!/usr/bin/env pwsh
 <#
 .SYNOPSIS
-    Publishes Glaude as a self-contained, single-file Windows x64 executable.
+    Publishes Accel as a self-contained, single-file Windows x64 executable.
 
 .DESCRIPTION
-    Wraps `dotnet publish` with the correct flags for a standalone Glaude.exe.
+    Wraps `dotnet publish` with the correct flags for a standalone Accel.exe.
     Idempotent — can be run multiple times.
 
 .EXAMPLE
@@ -13,13 +13,13 @@
 
 param()
 
-$publishDir = Join-Path $PSScriptRoot "src\Glaude\bin\Release\net8.0-windows\win-x64\publish"
-$exePath = Join-Path $publishDir "Glaude.exe"
+$publishDir = Join-Path $PSScriptRoot "bin\Release\net8.0-windows\win-x64\publish"
+$exePath = Join-Path $publishDir "accel.exe"
 
-Write-Host "Publishing Glaude to $publishDir..."
+Write-Host "Publishing Accel to $publishDir..."
 
 try {
-    & dotnet publish (Join-Path $PSScriptRoot "src\Glaude\Glaude.csproj") `
+    & dotnet publish (Join-Path $PSScriptRoot "accel.csproj") `
         -r win-x64 `
         -c Release `
         -p:IncludeNativeLibrariesForSelfExtract=true `

@@ -1,0 +1,121 @@
+<UserControl x:Class="Accel.App.Controls.CustomTitleBar"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
+             x:Name="Root" Height="44">
+    <!--
+        Custom window chrome's title bar: replaces the native OS caption entirely (see App/Theme.xaml's
+        Window style, which sets WindowStyle="None" and a WindowChrome.WindowChrome with
+        CaptionHeight matching this control's Height - both are 44). Everything in this control's
+        background is draggable (WindowChrome treats the whole CaptionHeight-tall strip as the
+        caption by default); the three buttons opt back OUT of that via
+        WindowChrome.IsHitTestVisibleInChrome="True" so they remain clickable instead of just
+        dragging the window.
+
+        Modern-app caption treatment: 46x44 hit targets (was 44x36), an orange accent dot next to
+        the title as a small brand mark, minimize/maximize tinting teal-blue on hover, and close
+        tinting a muted red - so the caption row reads as part of the palette rather than as
+        leftover Win32 chrome.
+    -->
+    <UserControl.Resources>
+        <ResourceDictionary>
+        <ResourceDictionary.MergedDictionaries>
+            <ResourceDictionary Source="../Theme.xaml" />
+        </ResourceDictionary.MergedDictionaries>
+
+        <BooleanToVisibilityConverter x:Key="BoolToVis" />
+
+        <Style x:Key="CaptionButtonStyle" TargetType="Button">
+            <Setter Property="shell:WindowChrome.IsHitTestVisibleInChrome" Value="True" />
+            <Setter Property="Width" Value="46" />
+            <Setter Property="Height" Value="44" />
+            <Setter Property="MinHeight" Value="0" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Foreground" Value="{StaticResource TextSecondaryBrush}" />
+            <Setter Property="FontFamily" Value="Segoe MDL2 Assets" />
+            <Setter Property="FontSize" Value="10" />
+            <Setter Property="FontWeight" Value="Normal" />
+            <Setter Property="Cursor" Value="Arrow" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bg" Background="{TemplateBinding Background}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bg" Property="Background" Value="{StaticResource TealTintBrush}" />
+                                <Setter Property="Foreground" Value="{StaticResource TealHoverBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Bg" Property="Background" Value="{StaticResource TealTintStrongBrush}" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="CloseButtonStyle" TargetType="Button" BasedOn="{StaticResource CaptionButtonStyle}">
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bg" Background="{TemplateBinding Background}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bg" Property="Background" Value="#FFC24A4A" />
+                                <Setter Property="Foreground" Value="White" />
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Bg" Property="Background" Value="#FF9E3B3B" />
+                                <Setter Property="Foreground" Value="White" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        </ResourceDictionary>
+    </UserControl.Resources>
+
+    <!--
+        MouseLeftButtonDown is a fallback for WindowChrome's own caption hit-testing (CaptionHeight
+        on App/Theme.xaml's Window style already makes this whole strip draggable at the Win32
+        level - a click WindowChrome recognizes as HTCAPTION becomes a non-client message and never
+        reaches this WPF handler at all): if that hit-testing doesn't apply for any reason, the
+        window would otherwise be completely undraggable, since it has no native caption to fall
+        back to. Also handles double-click-to-maximize/restore, the other standard title-bar
+        gesture every other Windows app supports.
+    -->
+    <Border Background="{StaticResource SurfaceElevatedBrush}" BorderBrush="{StaticResource StrokeSubtleBrush}"
+            BorderThickness="0,0,0,1" MouseLeftButtonDown="TitleBar_MouseLeftButtonDown">
+        <DockPanel LastChildFill="True">
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                <Button x:Name="MinimizeButton" Content="&#xE921;" FontFamily="Segoe MDL2 Assets"
+                        Style="{StaticResource CaptionButtonStyle}" Click="MinimizeButton_Click"
+                        Visibility="{Binding ShowMinimizeButton, ElementName=Root, Converter={StaticResource BoolToVis}}"
+                        AutomationProperties.Name="Minimize" />
+                <Button x:Name="MaximizeButton" Content="&#xE922;" FontFamily="Segoe MDL2 Assets"
+                        Style="{StaticResource CaptionButtonStyle}" Click="MaximizeButton_Click"
+                        Visibility="{Binding ShowMaximizeButton, ElementName=Root, Converter={StaticResource BoolToVis}}"
+                        AutomationProperties.Name="Maximize" />
+                <Button x:Name="CloseButton" Content="&#xE8BB;" FontFamily="Segoe MDL2 Assets"
+                        Style="{StaticResource CloseButtonStyle}" Click="CloseButton_Click"
+                        AutomationProperties.Name="Close" />
+            </StackPanel>
+
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="16,0,0,0">
+                <!-- Brand mark: a small pastel-orange dot, purely decorative (hidden from screen readers). -->
+                <Ellipse Width="8" Height="8" Fill="{StaticResource AccentBrush}" VerticalAlignment="Center"
+                         Margin="0,0,10,0" />
+                <TextBlock Text="{Binding TitleText, ElementName=Root}" VerticalAlignment="Center"
+                           FontFamily="{StaticResource FontFamilyDisplay}"
+                           FontSize="{StaticResource FontSizeBody}" FontWeight="SemiBold"
+                           Foreground="{StaticResource TextPrimaryBrush}" />
+            </StackPanel>
+        </DockPanel>
+    </Border>
+</UserControl>

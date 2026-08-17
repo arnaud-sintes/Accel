@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>accel-terminal</title>
+<link rel="stylesheet" href="https://accel-terminal/xterm.css" />
+<style>
+  /* Base (L0) black from App/Theme.xaml - must match TerminalView.xaml's Grid background and
+     terminal.js's xterm theme, otherwise a lighter panel flashes before xterm paints. */
+  html, body { margin: 0; padding: 0; height: 100%; background: #0a0a0a; }
+  /* No padding here on purpose: FitAddon derives the column/row count from this element's box,
+     and the integer cell-metrics correction in terminal.js assumes it un-padded. */
+  #term { width: 100%; height: 100%; }
+  /* Thin, dark, modern scrollbar matching the WPF ScrollBar style. Kept clearly visible at rest
+     (not just on hover) - a low resting opacity made this look like there was no scrollbar at all,
+     which read as "can't scroll" even though the viewport always scrolls (see xterm.css's
+     `overflow-y: scroll` on .xterm-viewport). */
+  .xterm-viewport::-webkit-scrollbar { width: 12px; }
+  .xterm-viewport::-webkit-scrollbar-track { background: #ffffff0d; }
+  .xterm-viewport::-webkit-scrollbar-thumb { background: #9a9a9acc; border-radius: 4px; border: 2px solid transparent; background-clip: padding-box; }
+  .xterm-viewport::-webkit-scrollbar-thumb:hover { background: #c2c2c2e6; border: 2px solid transparent; background-clip: padding-box; }
+</style>
+</head>
+<body>
+<!--
+  P2-T5b: xterm.js wired to a live PtySession over /pty/{tabId}. All the attach/onData/resize
+  glue lives in terminal.js (Accel's own script, not vendored - see THIRD_PARTY_NOTICES.txt for
+  what is) so it can match Server/PtyRoutes.cs's binary-vs-text framing convention exactly.
+  document.title is set by terminal.js on success/failure purely so a host (Program.cs's
+  `terminal-e2e-smoke-test` dev verb) can prove via CoreWebView2.ExecuteScriptAsync that this page
+  loaded and xterm.js initialized without a JS error, without needing a live screenshot or an
+  attached devtools session.
+-->
+<div id="term"></div>
+<script src="https://accel-terminal/xterm.js"></script>
+<script src="https://accel-terminal/addon-fit.js"></script>
+<script src="https://accel-terminal/terminal.js"></script>
+</body>
+</html>
