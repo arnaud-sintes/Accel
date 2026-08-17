@@ -12,13 +12,11 @@ public interface IUserConfirmationService
     bool Confirm(string message, string title);
 }
 
-/// <summary>Production <see cref="IUserConfirmationService"/>: a WPF <see cref="System.Windows.MessageBox"/>.</summary>
+/// <summary>Production <see cref="IUserConfirmationService"/>: the themed
+/// <see cref="Accel.App.AccelMessageDialog"/> (Theme.xaml + CustomTitleBar), not a native
+/// <see cref="System.Windows.MessageBox"/> - see AccelMessageDialog's doc comment for why.</summary>
 public sealed class MessageBoxConfirmationService : IUserConfirmationService
 {
     public bool Confirm(string message, string title) =>
-        System.Windows.MessageBox.Show(
-            message,
-            title,
-            System.Windows.MessageBoxButton.YesNo,
-            System.Windows.MessageBoxImage.Question) == System.Windows.MessageBoxResult.Yes;
+        Accel.App.AccelMessageDialog.ShowConfirm(null, message, title, Accel.App.AccelDialogIcon.Question);
 }

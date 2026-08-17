@@ -24,6 +24,13 @@ public partial class CustomTitleBar : UserControl
     public static readonly DependencyProperty TitleTextProperty = DependencyProperty.Register(
         nameof(TitleText), typeof(string), typeof(CustomTitleBar), new PropertyMetadata(string.Empty));
 
+    /// <summary>Optional version caption shown right after <see cref="TitleText"/>, lighter/smaller
+    /// (TextMutedBrush, caption size) than the title itself - empty by default (the two dialogs that
+    /// also host this control don't set it), which the view's StringToVis converter hides entirely
+    /// rather than leaving a gap.</summary>
+    public static readonly DependencyProperty VersionTextProperty = DependencyProperty.Register(
+        nameof(VersionText), typeof(string), typeof(CustomTitleBar), new PropertyMetadata(string.Empty));
+
     public static readonly DependencyProperty ShowMinimizeButtonProperty = DependencyProperty.Register(
         nameof(ShowMinimizeButton), typeof(bool), typeof(CustomTitleBar), new PropertyMetadata(true));
 
@@ -96,6 +103,12 @@ public partial class CustomTitleBar : UserControl
     {
         get => (string)GetValue(TitleTextProperty);
         set => SetValue(TitleTextProperty, value);
+    }
+
+    public string VersionText
+    {
+        get => (string)GetValue(VersionTextProperty);
+        set => SetValue(VersionTextProperty, value);
     }
 
     public bool ShowMinimizeButton

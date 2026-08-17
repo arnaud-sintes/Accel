@@ -2,6 +2,13 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
+    <!--
+      Single source of truth for Accel's own version - read at runtime by
+      App/Controls/AppVersionInfo.cs (shown next to the title in CustomTitleBar) via
+      Assembly.GetName().Version, and by publish.ps1 (installer/artifact naming). No git tags exist
+      yet for this repo, so this starts pre-1.0; bump it by hand per release.
+    -->
+    <Version>0.1.0</Version>
     <TargetFramework>net8.0-windows</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
     <UseWPF>true</UseWPF>

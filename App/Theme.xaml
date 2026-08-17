@@ -529,6 +529,13 @@
         <Setter Property="Padding" Value="10,7" />
         <Setter Property="MinHeight" Value="32" />
         <Setter Property="Cursor" Value="Hand" />
+        <!-- See the MenuItem style above for why a Popup root (the dropdown below) needs these set
+             explicitly - without them the dropdown's item text renders blurry/mismatched next to
+             the rest of the app, since it opens its own PresentationSource. -->
+        <Setter Property="TextOptions.TextFormattingMode" Value="Ideal" />
+        <Setter Property="TextOptions.TextRenderingMode" Value="ClearType" />
+        <Setter Property="UseLayoutRounding" Value="True" />
+        <Setter Property="SnapsToDevicePixels" Value="True" />
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="ComboBox">

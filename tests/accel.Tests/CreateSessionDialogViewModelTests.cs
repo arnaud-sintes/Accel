@@ -108,14 +108,14 @@ public class CreateSessionDialogViewModelTests
     {
         var viewModel = new CreateSessionDialogViewModel
         {
-            SelectedModelFamily = "claude-opus",
+            SelectedModelFamily = "Opus",
             SelectedEffortLevel = "high",
         };
 
         var arguments = viewModel.BuildArguments(Guid.NewGuid());
 
         Assert.Contains("--model", arguments);
-        Assert.Equal("claude-opus", arguments[Array.IndexOf(arguments, "--model") + 1]);
+        Assert.Equal("Opus", arguments[Array.IndexOf(arguments, "--model") + 1]);
         Assert.Contains("--effort", arguments);
         Assert.Equal("high", arguments[Array.IndexOf(arguments, "--effort") + 1]);
     }
@@ -285,7 +285,7 @@ public class CreateSessionDialogViewModelTests
             })
         {
             DisplayName = "smoke test session",
-            SelectedModelFamily = "claude-sonnet",
+            SelectedModelFamily = "Sonnet",
             SelectedEffortLevel = "medium",
             ExtraArgsText = "--fake-flag \"value with space\"",
         };

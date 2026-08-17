@@ -165,4 +165,48 @@ public sealed class FilesPanelViewModelTests : IDisposable
         var node = vm.Nodes.Single();
         Assert.Empty(node.Children);
     }
+
+    [Fact]
+    public void RepublishingTheSameFocusedFolder_DoesNotCollapseAnAlreadyExpandedNode()
+    {
+        var nested = Directory.CreateDirectory(Path.Combine(_root, "child"));
+        File.WriteAllText(Path.Combine(nested.FullName, "leaf.txt"), string.Empty);
+
+        var (vm, feed, _, writer) = Build();
+        var session = TelemetryFixtures.Session("session-1", isLive: true) with { Cwd = _root };
+        writer.SetFocused("session-1");
+        feed.Publish(TelemetryFixtures.Tree(new[] { TelemetryFixtures.Root(_root, session) }));
+
+        var node = vm.Nodes.Single();
+        node.IsExpanded = true;
+        Assert.Equal("leaf.txt", node.Children.Single().Name);
+
+        // Same session, same cwd - simulates an unrelated telemetry tick (e.g. another root's own
+        // session activity) that resolves to the identical focused folder. A full Nodes.Clear() +
+        // rebuild on every such tick used to silently collapse this node moments after expanding it.
+        feed.Publish(TelemetryFixtures.Tree(new[] { TelemetryFixtures.Root(_root, session) }));
+
+        var sameNode = vm.Nodes.Single();
+        Assert.Same(node, sameNode);
+        Assert.True(sameNode.IsExpanded);
+        Assert.Equal("leaf.txt", sameNode.Children.Single().Name);
+    }
+
+    [Fact]
+    public void ExpandingAFolder_RaisesFolderExpandedWithItsPath()
+    {
+        Directory.CreateDirectory(Path.Combine(_root, "child"));
+
+        var (vm, feed, _, writer) = Build();
+        var session = TelemetryFixtures.Session("session-1", isLive: true) with { Cwd = _root };
+        writer.SetFocused("session-1");
+        feed.Publish(TelemetryFixtures.Tree(new[] { TelemetryFixtures.Root(_root, session) }));
+
+        string? raised = null;
+        vm.FolderExpanded += path => raised = path;
+
+        vm.Nodes.Single().IsExpanded = true;
+
+        Assert.Equal(Path.Combine(_root, "child"), raised);
+    }
 }

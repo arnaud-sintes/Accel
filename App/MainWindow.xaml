@@ -19,6 +19,7 @@
             <ResourceDictionary Source="Theme.xaml" />
         </ResourceDictionary.MergedDictionaries>
         <conv:HexToBrushConverter x:Key="HexToBrush" />
+        <conv:CountToVisibilityConverter x:Key="CountToVis" />
         <BooleanToVisibilityConverter x:Key="BoolToVis" />
 
         <!--
@@ -31,6 +32,55 @@
             down, and RootsPanelNodeViewModelTests covers the AutomationDescription text this
             style's Triggers are matched against.
         -->
+        <!--
+            Phase 7: panel B's git status row template - a path + a single-letter status badge.
+            The badge's color is never the only cue (locked-in accessibility rule, §"never
+            color-only") - the letter itself (M/A/D/R/C/U/?) and the full status word carried in
+            AutomationDescription/ToolTip both stand on their own without the color.
+        -->
+        <DataTemplate x:Key="GitChangeRowTemplate">
+            <Grid Margin="8,3" ToolTip="{Binding Path}" AutomationProperties.Name="{Binding AutomationDescription}">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" Text="{Binding Path}" TextTrimming="CharacterEllipsis"
+                           VerticalAlignment="Center" Style="{StaticResource SecondaryTextStyle}" />
+                <TextBlock Grid.Column="1" Text="{Binding StatusLetter}" Margin="8,0,0,0"
+                           FontWeight="Bold" HorizontalAlignment="Center" MinWidth="14"
+                           VerticalAlignment="Center">
+                    <TextBlock.Style>
+                        <Style TargetType="TextBlock" BasedOn="{StaticResource SecondaryTextStyle}">
+                            <Setter Property="FontWeight" Value="Bold" />
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding StatusLetter}" Value="M">
+                                    <Setter Property="Foreground" Value="{StaticResource WarningTextBrush}" />
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding StatusLetter}" Value="A">
+                                    <Setter Property="Foreground" Value="{StaticResource SuccessBrush}" />
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding StatusLetter}" Value="D">
+                                    <Setter Property="Foreground" Value="{StaticResource DangerBrush}" />
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding StatusLetter}" Value="U">
+                                    <Setter Property="Foreground" Value="{StaticResource DangerBrush}" />
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding StatusLetter}" Value="R">
+                                    <Setter Property="Foreground" Value="{StaticResource TealBrush}" />
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding StatusLetter}" Value="C">
+                                    <Setter Property="Foreground" Value="{StaticResource TealBrush}" />
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding StatusLetter}" Value="?">
+                                    <Setter Property="Foreground" Value="{StaticResource TextMutedBrush}" />
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </TextBlock.Style>
+                </TextBlock>
+            </Grid>
+        </DataTemplate>
+
         <SolidColorBrush x:Key="RunningFocusedBrush" Color="#FF4FC3F7" />
         <SolidColorBrush x:Key="RunningBrush" Color="#FF66BB6A" />
         <SolidColorBrush x:Key="IdleFocusedBrush" Color="#FF9FA8DA" />
@@ -122,7 +172,8 @@
             Window style (WindowStyle="None" + a matching WindowChrome) and MainWindow.xaml.cs's
             WindowProc maximize-to-work-area fix, which this borderless+maximizable window needs.
         -->
-        <controls:CustomTitleBar DockPanel.Dock="Top" TitleText="Accel" />
+        <controls:CustomTitleBar DockPanel.Dock="Top" TitleText="Accel"
+                                  VersionText="{x:Static controls:AppVersionInfo.DisplayText}" />
 
         <!--
             P4-T2: non-modal "rename may not have applied" warning banner (the plan's exact wording
@@ -648,55 +699,104 @@
                           Background="{StaticResource SplitterBrush}" ResizeBehavior="PreviousAndNext" />
 
             <!--
-                Panel B - file tree (right, Phase 5). Real FilesPanelViewModel (set as PanelB's
-                DataContext by MainWindow's constructor): a read-only hierarchy rooted at whichever
-                folder is currently focused (a session's cwd, or panel A's own tree selection - see
-                FilesPanelViewModel's remarks). No context menu, no IsSelected binding, no file-open
-                action - the only interaction this tree supports is a folder's own expand/collapse.
+                Panel B - file tree + git status (right). Split 2/3 (file tree, Phase 5) over 1/3
+                (git status list, Phase 7), independently resizable via the GridSplitter between
+                them. Each section gets its own DataContext (FilesSectionRoot / GitSectionRoot, set
+                by MainWindow's constructor) rather than one shared DataContext on PanelB itself -
+                FilesPanelViewModel and GitPanelViewModel are two distinct ViewModels that happen to
+                resolve the same focused-folder root (FocusedRootResolver), not one VM split across
+                two views.
             -->
             <Border x:Name="PanelB" Grid.Column="4" BorderBrush="{StaticResource StrokeSubtleBrush}" BorderThickness="1,0,0,0" Background="{StaticResource SurfaceBrush}">
-                <DockPanel LastChildFill="True">
-                    <TextBlock DockPanel.Dock="Top" Text="FILES" Margin="16,16,16,10"
-                               Style="{StaticResource SectionHeaderTextStyle}" />
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="2*" MinHeight="80" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="1*" MinHeight="60" />
+                    </Grid.RowDefinitions>
 
-                    <Border DockPanel.Dock="Bottom" BorderBrush="{StaticResource StrokeSubtleBrush}" BorderThickness="0,1,0,0" Padding="16,10">
-                        <TextBlock TextWrapping="Wrap" Style="{StaticResource SecondaryTextStyle}" Text="{Binding StatusText}" />
-                    </Border>
+                    <!--
+                        File tree section (Phase 5). Real FilesPanelViewModel (set as
+                        FilesSectionRoot's DataContext): a read-only hierarchy rooted at whichever
+                        folder is currently focused (a session's cwd, or panel A's own tree
+                        selection - see FilesPanelViewModel's remarks). No context menu, no
+                        IsSelected binding, no file-open action - the only interaction this tree
+                        supports is a folder's own expand/collapse. The bottom "focused folder"
+                        status caption Phase 5 originally had here was dropped once the git section
+                        below took over naming the focused root for panel B as a whole.
+                    -->
+                    <DockPanel x:Name="FilesSectionRoot" Grid.Row="0" LastChildFill="True">
+                        <TextBlock DockPanel.Dock="Top" Text="FILES" Margin="16,16,16,10"
+                                   Style="{StaticResource SectionHeaderTextStyle}" />
 
-                    <TreeView x:Name="FilesTreeView" ItemsSource="{Binding Nodes}" BorderThickness="0" Background="Transparent"
-                              Padding="8,0,8,8" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
-                        <TreeView.ItemContainerStyle>
-                            <Style TargetType="TreeViewItem" BasedOn="{StaticResource {x:Type TreeViewItem}}">
-                                <!-- Two-way: the user's own expand/collapse gestures are the only
-                                     interaction this tree supports (Phase 5 scope). -->
-                                <Setter Property="IsExpanded" Value="{Binding IsExpanded, Mode=TwoWay}" />
-                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-                                <Setter Property="AutomationProperties.Name" Value="{Binding AutomationDescription}" />
-                                <Setter Property="ToolTip" Value="{Binding Key}" />
-                            </Style>
-                        </TreeView.ItemContainerStyle>
-                        <TreeView.ItemTemplate>
-                            <HierarchicalDataTemplate ItemsSource="{Binding Children}">
-                                <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis">
-                                    <TextBlock.Style>
-                                        <Style TargetType="TextBlock" BasedOn="{StaticResource SecondaryTextStyle}">
-                                            <Style.Triggers>
-                                                <!-- Folder vs file distinction never relies on colour
-                                                     alone - the TreeView's own expand arrow already
-                                                     differs, and AutomationDescription above carries
-                                                     the same distinction as text. -->
-                                                <DataTrigger Binding="{Binding IsDirectory}" Value="True">
-                                                    <Setter Property="FontWeight" Value="Bold" />
-                                                    <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
-                                                </DataTrigger>
-                                            </Style.Triggers>
-                                        </Style>
-                                    </TextBlock.Style>
-                                </TextBlock>
-                            </HierarchicalDataTemplate>
-                        </TreeView.ItemTemplate>
-                    </TreeView>
-                </DockPanel>
+                        <TreeView x:Name="FilesTreeView" ItemsSource="{Binding Nodes}" BorderThickness="0" Background="Transparent"
+                                  Padding="8,0,8,8" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                            <TreeView.ItemContainerStyle>
+                                <Style TargetType="TreeViewItem" BasedOn="{StaticResource {x:Type TreeViewItem}}">
+                                    <!-- Two-way: the user's own expand/collapse gestures are the only
+                                         interaction this tree supports (Phase 5 scope). -->
+                                    <Setter Property="IsExpanded" Value="{Binding IsExpanded, Mode=TwoWay}" />
+                                    <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                    <Setter Property="AutomationProperties.Name" Value="{Binding AutomationDescription}" />
+                                    <Setter Property="ToolTip" Value="{Binding Key}" />
+                                </Style>
+                            </TreeView.ItemContainerStyle>
+                            <TreeView.ItemTemplate>
+                                <HierarchicalDataTemplate ItemsSource="{Binding Children}">
+                                    <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis">
+                                        <TextBlock.Style>
+                                            <Style TargetType="TextBlock" BasedOn="{StaticResource SecondaryTextStyle}">
+                                                <Style.Triggers>
+                                                    <!-- Folder vs file distinction never relies on colour
+                                                         alone - the TreeView's own expand arrow already
+                                                         differs, and AutomationDescription above carries
+                                                         the same distinction as text. -->
+                                                    <DataTrigger Binding="{Binding IsDirectory}" Value="True">
+                                                        <Setter Property="FontWeight" Value="Bold" />
+                                                        <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
+                                </HierarchicalDataTemplate>
+                            </TreeView.ItemTemplate>
+                        </TreeView>
+                    </DockPanel>
+
+                    <GridSplitter Grid.Row="1" Height="4" HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                                  Background="{StaticResource SplitterBrush}" ResizeBehavior="PreviousAndNext" />
+
+                    <!--
+                        Git status section (Phase 7). Real GitPanelViewModel (set as
+                        GitSectionRoot's DataContext): a flat, read-only `git status` list for the
+                        same focused root the file tree above resolves, grouped into "Staged
+                        Changes" / "Changes" like VS Code's Source Control view. No stage/commit/
+                        push action yet - list-only, same restraint the file tree applies.
+                    -->
+                    <DockPanel x:Name="GitSectionRoot" Grid.Row="2" LastChildFill="True">
+                        <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="16,16,16,10">
+                            <TextBlock Text="GIT" Style="{StaticResource SectionHeaderTextStyle}" />
+                            <TextBlock Text="{Binding StatusText}" Margin="10,0,0,0" VerticalAlignment="Center"
+                                       FontSize="{StaticResource FontSizeCaption}" Foreground="{StaticResource TextMutedBrush}"
+                                       TextTrimming="CharacterEllipsis" AutomationProperties.LiveSetting="Polite" />
+                        </StackPanel>
+
+                        <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="8,0,8,8">
+                            <StackPanel>
+                                <TextBlock Text="STAGED CHANGES" Margin="8,4"
+                                           Style="{StaticResource SecondaryTextStyle}" FontWeight="Bold"
+                                           Visibility="{Binding StagedChanges.Count, Converter={StaticResource CountToVis}}" />
+                                <ItemsControl ItemsSource="{Binding StagedChanges}" ItemTemplate="{StaticResource GitChangeRowTemplate}" />
+
+                                <TextBlock Text="CHANGES" Margin="8,4"
+                                           Style="{StaticResource SecondaryTextStyle}" FontWeight="Bold"
+                                           Visibility="{Binding Changes.Count, Converter={StaticResource CountToVis}}" />
+                                <ItemsControl ItemsSource="{Binding Changes}" ItemTemplate="{StaticResource GitChangeRowTemplate}" />
+                            </StackPanel>
+                        </ScrollViewer>
+                    </DockPanel>
+                </Grid>
             </Border>
         </Grid>
     </DockPanel>

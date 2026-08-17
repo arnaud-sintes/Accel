@@ -125,6 +125,27 @@ public partial class MainWindow : Window
         ISessionSelectionService? selection,
         AgentGraphViewModel? agentGraph,
         FilesPanelViewModel? filesPanel)
+        : this(rootsPanel, ptyRouteRegistry, ptyWebSocketPort, tabs, sessionRegistry, selection, agentGraph, filesPanel, null)
+    {
+    }
+
+    /// <summary>
+    /// Phase 7's real composition: <paramref name="gitPanel"/> is panel B's bottom section's
+    /// <see cref="GitPanelViewModel"/>, independent of <paramref name="filesPanel"/> (its own
+    /// DataContext, on <c>GitSectionRoot</c> rather than <c>FilesSectionRoot</c> - see
+    /// <c>MainWindow.xaml</c>'s remarks on panel B's split). Null degrades like every other optional
+    /// parameter: the git section keeps no DataContext at all.
+    /// </summary>
+    public MainWindow(
+        RootsPanelViewModel? rootsPanel,
+        PtyRouteRegistry? ptyRouteRegistry,
+        int ptyWebSocketPort,
+        TabsViewModel? tabs,
+        PtyRegistry? sessionRegistry,
+        ISessionSelectionService? selection,
+        AgentGraphViewModel? agentGraph,
+        FilesPanelViewModel? filesPanel,
+        GitPanelViewModel? gitPanel)
     {
         InitializeComponent();
 
@@ -155,15 +176,24 @@ public partial class MainWindow : Window
 
         if (filesPanel is not null)
         {
-            // Scoped to panel B only, never Window.DataContext, per the rule quoted above.
+            // Scoped to panel B's file-tree section only, never Window.DataContext or all of
+            // PanelB, per the rule quoted above - GitSectionRoot below gets its own, independent
+            // DataContext.
             FilesPanelVm = filesPanel;
-            PanelB.DataContext = filesPanel;
+            FilesSectionRoot.DataContext = filesPanel;
         }
         else if (selection is not null)
         {
             // Pre-Phase-5 callers (no filesPanel argument) still get the P3-T3 stub.
             _panelBStub = new FocusedSessionStubViewModel(selection);
-            PanelB.DataContext = _panelBStub;
+            FilesSectionRoot.DataContext = _panelBStub;
+        }
+
+        if (gitPanel is not null)
+        {
+            // Scoped to panel B's git section only - see the comment above.
+            GitPanelVm = gitPanel;
+            GitSectionRoot.DataContext = gitPanel;
         }
 
         if (agentGraph is not null)
@@ -431,23 +461,23 @@ public partial class MainWindow : Window
     /// Two purely cosmetic DWM opt-ins for this window's frame-adjacent pixels (shadow, snap-layout
     /// affordances, the 1px frame border DWM draws outside every scrap of WPF content -
     /// <c>DWMWA_VISIBLE_FRAME_BORDER_THICKNESS</c> reports 1px on Windows 11):
-    /// <c>DWMWA_USE_IMMERSIVE_DARK_MODE</c> keeps them dark-themed, and
-    /// <c>DWMWA_BORDER_COLOR</c> = <c>DWMWA_COLOR_NONE</c> (<c>0xFFFFFFFE</c> - the documented
-    /// sentinel that "will suppress the drawing of the window border... makes it possible to have a
-    /// rounded window with no border", NOT to be confused with <c>DWMWA_COLOR_DEFAULT</c>
-    /// <c>0xFFFFFFFF</c>) drops the border entirely rather than letting DWM pick an
-    /// activation-dependent system colour for it.
+    /// <c>DWMWA_USE_IMMERSIVE_DARK_MODE</c> keeps them dark-themed, and <c>DWMWA_BORDER_COLOR</c> is
+    /// pinned to solid black rather than left at the activation-dependent system colour DWM would
+    /// otherwise pick (light in most Windows themes) - that system colour is exactly what reads as a
+    /// white flash around this dark window on every focus change, in or out of the app.
     ///
-    /// <para><b>This is not the fix for the reported "contour on focus loss".</b> Three successive
-    /// revisions of this method chased that bug through this attribute (near-black border colour,
-    /// then reapplying it on <c>Activated</c>/<c>Deactivated</c>, then <c>COLOR_NONE</c>) and all
-    /// three were confirmed by testing to change nothing, which is conclusive: an ~8px artifact was
-    /// never going to be a 1px DWM border. The real cause was the <c>WM_NCCALCSIZE</c> return value -
-    /// see <see cref="ClampMaximizedClientRectToWorkArea"/>. What is left here is kept only on its own
-    /// cosmetic merits (a dark window should not carry a light system-coloured hairline), applied
-    /// once at <c>SourceInitialized</c>. The old <c>WM_DWMCOMPOSITIONCHANGED</c> re-assertion is gone:
-    /// DWM composition cannot be turned off from Windows 8 onwards, so that message is never sent and
-    /// the hook case was dead code.</para>
+    /// <para><b>This is not the fix for the (unrelated) "contour on focus loss" bug.</b> Three
+    /// successive revisions of this method chased THAT bug (an ~8px maximize-state artifact) through
+    /// this same attribute (near-black border colour, then reapplying it on
+    /// <c>Activated</c>/<c>Deactivated</c>, then <c>DWMWA_COLOR_NONE</c>) and all three were confirmed
+    /// by testing to change nothing there - the real cause of that bug was the <c>WM_NCCALCSIZE</c>
+    /// return value, see <see cref="ClampMaximizedClientRectToWorkArea"/>. Pinning the border colour
+    /// here is a different, narrower fix for a different symptom (the focus-change flash reported
+    /// separately), applied once at <c>SourceInitialized</c> - a genuinely static colour needs no
+    /// re-assertion on <c>Activated</c>/<c>Deactivated</c>, unlike the activation-dependent system
+    /// colour it replaces. The old <c>WM_DWMCOMPOSITIONCHANGED</c> re-assertion is gone: DWM
+    /// composition cannot be turned off from Windows 8 onwards, so that message is never sent and the
+    /// hook case was dead code.</para>
     ///
     /// <para>Both attributes are Windows 11 (build 22000+) additions and
     /// <c>DwmSetWindowAttribute</c> fails harmlessly with <c>E_INVALIDARG</c> on older Windows (the
@@ -459,15 +489,14 @@ public partial class MainWindow : Window
         const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
         const int DWMWA_BORDER_COLOR = 34;
 
-        // COLORREF sentinel, not a colour: 0xFFFFFFFE == DWMWA_COLOR_NONE ("draw no border").
-        // 0xFFFFFFFF would be DWMWA_COLOR_DEFAULT, i.e. exactly the system-default, activation-
-        // dependent border this is here to get rid of - the two must not be confused.
-        const int DWMWA_COLOR_NONE = unchecked((int)0xFFFFFFFE);
+        // COLORREF format 0x00BBGGRR - solid black, not a sentinel (DWMWA_COLOR_NONE/_DEFAULT are
+        // 0xFFFFFFFE/0xFFFFFFFF respectively; this is neither).
+        const int DWMWA_BORDER_COLOR_BLACK = 0x00000000;
 
         int darkMode = 1;
         NativeMethods.DwmSetWindowAttribute(handle, DWMWA_USE_IMMERSIVE_DARK_MODE, ref darkMode, sizeof(int));
 
-        int borderColor = DWMWA_COLOR_NONE;
+        int borderColor = DWMWA_BORDER_COLOR_BLACK;
         NativeMethods.DwmSetWindowAttribute(handle, DWMWA_BORDER_COLOR, ref borderColor, sizeof(int));
     }
 
@@ -542,6 +571,11 @@ public partial class MainWindow : Window
     /// every overload but the eight-parameter one above. Exposed so a smoke test can assert against it
     /// directly, the same way <see cref="RootsPanel"/>/<see cref="AgentGraphVm"/> are.</summary>
     public FilesPanelViewModel? FilesPanelVm { get; }
+
+    /// <summary>Panel B's git status section ViewModel (Phase 7), or null when the window was
+    /// constructed without one - every overload but the nine-parameter one above. Exposed so a smoke
+    /// test can assert against it directly, the same way <see cref="FilesPanelVm"/> is.</summary>
+    public GitPanelViewModel? GitPanelVm { get; }
 
     /// <summary>Panel C's ViewModel (the tab strip), or null in the scaffolding paths.</summary>
     public TabsViewModel? Tabs { get; }
@@ -688,24 +722,22 @@ public partial class MainWindow : Window
 
         if (_sessionRegistry is null || !_sessionRegistry.TryGet(node.Key, out var session) || session is null)
         {
-            MessageBox.Show(
+            AccelMessageDialog.ShowMessage(
                 this,
                 "This session isn't open in a tab right now, so it can't be renamed. Open it first.",
                 "Rename session",
-                MessageBoxButton.OK,
-                MessageBoxImage.Information);
+                AccelDialogIcon.Info);
             return;
         }
 
         var status = ClaudeSessionStatusFile.TryRead(session.ProcessId);
         if (!ClaudeSessionStatusFile.IsIdle(status))
         {
-            MessageBox.Show(
+            AccelMessageDialog.ShowMessage(
                 this,
                 "The session is busy right now. Wait for it to go idle before renaming.",
                 "Rename session",
-                MessageBoxButton.OK,
-                MessageBoxImage.Information);
+                AccelDialogIcon.Info);
             return;
         }
 
@@ -833,8 +865,8 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, $"Could not resume this session: {ex.Message}", "Resume session",
-                MessageBoxButton.OK, MessageBoxImage.Error);
+            AccelMessageDialog.ShowMessage(this, $"Could not resume this session: {ex.Message}", "Resume session",
+                AccelDialogIcon.Error);
             return;
         }
 
@@ -870,15 +902,13 @@ public partial class MainWindow : Window
             return;
         }
 
-        var confirmResult = MessageBox.Show(
+        bool confirmed = AccelMessageDialog.ShowConfirm(
             this,
             $"Stop \"{tab.Title}\"? The session's process will be terminated. The tab stays open so you can still see its output.",
             "Stop session",
-            MessageBoxButton.YesNo,
-            MessageBoxImage.Warning,
-            MessageBoxResult.No);
+            AccelDialogIcon.Warning);
 
-        if (confirmResult != MessageBoxResult.Yes)
+        if (!confirmed)
         {
             return;
         }
@@ -914,48 +944,44 @@ public partial class MainWindow : Window
 
         if (isLive())
         {
-            MessageBox.Show(
+            AccelMessageDialog.ShowMessage(
                 this,
                 "This session is running. Stop it first, then remove it.",
                 "Remove session",
-                MessageBoxButton.OK,
-                MessageBoxImage.Information);
+                AccelDialogIcon.Info);
             return;
         }
 
         var plan = SessionRemover.Plan(sessionId, node.ProjectDir);
         if (!plan.IsSafe)
         {
-            MessageBox.Show(
+            AccelMessageDialog.ShowMessage(
                 this,
                 "Refusing to remove this session - it did not pass validation:\n\n" + string.Join('\n', plan.Warnings),
                 "Remove session",
-                MessageBoxButton.OK,
-                MessageBoxImage.Error);
+                AccelDialogIcon.Error);
             return;
         }
 
         int existingCount = plan.ExistingTargets.Count();
         if (existingCount == 0 && !plan.HistoryFileExists)
         {
-            MessageBox.Show(this, "There is nothing on disk to remove for this session.", "Remove session",
-                MessageBoxButton.OK, MessageBoxImage.Information);
+            AccelMessageDialog.ShowMessage(this, "There is nothing on disk to remove for this session.", "Remove session",
+                AccelDialogIcon.Info);
             return;
         }
 
         double totalMegabytes = plan.TotalBytes / (1024.0 * 1024.0);
-        var confirmResult = MessageBox.Show(
+        bool confirmed = AccelMessageDialog.ShowConfirm(
             this,
             $"Remove \"{node.Text}\"?\n\n" +
             $"This moves {existingCount} location(s) (~{totalMegabytes:0.0} MB) to the recycle bin and removes " +
             "this session's entry from history.jsonl. The tab strip and panel A are unaffected if the session " +
             "is not currently open.\n\nThis can be undone from the recycle bin, but is otherwise permanent.",
             "Remove session",
-            MessageBoxButton.YesNo,
-            MessageBoxImage.Warning,
-            MessageBoxResult.No);
+            AccelDialogIcon.Warning);
 
-        if (confirmResult != MessageBoxResult.Yes)
+        if (!confirmed)
         {
             return;
         }
@@ -970,8 +996,8 @@ public partial class MainWindow : Window
 
         if (result.AbortedForLiveness)
         {
-            MessageBox.Show(this, "The session became active again during removal, so nothing further was touched.",
-                "Remove session", MessageBoxButton.OK, MessageBoxImage.Information);
+            AccelMessageDialog.ShowMessage(this, "The session became active again during removal, so nothing further was touched.",
+                "Remove session", AccelDialogIcon.Info);
             return;
         }
 
@@ -979,8 +1005,8 @@ public partial class MainWindow : Window
         string detail = failed.Length > 0
             ? string.Join('\n', failed.Select(s => $"- {s.Description}: {s.Detail}"))
             : $"Aborted: {result.AbortReason}";
-        MessageBox.Show(this, "Removal did not fully complete:\n\n" + detail, "Remove session",
-            MessageBoxButton.OK, MessageBoxImage.Error);
+        AccelMessageDialog.ShowMessage(this, "Removal did not fully complete:\n\n" + detail, "Remove session",
+            AccelDialogIcon.Error);
     }
 
     private DispatcherTimer? _transientWarningTimer;

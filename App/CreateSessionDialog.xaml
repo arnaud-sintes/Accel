@@ -2,6 +2,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:controls="clr-namespace:Accel.App.Controls"
+        xmlns:conv="clr-namespace:Accel.App.Converters"
         Title="Create session" Height="620" Width="560"
         WindowStartupLocation="CenterOwner" ResizeMode="NoResize"
         ShowInTaskbar="False" WindowStyle="None">
@@ -12,7 +13,12 @@
         which Language="" never addressed). Default Language is fine with real culture data present.
     -->
     <Window.Resources>
-        <ResourceDictionary Source="Theme.xaml" />
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="Theme.xaml" />
+            </ResourceDictionary.MergedDictionaries>
+            <conv:EffortLevelToBarCountConverter x:Key="EffortLevelToBarCount" />
+        </ResourceDictionary>
     </Window.Resources>
     <!--
         Dialog surface: the app's L1 surface rather than the base black, with the custom title bar
@@ -68,10 +74,24 @@
         </ComboBox>
 
         <TextBlock Grid.Row="4" Text="Effort" Style="{StaticResource FieldLabelTextStyle}" />
+        <!--
+            Same EffortBarsControl/EffortBarLevel.Resolve scheme panel A/E's effort badges use (via
+            EffortLevelToBarCountConverter) - not a second, dialog-only rendering of "effort".
+        -->
         <ComboBox x:Name="EffortComboBox" Grid.Row="5"
                   ItemsSource="{Binding EffortLevels}"
                   SelectedItem="{Binding SelectedEffortLevel}"
-                  Margin="0,0,0,16" />
+                  Margin="0,0,0,16">
+            <ComboBox.ItemTemplate>
+                <DataTemplate>
+                    <StackPanel Orientation="Horizontal">
+                        <controls:EffortBarsControl Level="{Binding Converter={StaticResource EffortLevelToBarCount}}"
+                                                     Margin="0,0,8,0" VerticalAlignment="Center" />
+                        <TextBlock Text="{Binding}" />
+                    </StackPanel>
+                </DataTemplate>
+            </ComboBox.ItemTemplate>
+        </ComboBox>
 
         <!--
             Permission mode as a single line: label followed inline by the combo, not a stacked

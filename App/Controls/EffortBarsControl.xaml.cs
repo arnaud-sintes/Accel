@@ -1,6 +1,5 @@
 namespace Accel.App.Controls;
 
-using System;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
@@ -8,11 +7,11 @@ using System.Windows.Media;
 using Accel.Metrics;
 
 /// <summary>
-/// P1-T4's effort badge, revised to a radial ring gauge: <see cref="Level"/> (0-4, straight from
-/// <see cref="EffortBarLevel.Resolve(string?)"/>) fills <c>TrackRing</c>'s outline clockwise from
-/// the top by one quarter-turn per level, except level 4 (max) which renders as a solid filled disc
-/// - see EffortBarsControl.xaml's comment for why. Colour is not the only signal here either: an
-/// unfilled/partially-filled ring differs from the solid max disc in shape, not just colour.
+/// The effort badge: <see cref="Level"/> (0-4, straight from <see cref="EffortBarLevel.Resolve(string?)"/>)
+/// shows as a hollow, unfilled ring for 0 (unknown/irrelevant), or a solid filled disc for 1-4
+/// colored along a green -> amber -> red ramp (<see cref="LevelBrushes"/>) - see
+/// EffortBarsControl.xaml's comment for the full rationale, including why colour alone is not this
+/// control's only signal.
 /// </summary>
 public partial class EffortBarsControl : UserControl
 {
@@ -22,22 +21,20 @@ public partial class EffortBarsControl : UserControl
         typeof(EffortBarsControl),
         new FrameworkPropertyMetadata(0, FrameworkPropertyMetadataOptions.AffectsRender, OnLevelChanged));
 
-    /// <summary>Per-level colour, matching App/Theme.xaml's accent progression: the pastel-orange
-    /// primary accent (#F0A868) for low, warming across a blend into the teal-blue complementary
-    /// accent (#6EC1D6) for max. Index 0 = low ... index 3 = max, same ramp the old bars used.</summary>
-    private static readonly SolidColorBrush[] LevelBrushes =
-    [
-        Freeze(Color.FromRgb(0xF0, 0xA8, 0x68)),
-        Freeze(Color.FromRgb(0xCF, 0xAF, 0x8A)),
-        Freeze(Color.FromRgb(0xA0, 0xB8, 0xAF)),
-        Freeze(Color.FromRgb(0x6E, 0xC1, 0xD6)),
-    ];
+    /// <summary>App/Theme.xaml's own semantic colours (SuccessColor/WarningColor/DangerColor) as the
+    /// three stops of the ramp, so this control's palette stays in sync with every other
+    /// success/warning/danger use in the app rather than inventing its own scale.</summary>
+    private static readonly Color SuccessColor = Color.FromRgb(0x8F, 0xCB, 0x9B);
+    private static readonly Color WarningColor = Color.FromRgb(0xE8, 0xC0, 0x7D);
+    private static readonly Color DangerColor = Color.FromRgb(0xE9, 0x8F, 0x8F);
+
+    /// <summary>One frozen brush per level (index 0 = level 1 ... index <see cref="EffortBarLevel.MaxBars"/> - 1
+    /// = max), precomputed once since <see cref="EffortBarLevel.MaxBars"/> never changes at
+    /// runtime.</summary>
+    private static readonly SolidColorBrush[] LevelBrushes = BuildLevelBrushes();
 
     /// <summary>Outline of the (always-visible) track ring - Theme.xaml's TextMutedBrush (#6E6E6E).</summary>
     private static readonly SolidColorBrush TrackStroke = Freeze(Color.FromRgb(0x6E, 0x6E, 0x6E));
-
-    private const double Center = 7.0;
-    private const double Radius = 6.0;
 
     public EffortBarsControl()
     {
@@ -66,21 +63,12 @@ public partial class EffortBarsControl : UserControl
 
         if (clamped == 0)
         {
-            FillArc.Visibility = Visibility.Collapsed;
             FillDisc.Visibility = Visibility.Collapsed;
-        }
-        else if (clamped == EffortBarLevel.MaxBars)
-        {
-            FillArc.Visibility = Visibility.Collapsed;
-            FillDisc.Visibility = Visibility.Visible;
-            FillDisc.Fill = LevelBrushes[clamped - 1];
         }
         else
         {
-            FillDisc.Visibility = Visibility.Collapsed;
-            FillArc.Visibility = Visibility.Visible;
-            FillArc.Stroke = LevelBrushes[clamped - 1];
-            FillArc.Data = BuildArcGeometry((double)clamped / EffortBarLevel.MaxBars);
+            FillDisc.Visibility = Visibility.Visible;
+            FillDisc.Fill = LevelBrushes[clamped - 1];
         }
 
         AutomationProperties.SetName(this, clamped == 0
@@ -88,32 +76,26 @@ public partial class EffortBarsControl : UserControl
             : $"Effort level {clamped} of {EffortBarLevel.MaxBars}");
     }
 
-    /// <summary>Builds a clockwise arc from the top (12 o'clock) covering <paramref name="fraction"/>
-    /// of the full circle - callers never pass 1.0 (a full circle degenerates to a zero-length
-    /// ArcSegment, since its start and end points coincide; level 4/max uses <c>FillDisc</c>
-    /// instead, never this method).</summary>
-    private static Geometry BuildArcGeometry(double fraction)
+    private static SolidColorBrush[] BuildLevelBrushes()
     {
-        const double StartAngleDegrees = -90.0;
-        double sweepDegrees = 360.0 * fraction;
-        double endAngleDegrees = StartAngleDegrees + sweepDegrees;
+        var brushes = new SolidColorBrush[EffortBarLevel.MaxBars];
 
-        Point start = PointOnCircle(StartAngleDegrees);
-        Point end = PointOnCircle(endAngleDegrees);
-        bool isLargeArc = sweepDegrees > 180.0;
+        for (int level = 1; level <= EffortBarLevel.MaxBars; level++)
+        {
+            double t = EffortBarLevel.MaxBars <= 1 ? 0.0 : (double)(level - 1) / (EffortBarLevel.MaxBars - 1);
+            Color color = t <= 0.5
+                ? Lerp(SuccessColor, WarningColor, t / 0.5)
+                : Lerp(WarningColor, DangerColor, (t - 0.5) / 0.5);
+            brushes[level - 1] = Freeze(color);
+        }
 
-        var figure = new PathFigure { StartPoint = start, IsClosed = false };
-        figure.Segments.Add(new ArcSegment(end, new Size(Radius, Radius), 0, isLargeArc, SweepDirection.Clockwise, isStroked: true));
-
-        var geometry = new PathGeometry();
-        geometry.Figures.Add(figure);
-        return geometry;
+        return brushes;
     }
 
-    private static Point PointOnCircle(double angleDegrees)
+    private static Color Lerp(Color from, Color to, double t)
     {
-        double angleRadians = angleDegrees * Math.PI / 180.0;
-        return new Point(Center + (Radius * Math.Cos(angleRadians)), Center + (Radius * Math.Sin(angleRadians)));
+        byte LerpChannel(byte a, byte b) => (byte)(a + ((b - a) * t));
+        return Color.FromRgb(LerpChannel(from.R, to.R), LerpChannel(from.G, to.G), LerpChannel(from.B, to.B));
     }
 
     private static SolidColorBrush Freeze(Color color)

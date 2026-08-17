@@ -167,6 +167,13 @@ static async Task<int> RunCombinedAsync(int port, string? dumpRawDir, bool verbo
         // Panel B (Phase 5): a read-only file/folder tree rooted at the focused session's cwd, or
         // (via the rootsPanel reference) panel A's own tree selection when no session is focused.
         var filesPanel = new Accel.App.ViewModels.FilesPanelViewModel(feed, dispatcher, selection, rootsPanel);
+
+        // Panel B's git section (Phase 7): the same focused root as filesPanel, resolved
+        // independently (FocusedRootResolver), rendered as a flat git status list instead of a tree.
+        // Wired to filesPanel's own FolderExpanded event so drilling into a repo folder in the file
+        // tree switches this section to that repo (GitPanelViewModel's remarks).
+        var gitPanel = new Accel.App.ViewModels.GitPanelViewModel(feed, dispatcher, selection, rootsPanel);
+        filesPanel.FolderExpanded += gitPanel.OnFilesPanelFolderExpanded;
         // statusPollInterval: re-checks the selected tab's Claude Code status file for a session id
         // that has drifted from the launch-time tabId (e.g. the user typed /clear) - see
         // TabsViewModel.PollFocusedSessionId's remarks for why panel A would otherwise show that
@@ -177,14 +184,16 @@ static async Task<int> RunCombinedAsync(int port, string? dumpRawDir, bool verbo
             dispatcher,
             statusPollInterval: TimeSpan.FromSeconds(1));
 
-        mainWindow = new Accel.App.MainWindow(rootsPanel, server.PtySessions, port, tabs, sessionRegistry, selection, agentGraph, filesPanel);
+        mainWindow = new Accel.App.MainWindow(rootsPanel, server.PtySessions, port, tabs, sessionRegistry, selection, agentGraph, filesPanel, gitPanel);
         mainWindow.Loaded += (_, _) => rootsPanel.Start();
         mainWindow.Closed += (_, _) =>
         {
             // Disposed immediately before rootsPanel.Dispose() - before feed.Dispose() - so the panel
             // unhooks from a feed that still exists.
             agentGraph.Dispose();
+            filesPanel.FolderExpanded -= gitPanel.OnFilesPanelFolderExpanded;
             filesPanel.Dispose();
+            gitPanel.Dispose();
             rootsPanel.Dispose();
             feed.Dispose();
 

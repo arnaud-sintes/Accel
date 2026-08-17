@@ -29,13 +29,14 @@ public class EventServer
     public SessionState State { get; } = new SessionState();
 
     /// <summary>
-    /// Phase UI-C: the configured root folder list (see <see cref="RootFoldersConfig"/>),
-    /// loaded once when this <see cref="EventServer"/> instance is constructed - never
-    /// re-read per request, since the config file rarely changes and this is the only
-    /// instance-lifetime hook available before routes are mapped. A missing/malformed
-    /// config degrades to an empty array here, same tolerant contract as the loader itself.
+    /// Phase UI-C: the configured root folder list (see <see cref="RootFoldersConfig"/>).
+    /// Re-read from disk on every access - <see cref="Accel.App.Services.RootFolderEditor.AddRoot"/>
+    /// and <c>RemoveRoot</c> mutate <c>accel-folders.json</c> at runtime (panel A's "+ Add root"
+    /// button), so a value cached once at construction would silently never reflect those edits
+    /// for the lifetime of the process. A missing/malformed config degrades to an empty array
+    /// here, same tolerant contract as the loader itself.
     /// </summary>
-    public string[] Roots { get; } = RootFoldersConfig.Load();
+    public string[] Roots => RootFoldersConfig.Load();
 
     /// <summary>
     /// Phase UI-D: the scan/merge/cache engine backing <c>GET /roots/tree</c>. One instance per

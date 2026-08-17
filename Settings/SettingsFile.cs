@@ -176,7 +176,21 @@ public sealed class SettingsFile
 
             if (File.Exists(Path))
             {
-                File.Replace(temp, Path, destinationBackupFileName: null, ignoreMetadataErrors: true);
+                try
+                {
+                    File.Replace(temp, Path, destinationBackupFileName: null, ignoreMetadataErrors: true);
+                }
+                catch (IOException)
+                {
+                    // File.Replace's atomic swap can fail with "Unable to remove the file to be
+                    // replaced" when the destination sits under a cloud-synced profile (OneDrive)
+                    // or is briefly locked by AV/indexing - neither of which is a real conflict.
+                    // Delete+move tolerates that transient lock; File.Move(overwrite: true) still
+                    // fails on a genuinely locked file, so the exception still surfaces if this
+                    // isn't transient.
+                    File.Delete(Path);
+                    File.Move(temp, Path, overwrite: true);
+                }
             }
             else
             {

@@ -38,19 +38,19 @@ public readonly record struct ModelBadge(string Letter, string ColorHex, bool Ma
 /// </summary>
 public static class ModelBadgeTable
 {
-    private static readonly (string Prefix, string Letter, string ColorHex, string DisplayName)[] Table =
+    private static readonly (string Prefix, string Letter, string ColorHex, string DisplayName, string CliValue)[] Table =
     {
         // Green - Haiku family (least complex).
-        ("claude-haiku", "H", "#FF10B981", "Haiku 4.5"),
+        ("claude-haiku", "H", "#FF10B981", "Haiku 4.5", "Haiku"),
 
         // Blue - Sonnet family.
-        ("claude-sonnet", "S", "#FF3B82F6", "Sonnet 5"),
+        ("claude-sonnet", "S", "#FF3B82F6", "Sonnet 5", "Sonnet"),
 
         // Purple - Opus family.
-        ("claude-opus", "O", "#FF9061F9", "Opus 5"),
+        ("claude-opus", "O", "#FF9061F9", "Opus 5", "Opus"),
 
         // Amber - Fable family.
-        ("claude-fable", "F", "#FFF59E0B", "Fable 5"),
+        ("claude-fable", "F", "#FFF59E0B", "Fable 5", "Fable"),
     };
 
     /// <summary>
@@ -58,20 +58,24 @@ public static class ModelBadgeTable
     /// fable - ascending complexity) - the canonical list P2-T6's "Create session" dialog picks a
     /// <c>--model</c> value from, so that dialog and panel A's badges are provably reading the
     /// same table rather than maintaining two independently-typed lists of model family names.
+    /// These are <c>claude</c>'s own accepted <c>--model</c> values ("Haiku"/"Sonnet"/"Opus"/"Fable")
+    /// - not the <c>Prefix</c> column above, which is a different vocabulary (the model-id prefix
+    /// used to badge-match a *resolved* model id like "claude-sonnet-5" coming back from telemetry,
+    /// something `claude --model` never accepts as input).
     /// </summary>
-    public static readonly IReadOnlyList<string> Families = Array.ConvertAll(Table, entry => entry.Prefix);
+    public static readonly IReadOnlyList<string> Families = Array.ConvertAll(Table, entry => entry.CliValue);
 
     /// <summary>
     /// The same families as <see cref="Families"/>, paired with a human-readable label that names
     /// the current version (e.g. "Haiku 4.5") - what the "Create session" dialog actually shows in
-    /// its model picker, while still sending <see cref="Families"/>' bare family prefix as the
+    /// its model picker, while still sending <see cref="Families"/>' own value as the
     /// <c>--model</c> value. A named record rather than a <see cref="ValueTuple"/> - WPF's XAML
     /// binding engine resolves properties by reflection, and value-tuple element names ("Family",
     /// "DisplayName") are erased at runtime (only "Item1"/"Item2" actually exist as fields), so a
     /// tuple here would silently fail to bind in <c>CreateSessionDialog.xaml</c>.
     /// </summary>
     public static readonly IReadOnlyList<ModelFamilyOption> FamilyDisplayNames =
-        Array.ConvertAll(Table, entry => new ModelFamilyOption(entry.Prefix, entry.DisplayName));
+        Array.ConvertAll(Table, entry => new ModelFamilyOption(entry.CliValue, entry.DisplayName));
 
     /// <summary>Case-insensitive keyword fallback for the rendered <c>ModelDisplayName</c> form
     /// (e.g. "Sonnet 5", "Opus 4.5") that <c>MonitorTreeBuilder.BuildSessionNode</c> prefers over
@@ -98,7 +102,7 @@ public static class ModelBadgeTable
             return ModelBadge.Unmatched;
         }
 
-        foreach (var (prefix, letter, colorHex, _) in Table)
+        foreach (var (prefix, letter, colorHex, _, _) in Table)
         {
             if (string.Equals(prefix, modelId, StringComparison.Ordinal))
             {
@@ -110,7 +114,7 @@ public static class ModelBadgeTable
         string bestLetter = ModelBadge.Unmatched.Letter;
         string bestColorHex = ModelBadge.Unmatched.ColorHex;
 
-        foreach (var (prefix, letter, colorHex, _) in Table)
+        foreach (var (prefix, letter, colorHex, _, _) in Table)
         {
             if (prefix.Length > bestPrefixLength && modelId.StartsWith(prefix, StringComparison.Ordinal))
             {
