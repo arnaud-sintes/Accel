@@ -163,6 +163,10 @@ static async Task<int> RunCombinedAsync(int port, string? dumpRawDir, bool verbo
         // Panel E: a second reader on the same feed/dispatcher/selection triple as rootsPanel - never
         // a filtered view of rootsPanel's own tree (design doc "claude-agentgraph.md" §7.1/§7.7).
         var agentGraph = new Accel.App.ViewModels.AgentGraphViewModel(feed, dispatcher, selection);
+
+        // Panel B (Phase 5): a read-only file/folder tree rooted at the focused session's cwd, or
+        // (via the rootsPanel reference) panel A's own tree selection when no session is focused.
+        var filesPanel = new Accel.App.ViewModels.FilesPanelViewModel(feed, dispatcher, selection, rootsPanel);
         // statusPollInterval: re-checks the selected tab's Claude Code status file for a session id
         // that has drifted from the launch-time tabId (e.g. the user typed /clear) - see
         // TabsViewModel.PollFocusedSessionId's remarks for why panel A would otherwise show that
@@ -173,13 +177,14 @@ static async Task<int> RunCombinedAsync(int port, string? dumpRawDir, bool verbo
             dispatcher,
             statusPollInterval: TimeSpan.FromSeconds(1));
 
-        mainWindow = new Accel.App.MainWindow(rootsPanel, server.PtySessions, port, tabs, sessionRegistry, selection, agentGraph);
+        mainWindow = new Accel.App.MainWindow(rootsPanel, server.PtySessions, port, tabs, sessionRegistry, selection, agentGraph, filesPanel);
         mainWindow.Loaded += (_, _) => rootsPanel.Start();
         mainWindow.Closed += (_, _) =>
         {
             // Disposed immediately before rootsPanel.Dispose() - before feed.Dispose() - so the panel
             // unhooks from a feed that still exists.
             agentGraph.Dispose();
+            filesPanel.Dispose();
             rootsPanel.Dispose();
             feed.Dispose();
 

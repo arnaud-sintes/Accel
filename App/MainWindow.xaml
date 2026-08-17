@@ -648,17 +648,55 @@
                           Background="{StaticResource SplitterBrush}" ResizeBehavior="PreviousAndNext" />
 
             <!--
-                Panel B - file tree (right). P3-T3 stub: FocusedSessionStubViewModel (a read-only
-                ISessionSelectionService subscriber) - real file-tree content is Phase 5. Panel E
-                (agent graph) got its own real AgentGraphViewModel in Phase 6 and no longer shares
-                this stub.
+                Panel B - file tree (right, Phase 5). Real FilesPanelViewModel (set as PanelB's
+                DataContext by MainWindow's constructor): a read-only hierarchy rooted at whichever
+                folder is currently focused (a session's cwd, or panel A's own tree selection - see
+                FilesPanelViewModel's remarks). No context menu, no IsSelected binding, no file-open
+                action - the only interaction this tree supports is a folder's own expand/collapse.
             -->
             <Border x:Name="PanelB" Grid.Column="4" BorderBrush="{StaticResource StrokeSubtleBrush}" BorderThickness="1,0,0,0" Background="{StaticResource SurfaceBrush}">
-                <StackPanel Margin="16">
-                    <TextBlock Text="FILES" TextWrapping="Wrap" Style="{StaticResource SectionHeaderTextStyle}" />
-                    <TextBlock Text="{Binding StatusText}" Style="{StaticResource SecondaryTextStyle}"
-                               TextWrapping="Wrap" Margin="0,10,0,0" />
-                </StackPanel>
+                <DockPanel LastChildFill="True">
+                    <TextBlock DockPanel.Dock="Top" Text="FILES" Margin="16,16,16,10"
+                               Style="{StaticResource SectionHeaderTextStyle}" />
+
+                    <Border DockPanel.Dock="Bottom" BorderBrush="{StaticResource StrokeSubtleBrush}" BorderThickness="0,1,0,0" Padding="16,10">
+                        <TextBlock TextWrapping="Wrap" Style="{StaticResource SecondaryTextStyle}" Text="{Binding StatusText}" />
+                    </Border>
+
+                    <TreeView x:Name="FilesTreeView" ItemsSource="{Binding Nodes}" BorderThickness="0" Background="Transparent"
+                              Padding="8,0,8,8" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                        <TreeView.ItemContainerStyle>
+                            <Style TargetType="TreeViewItem" BasedOn="{StaticResource {x:Type TreeViewItem}}">
+                                <!-- Two-way: the user's own expand/collapse gestures are the only
+                                     interaction this tree supports (Phase 5 scope). -->
+                                <Setter Property="IsExpanded" Value="{Binding IsExpanded, Mode=TwoWay}" />
+                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                <Setter Property="AutomationProperties.Name" Value="{Binding AutomationDescription}" />
+                                <Setter Property="ToolTip" Value="{Binding Key}" />
+                            </Style>
+                        </TreeView.ItemContainerStyle>
+                        <TreeView.ItemTemplate>
+                            <HierarchicalDataTemplate ItemsSource="{Binding Children}">
+                                <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis">
+                                    <TextBlock.Style>
+                                        <Style TargetType="TextBlock" BasedOn="{StaticResource SecondaryTextStyle}">
+                                            <Style.Triggers>
+                                                <!-- Folder vs file distinction never relies on colour
+                                                     alone - the TreeView's own expand arrow already
+                                                     differs, and AutomationDescription above carries
+                                                     the same distinction as text. -->
+                                                <DataTrigger Binding="{Binding IsDirectory}" Value="True">
+                                                    <Setter Property="FontWeight" Value="Bold" />
+                                                    <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </TextBlock.Style>
+                                </TextBlock>
+                            </HierarchicalDataTemplate>
+                        </TreeView.ItemTemplate>
+                    </TreeView>
+                </DockPanel>
             </Border>
         </Grid>
     </DockPanel>

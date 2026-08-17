@@ -104,6 +104,27 @@ public partial class MainWindow : Window
         PtyRegistry? sessionRegistry,
         ISessionSelectionService? selection,
         AgentGraphViewModel? agentGraph)
+        : this(rootsPanel, ptyRouteRegistry, ptyWebSocketPort, tabs, sessionRegistry, selection, agentGraph, null)
+    {
+    }
+
+    /// <summary>
+    /// Phase 5's real composition: <paramref name="filesPanel"/> is panel B's
+    /// <see cref="FilesPanelViewModel"/>, replacing the P3-T3 <see cref="FocusedSessionStubViewModel"/>
+    /// this overload's predecessor still assigns when <paramref name="filesPanel"/> is null (so nothing
+    /// that predates Phase 5 has to change). Null degrades exactly like every other optional parameter:
+    /// panel B falls back to the stub if <paramref name="selection"/> is given, or to no DataContext at
+    /// all otherwise.
+    /// </summary>
+    public MainWindow(
+        RootsPanelViewModel? rootsPanel,
+        PtyRouteRegistry? ptyRouteRegistry,
+        int ptyWebSocketPort,
+        TabsViewModel? tabs,
+        PtyRegistry? sessionRegistry,
+        ISessionSelectionService? selection,
+        AgentGraphViewModel? agentGraph,
+        FilesPanelViewModel? filesPanel)
     {
         InitializeComponent();
 
@@ -132,10 +153,15 @@ public partial class MainWindow : Window
             tabs.AttachTerminalAsync = tabId => Terminal.AttachPtyAsync(tabId, _ptyWebSocketPort);
         }
 
-        if (selection is not null)
+        if (filesPanel is not null)
         {
-            // Panel B still gets the P3-T3 stub - real file-tree content is Phase 5. Panel E now gets a
-            // real ViewModel (below) instead of sharing this stub.
+            // Scoped to panel B only, never Window.DataContext, per the rule quoted above.
+            FilesPanelVm = filesPanel;
+            PanelB.DataContext = filesPanel;
+        }
+        else if (selection is not null)
+        {
+            // Pre-Phase-5 callers (no filesPanel argument) still get the P3-T3 stub.
             _panelBStub = new FocusedSessionStubViewModel(selection);
             PanelB.DataContext = _panelBStub;
         }
@@ -511,6 +537,11 @@ public partial class MainWindow : Window
     /// overload but the seven-parameter one above). Exposed so a smoke test can assert against it
     /// directly, the same way <see cref="RootsPanel"/> is.</summary>
     public AgentGraphViewModel? AgentGraphVm { get; }
+
+    /// <summary>Panel B's ViewModel (Phase 5), or null when the window was constructed without one -
+    /// every overload but the eight-parameter one above. Exposed so a smoke test can assert against it
+    /// directly, the same way <see cref="RootsPanel"/>/<see cref="AgentGraphVm"/> are.</summary>
+    public FilesPanelViewModel? FilesPanelVm { get; }
 
     /// <summary>Panel C's ViewModel (the tab strip), or null in the scaffolding paths.</summary>
     public TabsViewModel? Tabs { get; }
