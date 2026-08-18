@@ -377,6 +377,23 @@ public sealed class RootsTreeBuilder
         // equally output-less), not a per-row condition.
         long? consumedTokens = usedTokens;
 
+        // MCP/Skill hit counts (PostToolUse tracking): only meaningful for live sessions -
+        // hook-based counts only exist while Accel was running to observe them. Historical
+        // (ended, transcript-only) sessions get empty arrays, never null.
+        ToolHitCountDto[] mcpUsage;
+        ToolHitCountDto[] skillUsage;
+        if (isLive)
+        {
+            ToolUsageSnapshot toolUsage = state.GetToolUsage(sessionId);
+            mcpUsage = ToToolHitCountDtos(toolUsage.McpHits);
+            skillUsage = ToToolHitCountDtos(toolUsage.SkillHits);
+        }
+        else
+        {
+            mcpUsage = Array.Empty<ToolHitCountDto>();
+            skillUsage = Array.Empty<ToolHitCountDto>();
+        }
+
         return new SessionTreeDto(
             SessionId: sessionId,
             Name: name,
@@ -400,8 +417,18 @@ public sealed class RootsTreeBuilder
             StartedAtSource: startedAtSource,
             DurationMs: durationMs,
             ConsumedTokens: consumedTokens,
-            ConsumedTokensIsContextOnly: true);
+            ConsumedTokensIsContextOnly: true,
+            McpUsage: mcpUsage,
+            SkillUsage: skillUsage);
     }
+
+    // Sorted by count descending, then name ascending, per project-ui.md's display convention
+    // for the MCP/SKILLS panels.
+    private static ToolHitCountDto[] ToToolHitCountDtos(IReadOnlyDictionary<string, int> hits) => hits
+        .Select(kv => new ToolHitCountDto(kv.Key, kv.Value))
+        .OrderByDescending(t => t.Count)
+        .ThenBy(t => t.Name, StringComparer.Ordinal)
+        .ToArray();
 
     private AgentTreeDto ToAgentDto(AgentRecord record, string? subagentsDir, DateTime nowUtc)
     {
@@ -749,7 +776,15 @@ public sealed record SessionTreeDto(
     [property: JsonPropertyName("started_at_source")] string? StartedAtSource = null,
     [property: JsonPropertyName("duration_ms")] long? DurationMs = null,
     [property: JsonPropertyName("consumed_tokens")] long? ConsumedTokens = null,
-    [property: JsonPropertyName("consumed_tokens_is_context_only")] bool ConsumedTokensIsContextOnly = false);
+    [property: JsonPropertyName("consumed_tokens_is_context_only")] bool ConsumedTokensIsContextOnly = false,
+    [property: JsonPropertyName("mcp_usage")] ToolHitCountDto[]? McpUsage = null,
+    [property: JsonPropertyName("skill_usage")] ToolHitCountDto[]? SkillUsage = null);
+
+/// <summary>One MCP tool or Skill's hit count for a live session - see
+/// <see cref="SessionState.GetToolUsage"/>.</summary>
+public sealed record ToolHitCountDto(
+    [property: JsonPropertyName("name")] string Name,
+    [property: JsonPropertyName("count")] int Count);
 
 /// <summary>One live sub-agent row nested under a live <see cref="SessionTreeDto"/>.</summary>
 public sealed record AgentTreeDto(

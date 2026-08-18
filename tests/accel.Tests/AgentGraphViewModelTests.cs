@@ -117,13 +117,33 @@ public class AgentGraphViewModelTests
     }
 
     [Fact]
-    public void Rebuild_FocusedSessionAbsentFromSnapshot_SetsNoLongerInTheTreeStatus()
+    public void Rebuild_FocusedSessionNeverSeenInSnapshot_SetsWaitingForSessionToStartStatus()
     {
+        // A session id this instance has never seen in any snapshot yet - e.g. a session just
+        // created whose transcript file Claude Code hasn't written to disk yet - must not be reported
+        // as "no longer in the tree" (that implies it existed and vanished, which is untrue here).
         var (vm, feed, _, writer) = Build();
         writer.SetFocused("session-missing");
         var session = TelemetryFixtures.Session("session-1", isLive: true);
 
         feed.Publish(TelemetryFixtures.Tree(new[] { TelemetryFixtures.Root(@"C:\projects", session) }));
+
+        Assert.Empty(vm.Nodes);
+        Assert.False(vm.HasGraph);
+        Assert.Contains("Waiting for session to start", vm.StatusText);
+    }
+
+    [Fact]
+    public void Rebuild_FocusedSessionSeenThenAbsent_SetsNoLongerInTheTreeStatus()
+    {
+        var (vm, feed, _, writer) = Build();
+        var session = TelemetryFixtures.Session("session-1", isLive: true);
+        writer.SetFocused("session-1");
+
+        feed.Publish(TelemetryFixtures.Tree(new[] { TelemetryFixtures.Root(@"C:\projects", session) }));
+        Assert.True(vm.HasGraph);
+
+        feed.Publish(TelemetryFixtures.EmptyTree());
 
         Assert.Empty(vm.Nodes);
         Assert.False(vm.HasGraph);

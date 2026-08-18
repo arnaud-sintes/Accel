@@ -156,6 +156,35 @@ public sealed class GitPanelViewModelTests : IDisposable
     }
 
     [Fact]
+    public void FocusedFolder_RepoWithNoUpstream_ShowsRepoNameAndChangeCountButNoPushCount()
+    {
+        InitRepo(_root);
+        File.WriteAllText(Path.Combine(_root, "new.txt"), "content");
+
+        var (vm, feed, _, writer) = Build();
+        var session = TelemetryFixtures.Session("session-1", isLive: true) with { Cwd = _root };
+        writer.SetFocused("session-1");
+        feed.Publish(TelemetryFixtures.Tree(new[] { TelemetryFixtures.Root(_root, session) }));
+
+        string expectedRepoName = Path.GetFileName(_root.TrimEnd('\\', '/'));
+        Assert.Equal(expectedRepoName, vm.RepoName);
+        Assert.Equal("1 change(s)", vm.ChangesSummaryText);
+        Assert.Equal(string.Empty, vm.PendingPushSummaryText);
+        Assert.Contains("no upstream", vm.RemoteBranchText);
+    }
+
+    [Fact]
+    public void NothingFocused_ClearsRepoSummaryFields()
+    {
+        var (vm, _, _, _) = Build();
+
+        Assert.Equal(string.Empty, vm.RepoName);
+        Assert.Equal(string.Empty, vm.RemoteBranchText);
+        Assert.Equal(string.Empty, vm.ChangesSummaryText);
+        Assert.Equal(string.Empty, vm.PendingPushSummaryText);
+    }
+
+    [Fact]
     public void GenuineFocusChange_ClearsAnyExpandedFolderOverride()
     {
         string repoB = InitRepo(Path.Combine(_root, "repo-b"));

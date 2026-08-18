@@ -1,6 +1,7 @@
 namespace Accel.App.ViewModels;
 
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Linq;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -31,6 +32,13 @@ public sealed partial class AgentGraphViewModel : ObservableObject, IDisposable
 
     private RootsTreeDto? _latest;
     private bool _disposed;
+
+    // A freshly created session has no transcript file yet - Claude Code only writes one after its
+    // first turn - so MonitorTreeBuilder.Build simply has no row for it for a real, brief window.
+    // Without this, that window looked identical to "the session existed and then vanished," which
+    // is a different (and much more alarming) situation. Tracking every focused id this instance has
+    // actually seen once lets the two be told apart.
+    private readonly HashSet<string> _everSeenSessionIds = new(StringComparer.Ordinal);
 
     public AgentGraphViewModel(
         ITelemetryFeed feed,
@@ -103,10 +111,13 @@ public sealed partial class AgentGraphViewModel : ObservableObject, IDisposable
             Nodes.Clear();
             HasGraph = false;
             HasAgents = false;
-            StatusText = $"Session {TruncateId(focusedId)} is no longer in the tree.";
+            StatusText = _everSeenSessionIds.Contains(focusedId)
+                ? $"Session {TruncateId(focusedId)} is no longer in the tree."
+                : "Waiting for session to start…";
             return;
         }
 
+        _everSeenSessionIds.Add(focusedId);
         ProjectNodes(session);
         HasGraph = true;
         HasAgents = session.Agents.Length > 0;

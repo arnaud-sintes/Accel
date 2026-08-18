@@ -107,8 +107,9 @@ public sealed class HookEntry
     public static bool IsAccelOwned(JsonNode? entryNode) => GetAccelMarkerEvent(entryNode) is not null;
 
     /// <summary>
-    /// Extracts the port from the loopback URL registered in this entry's args
-    /// (used for port-drift detection). Null if no parseable URL is present.
+    /// Extracts the port registered in this entry's args (used for port-drift detection): either
+    /// a loopback URL (older curl-based entries) or a <c>--port &lt;n&gt;</c> pair (self-invoked
+    /// `notify`/statusline-style entries). Null if neither is present.
     /// </summary>
     public static int? GetRegisteredPort(JsonNode? entryNode)
     {
@@ -117,23 +118,31 @@ public sealed class HookEntry
             return null;
         }
 
+        string? previous = null;
         foreach (var arg in args)
         {
             if (arg is not JsonValue v || !v.TryGetValue<string>(out var s) || s is null)
             {
+                previous = null;
                 continue;
             }
 
-            if (!s.StartsWith("http://", StringComparison.OrdinalIgnoreCase) &&
-                !s.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(previous, "--port", StringComparison.Ordinal) &&
+                int.TryParse(s, out var portFromFlag) && portFromFlag > 0)
             {
-                continue;
+                return portFromFlag;
             }
 
-            if (Uri.TryCreate(s, UriKind.Absolute, out var uri) && uri.Port > 0)
+            if (s.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+                s.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
             {
-                return uri.Port;
+                if (Uri.TryCreate(s, UriKind.Absolute, out var uri) && uri.Port > 0)
+                {
+                    return uri.Port;
+                }
             }
+
+            previous = s;
         }
 
         return null;

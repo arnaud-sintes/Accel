@@ -29,14 +29,16 @@ public sealed class AccelHookSpec
     /// <summary>CLI verb Accel registers as the <c>subagentStatusLine</c> command.</summary>
     public const string SubagentStatusLineVerb = "subagent-statusline";
 
+    /// <summary>CLI verb Accel registers for the event hooks (SessionStart/SessionEnd/
+    /// SubagentStart/SubagentStop) — see <c>Cli/NotifyCommand.cs</c>.</summary>
+    public const string NotifyVerb = "notify";
+
     public const string StatusLineField = "statusLine";
     public const string SubagentStatusLineField = "subagentStatusLine";
 
     public const string HooksField = "hooks";
 
     private const string Matcher = "*";
-    private const string CurlExe = "curl.exe";
-    private const string MaxTimeSeconds = "2";
 
     public AccelHookSpec(
         int port,
@@ -93,27 +95,29 @@ public sealed class AccelHookSpec
 
         list.Add(MakeEventHook("SubagentStop", "/events/subagent-stop", timeout: 5, async: null));
 
+        // PostToolUse fires on every tool call and must never block tool execution - async
+        // with a short timeout, same rationale as SessionEnd above.
+        list.Add(MakeEventHook("PostToolUse", "/events/post-tool-use", timeout: 5, async: true));
+
         return list;
     }
 
     private AccelEventHook MakeEventHook(string eventName, string route, int timeout, bool? async)
     {
-        var url = BuildUrl(Port, route);
-
+        // Accel notifies itself (`accel.exe notify --route <route>`) rather than shelling out to
+        // curl.exe: unlike curl, which exits non-zero (with no stderr, since `-s` silences it)
+        // whenever Accel isn't listening yet, NotifyCommand swallows every failure itself, so a
+        // Claude Code session started before the Accel app never surfaces a spurious hook error.
         var entry = new HookEntry
         {
             Type = "command",
-            Command = CurlExe,
+            Command = ExePath,
             Args = new[]
             {
-                // -s -o NUL: never emit stdout; a stray response body could be mis-parsed
-                // as a hook control object.
-                "-s", "-o", "NUL", "--max-time", MaxTimeSeconds,
-                "-X", "POST",
-                url,
-                "-H", "Content-Type: application/json",
+                NotifyVerb,
+                "--port", Port.ToString(CultureInfo.InvariantCulture),
+                "--route", route,
                 "-H", $"{HookEntry.MarkerHeaderPrefix} {eventName}",
-                "-d", "@-",
             },
             Timeout = timeout,
             Async = async,

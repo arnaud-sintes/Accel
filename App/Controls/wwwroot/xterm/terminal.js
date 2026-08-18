@@ -92,6 +92,19 @@
     // smoke-test check exercises the real production path, not a look-alike.
     term.onData(handleTerminalData);
 
+    // xterm.js has no built-in notion of "Shift+Enter = soft newline" - it maps every Enter to a
+    // plain CR ("\r") regardless of modifiers, since that distinction is an app/CLI convention, not
+    // a terminal-emulator one. The Claude Code CLI (Ink-based) expects the conventional ESC-CR
+    // ("\x1b\r") sequence to tell a soft newline apart from a submit, so intercept Shift+Enter here
+    // and send that instead, before xterm's own default handling emits a plain "\r" for it too.
+    term.attachCustomKeyEventHandler(function (event) {
+      if (event.type === "keydown" && event.key === "Enter" && event.shiftKey) {
+        handleTerminalData("\x1b\r");
+        return false;
+      }
+      return true;
+    });
+
     // FitAddon -> resize-over-the-wire: observe the terminal container itself (not `window`,
     // which only fires on the whole WebView2 control's own size changing and would miss e.g. a
     // GridSplitter drag that resizes panel D without resizing the window) so every real layout
@@ -224,6 +237,24 @@
     mySocket.onerror = function () {
       // Cleanup happens in onclose; nothing else actionable client-side today.
     };
+  };
+
+  // Called from C# (TerminalView.DetachPtyAsync) when panel C has no tab left to show (the last
+  // open session's tab just closed) - closes any live socket and wipes the screen buffer so panel
+  // D goes back to a blank black surface instead of freezing on the closed session's last frame.
+  window.accelDetachPty = function () {
+    if (socket) {
+      try {
+        socket.close();
+      } catch (e) {
+        // Best-effort close - the socket is being abandoned either way.
+      }
+      socket = null;
+    }
+
+    if (term) {
+      term.reset();
+    }
   };
 
   // Test-only entry point for terminal-e2e-smoke-test's raw-Ctrl+C-byte check. Calls the exact

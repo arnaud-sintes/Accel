@@ -179,6 +179,16 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
     /// </summary>
     public Func<string, Task>? AttachTerminalAsync { get; set; }
 
+    /// <summary>
+    /// Panel D's detach hook: <c>() =&gt; TerminalView.DetachPtyAsync()</c>, set alongside
+    /// <see cref="AttachTerminalAsync"/> by the same window. Called instead of an attach when
+    /// <see cref="SelectedTab"/> becomes null (the tab that just closed had no neighbour to fall back
+    /// to) - without it, panel D kept showing the closed session's last rendered frame forever, since
+    /// nothing ever told the WebView2 control its live socket was gone. Left null in tests and the
+    /// pure-scaffolding construction path, same as <see cref="AttachTerminalAsync"/>.
+    /// </summary>
+    public Func<Task>? DetachTerminalAsync { get; set; }
+
     /// <summary>Awaitable form of the most recent attach, for the smoke-test/verification paths that need
     /// to know when panel D has finished reattaching. Null before the first selection.</summary>
     public Task? LastAttach { get; private set; }
@@ -202,7 +212,17 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
         // The single write path for the whole app.
         _selection.SetFocused(value?.TabId);
 
-        if (value is null || AttachTerminalAsync is null)
+        if (value is null)
+        {
+            if (DetachTerminalAsync is not null)
+            {
+                LastAttach = DetachSafelyAsync();
+            }
+
+            return;
+        }
+
+        if (AttachTerminalAsync is null)
         {
             return;
         }
@@ -265,12 +285,23 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
         }
 
         RemoveTab(tab);
+        TabClosed?.Invoke(this, tab.TabId);
 
         // CloseAsync never throws and reports failures as data (PtyCloseResult); there is nothing
         // actionable for the tab strip in the result today - the tab is gone either way, and a
         // force-kill/failed-kill is the registry's own concern (and its logging surface, P3-T4).
         await _host.CloseAsync(tab.TabId).ConfigureAwait(true);
     }
+
+    /// <summary>
+    /// Raised right after a tab is removed from the strip (before the underlying session is actually
+    /// torn down). Panel A derives its rows purely from on-disk transcript files (never from whether
+    /// a tab is open - see <see cref="RootsPanelViewModel"/>'s remarks), so closing a tab should never
+    /// make its row vanish; this exists purely so Program.cs's composition root can force an
+    /// immediate panel-A refresh instead of leaving the row's IsRunning state stale until the next
+    /// telemetry tick - the same reasoning as MainWindow.RemoveSession_Click's own refresh call.
+    /// </summary>
+    public event EventHandler<string>? TabClosed;
 
     /// <summary>String overload for call sites that only have the id (e.g. a keyboard shortcut or a
     /// scripted verification), matching the task's <c>CloseTab(tabId)</c> shape.</summary>
@@ -406,6 +437,24 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
         }
     }
 
+    private async Task DetachSafelyAsync()
+    {
+        try
+        {
+            var detach = DetachTerminalAsync;
+            if (detach is not null)
+            {
+                await detach().ConfigureAwait(true);
+            }
+        }
+        catch
+        {
+            // Same posture as AttachSafelyAsync: a failed detach (WebView2 not ready, already
+            // disposed) must not crash the UI thread - panel D is left showing whatever it last did,
+            // which is no worse than before this hook existed.
+        }
+    }
+
     /// <summary>
     /// The registry's self-exit/teardown notification. <see cref="PtySessionExitReason.ChildExited"/>
     /// means the session ended by itself, so the tab is kept and flagged (never silently removed - the
@@ -484,6 +533,18 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
 
     private TabViewModel? Find(string tabId) =>
         Tabs.FirstOrDefault(t => string.Equals(t.TabId, tabId, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>Updates an already-open tab's title in place - used after a successful <c>/rename</c>
+    /// (see MainWindow's <c>RenameSession_Click</c>) so the tab strip picks up the new name immediately
+    /// rather than waiting for panel A's next telemetry tick. A no-op if <paramref name="tabId"/> isn't
+    /// currently open.</summary>
+    public void RenameTab(string tabId, string newTitle)
+    {
+        if (Find(tabId) is { } tab)
+        {
+            tab.Title = newTitle;
+        }
+    }
 
     /// <summary>Unsubscribes from the registry. Deliberately does <b>not</b> close any session: the
     /// registry owns those, and app-exit teardown is P3-T4's <c>CloseAllAsync</c>/<c>Dispose</c>.</summary>

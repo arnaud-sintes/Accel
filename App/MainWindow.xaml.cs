@@ -146,6 +146,29 @@ public partial class MainWindow : Window
         AgentGraphViewModel? agentGraph,
         FilesPanelViewModel? filesPanel,
         GitPanelViewModel? gitPanel)
+        : this(rootsPanel, ptyRouteRegistry, ptyWebSocketPort, tabs, sessionRegistry, selection, agentGraph, filesPanel, gitPanel, null)
+    {
+    }
+
+    /// <summary>
+    /// Panel A's MCP/SKILLS section: <paramref name="mcpSkillsPanel"/> is one
+    /// <see cref="McpSkillsPanelViewModel"/> assigned as the DataContext of <i>both</i>
+    /// <c>McpSectionRoot</c> and <c>SkillsSectionRoot</c> - one focused-session lookup feeding two
+    /// collections, never a filtered view of <paramref name="rootsPanel"/>'s tree (same rule panel B's
+    /// two sections follow). Null degrades like every other optional parameter: both mini-panels keep
+    /// no DataContext and render their empty placeholders.
+    /// </summary>
+    public MainWindow(
+        RootsPanelViewModel? rootsPanel,
+        PtyRouteRegistry? ptyRouteRegistry,
+        int ptyWebSocketPort,
+        TabsViewModel? tabs,
+        PtyRegistry? sessionRegistry,
+        ISessionSelectionService? selection,
+        AgentGraphViewModel? agentGraph,
+        FilesPanelViewModel? filesPanel,
+        GitPanelViewModel? gitPanel,
+        McpSkillsPanelViewModel? mcpSkillsPanel)
     {
         InitializeComponent();
 
@@ -172,6 +195,11 @@ public partial class MainWindow : Window
             // that knows both the control and the port, so the attach hook is wired here rather than
             // making the ViewModel aware of WPF.
             tabs.AttachTerminalAsync = tabId => Terminal.AttachPtyAsync(tabId, _ptyWebSocketPort);
+
+            // Closing the last open tab (no neighbour to fall back to) selects null - without this,
+            // panel D kept rendering the closed session's last frame forever (TabsViewModel's
+            // DetachTerminalAsync remarks).
+            tabs.DetachTerminalAsync = () => Terminal.DetachPtyAsync();
         }
 
         if (filesPanel is not null)
@@ -194,6 +222,16 @@ public partial class MainWindow : Window
             // Scoped to panel B's git section only - see the comment above.
             GitPanelVm = gitPanel;
             GitSectionRoot.DataContext = gitPanel;
+        }
+
+        if (mcpSkillsPanel is not null)
+        {
+            // One ViewModel, two binding roots: the MCP and SKILLS halves of panel A's bottom third
+            // read two collections off the same focused-session lookup, so splitting them across two
+            // ViewModels would just duplicate that lookup.
+            McpSkillsPanelVm = mcpSkillsPanel;
+            McpSectionRoot.DataContext = mcpSkillsPanel;
+            SkillsSectionRoot.DataContext = mcpSkillsPanel;
         }
 
         if (agentGraph is not null)
@@ -577,6 +615,11 @@ public partial class MainWindow : Window
     /// test can assert against it directly, the same way <see cref="FilesPanelVm"/> is.</summary>
     public GitPanelViewModel? GitPanelVm { get; }
 
+    /// <summary>Panel A's MCP/SKILLS section ViewModel, or null when the window was constructed
+    /// without one - every overload but the ten-parameter one above. Exposed so a smoke test can
+    /// assert against it directly, the same way <see cref="GitPanelVm"/> is.</summary>
+    public McpSkillsPanelViewModel? McpSkillsPanelVm { get; }
+
     /// <summary>Panel C's ViewModel (the tab strip), or null in the scaffolding paths.</summary>
     public TabsViewModel? Tabs { get; }
 
@@ -689,6 +732,15 @@ public partial class MainWindow : Window
         // the constructor). Nothing is awaited: AddTab is synchronous and the attach is fire-and-forget
         // by design, exactly as P2-T5b's own call site was.
         Tabs?.AddTab(tabId, string.IsNullOrWhiteSpace(viewModel.DisplayName) ? null : viewModel.DisplayName);
+
+        // Panel A's row name comes from RootsTreeBuilder.BuildSessionDto's own tiered ladder
+        // (accel_override > live /rename > transcript ai-title > first user message > truncated id),
+        // none of which know about the dialog's chosen name - without this, the new tab and its
+        // panel A row would show two different names until a live /rename happened to align them.
+        if (!string.IsNullOrWhiteSpace(viewModel.DisplayName))
+        {
+            RootsPanel?.SetSessionDisplayName(tabId, viewModel.DisplayName);
+        }
     }
 
     /// <summary>
@@ -741,7 +793,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        var dialogViewModel = new RenameSessionDialogViewModel(node.Text);
+        var dialogViewModel = new RenameSessionDialogViewModel(node.DisplayText);
         var dialog = new RenameSessionDialog(dialogViewModel) { Owner = this };
         dialog.ShowDialog();
 
@@ -761,7 +813,19 @@ public partial class MainWindow : Window
         if (result.Outcome == SlashCommandOutcome.TimedOut)
         {
             ShowTransientWarning($"Rename to \"{newName}\" may not have applied - please check the session.");
+            return;
         }
+
+        // node.Key is the session id, which equals the tab's TabId (see CreateSession_Click's
+        // remarks on why that equality matters) - the tab strip has no other way to learn about a
+        // rename that went straight into the session's stdin, so it must be told directly here.
+        Tabs?.RenameTab(node.Key, newName);
+
+        // /rename only ever lands in the live status-line snapshot - RootsTreeBuilder stops
+        // trusting that the moment the session ends (RootsTreeRoute.PersistLiveRenames captures it
+        // durably on the next telemetry tick too, but writing it through immediately here means the
+        // name survives even if the tab is closed before that tick lands).
+        RootsPanel?.SetSessionDisplayName(node.Key, newName);
     }
 
     /// <summary>
@@ -799,7 +863,13 @@ public partial class MainWindow : Window
     /// resuming the same session must never produce a second, differently-keyed tab for it, so panel A's
     /// row and the tab strip agree on identity exactly the way a freshly created session's do.
     /// </summary>
-    private void ResumeSession_Click(object sender, RoutedEventArgs e) => ResumeSessionCore(sender, fork: false);
+    private void ResumeSession_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as MenuItem)?.Tag is RootsPanelNodeViewModel node)
+        {
+            ResumeSessionCore(node, fork: false);
+        }
+    }
 
     /// <summary>
     /// P4-T4's fork variant - <c>claude --resume &lt;id&gt; --fork-session</c>. Claude Code itself chooses
@@ -813,11 +883,22 @@ public partial class MainWindow : Window
     /// wording ("decide tab identity... so the registry and panel A don't show duplicates") leaves
     /// genuinely unresolved without Claude Code offering a way to assign the forked session's id.
     /// </summary>
-    private void ResumeSessionAsFork_Click(object sender, RoutedEventArgs e) => ResumeSessionCore(sender, fork: true);
-
-    private void ResumeSessionCore(object sender, bool fork)
+    private void ResumeSessionAsFork_Click(object sender, RoutedEventArgs e)
     {
-        if ((sender as MenuItem)?.Tag is not RootsPanelNodeViewModel node || node.Kind != RootsPanelNodeKind.Session)
+        if ((sender as MenuItem)?.Tag is RootsPanelNodeViewModel node)
+        {
+            ResumeSessionCore(node, fork: true);
+        }
+    }
+
+    /// <summary>
+    /// Also the target of the sleeping-session double-click gesture (<see cref="SessionRow_MouseDoubleClick"/>),
+    /// which calls this with <c>fork: false</c> - "attach" for a session with no running process just is
+    /// a plain resume, reusing the exact same "already open? select instead" guard below.
+    /// </summary>
+    private void ResumeSessionCore(RootsPanelNodeViewModel node, bool fork)
+    {
+        if (node.Kind != RootsPanelNodeKind.Session)
         {
             return;
         }
@@ -917,6 +998,48 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
+    /// Panel A's session-row double-click gesture: a sleeping (not <see cref="RootsPanelNodeViewModel.IsRunning"/>)
+    /// session attaches - i.e. resumes in place, exactly <see cref="ResumeSession_Click"/>'s action, including
+    /// its "already open? select instead" guard - while an active session stops, exactly
+    /// <see cref="TabItem_MouseDoubleClick"/>'s confirm-then-stop gesture on the strip. Root/Agent/Placeholder
+    /// rows fall through untouched so the TreeView's own default double-click-to-expand keeps working there.
+    /// </summary>
+    private void SessionRow_MouseDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if ((sender as TreeViewItem)?.DataContext is not RootsPanelNodeViewModel node || node.Kind != RootsPanelNodeKind.Session)
+        {
+            return;
+        }
+
+        e.Handled = true;
+
+        if (!node.IsRunning)
+        {
+            ResumeSessionCore(node, fork: false);
+            return;
+        }
+
+        var tab = Tabs?.Tabs.FirstOrDefault(t => t.TabId == node.Key);
+        if (tab is null || tab.HasEnded)
+        {
+            return;
+        }
+
+        bool confirmedStop = AccelMessageDialog.ShowConfirm(
+            this,
+            $"Stop \"{tab.Title}\"? The session's process will be terminated. The tab stays open so you can still see its output.",
+            "Stop session",
+            AccelDialogIcon.Warning);
+
+        if (!confirmedStop)
+        {
+            return;
+        }
+
+        Tabs?.StopTabCommand.Execute(tab);
+    }
+
+    /// <summary>
     /// P4-T3/T3b's UI surface: removes a session's on-disk data via <see cref="SessionRemover.Plan"/> +
     /// <see cref="SessionRemoverExecutor.Execute"/>, recycle-bin only - there is no UI path to
     /// <see cref="SessionRemovalMode.PermanentDelete"/> from this menu.
@@ -990,6 +1113,7 @@ public partial class MainWindow : Window
 
         if (result.FullyRemoved)
         {
+            RootsPanel?.RefreshCommand.Execute(null);
             ShowTransientWarning($"\"{node.Text}\" was removed.");
             return;
         }

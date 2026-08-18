@@ -4,7 +4,7 @@
         xmlns:controls="clr-namespace:Accel.App.Controls"
         Title="Accel" Height="220" Width="440" MinHeight="180" SizeToContent="Height"
         WindowStartupLocation="CenterOwner" ResizeMode="NoResize"
-        ShowInTaskbar="False" WindowStyle="None">
+        ShowInTaskbar="False" WindowStyle="None" Style="{StaticResource DialogWindowStyle}">
     <!--
         The themed replacement for every native System.Windows.MessageBox.Show call in the app -
         same elevation ladder (Theme.xaml SurfaceBrush body under a CustomTitleBar) as
@@ -15,6 +15,7 @@
     <Window.Resources>
         <ResourceDictionary Source="Theme.xaml" />
     </Window.Resources>
+    <Border BorderBrush="{StaticResource WindowBorderBrush}" BorderThickness="1">
     <DockPanel LastChildFill="True" Background="{StaticResource SurfaceBrush}">
         <controls:CustomTitleBar x:Name="TitleBar" DockPanel.Dock="Top" TitleText="Accel"
                                   ShowMinimizeButton="False" ShowMaximizeButton="False" />
@@ -41,4 +42,5 @@
             </StackPanel>
         </Grid>
     </DockPanel>
+    </Border>
 </Window>

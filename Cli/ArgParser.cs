@@ -6,17 +6,17 @@ using Accel.Settings;
 /// <summary>The verb selected on the command line. <see cref="Unknown"/> is a distinct state
 /// so the caller can print a usage error without crashing.
 ///
-/// Post-combined-app refactor: the only "verbs" left are the two internal ones Claude Code
-/// itself invokes as short-lived child processes (<see cref="StatusLine"/>/
-/// <see cref="SubagentStatusLine"/>), plus the user-facing <see cref="Doctor"/> diagnostic —
-/// everything else (install + server + UI) now happens under the single default
-/// <see cref="Start"/> verb, selected whenever no recognised verb token is the first argument
-/// (including no arguments at all).</summary>
+/// Post-combined-app refactor: the only "verbs" left are the internal ones Claude Code itself
+/// invokes as short-lived child processes (<see cref="StatusLine"/>/<see cref="SubagentStatusLine"/>/
+/// <see cref="Notify"/>), plus the user-facing <see cref="Doctor"/> diagnostic — everything else
+/// (install + server + UI) now happens under the single default <see cref="Start"/> verb, selected
+/// whenever no recognised verb token is the first argument (including no arguments at all).</summary>
 public enum Verb
 {
     Start,
     StatusLine,
     SubagentStatusLine,
+    Notify,
     Doctor,
     Unknown,
 }
@@ -50,6 +50,10 @@ public sealed class ParsedCommand
 
     /// <summary>The raw, unrecognised token — only set when <see cref="Verb"/> is <see cref="Verb.Unknown"/>.</summary>
     public string? UnknownVerbText { get; init; }
+
+    /// <summary>`--route &lt;path&gt;`: the event route to POST to. Only meaningful when
+    /// <see cref="Verb"/> is <see cref="Verb.Notify"/>.</summary>
+    public string? Route { get; init; }
 }
 
 /// <summary>
@@ -64,6 +68,7 @@ public static class ArgParser
     private const string UninstallFlag = "--uninstall";
     private const string DumpRawFlag = "--dump-raw";
     private const string VerboseFlag = "--verbose";
+    private const string RouteFlag = "--route";
 
     /// <summary>Parses argv. Never throws — an unparseable `--port` value is ignored (default kept).</summary>
     public static ParsedCommand Parse(string[] args)
@@ -84,6 +89,7 @@ public static class ArgParser
         var uninstall = false;
         var verbose = false;
         string? dumpRawDir = null;
+        string? route = null;
 
         for (; i < args.Length; i++)
         {
@@ -109,6 +115,11 @@ public static class ArgParser
                 dumpRawDir = args[i + 1];
                 i++;
             }
+            else if (string.Equals(args[i], RouteFlag, StringComparison.Ordinal) && i + 1 < args.Length)
+            {
+                route = args[i + 1];
+                i++;
+            }
         }
 
         return new ParsedCommand
@@ -119,6 +130,7 @@ public static class ArgParser
             DumpRawDir = dumpRawDir,
             Verbose = verbose,
             UnknownVerbText = unknownText,
+            Route = route,
         };
     }
 
@@ -126,6 +138,7 @@ public static class ArgParser
     {
         "statusline" => (Verb.StatusLine, null),
         "subagent-statusline" => (Verb.SubagentStatusLine, null),
+        "notify" => (Verb.Notify, null),
         "doctor" => (Verb.Doctor, null),
         _ => (Verb.Unknown, token),
     };

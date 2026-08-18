@@ -429,6 +429,127 @@ public class MetricsPipelineTests : IAsyncLifetime
         Assert.Equal("first_seen", record!.StartedAtSource);
     }
 
+    // ---- PostToolUse: MCP/Skill hit-count tracking -------------------------------------
+
+    [Fact]
+    public async Task PostToolUse_SkillWithToolInputSkillName_IncrementsSkillHitByThatName()
+    {
+        string sessionId = $"session-{Guid.NewGuid():N}";
+
+        string payload = JsonSerializer.Serialize(new Dictionary<string, object?>
+        {
+            ["session_id"] = sessionId,
+            ["tool_name"] = "Skill",
+            ["tool_input"] = new Dictionary<string, object?> { ["skill"] = "code-review" },
+        });
+
+        var response = await _client!.PostAsync(
+            "/events/post-tool-use",
+            new StringContent(payload, Encoding.UTF8, "application/json"));
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+
+        var usage = _server!.State.GetToolUsage(sessionId);
+        Assert.Equal(1, usage.SkillHits["code-review"]);
+        Assert.Empty(usage.McpHits);
+    }
+
+    [Fact]
+    public async Task PostToolUse_SkillWithoutToolInputSkillName_FallsBackToLiteralSkill()
+    {
+        string sessionId = $"session-{Guid.NewGuid():N}";
+
+        string payload = JsonSerializer.Serialize(new Dictionary<string, object?>
+        {
+            ["session_id"] = sessionId,
+            ["tool_name"] = "Skill",
+        });
+
+        var response = await _client!.PostAsync(
+            "/events/post-tool-use",
+            new StringContent(payload, Encoding.UTF8, "application/json"));
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+
+        var usage = _server!.State.GetToolUsage(sessionId);
+        Assert.Equal(1, usage.SkillHits["Skill"]);
+    }
+
+    [Fact]
+    public async Task PostToolUse_McpPrefixedTool_IncrementsMcpHitWithPrefixStripped()
+    {
+        string sessionId = $"session-{Guid.NewGuid():N}";
+
+        string payload = JsonSerializer.Serialize(new Dictionary<string, object?>
+        {
+            ["session_id"] = sessionId,
+            ["tool_name"] = "mcp__serena__find_symbol",
+        });
+
+        var response = await _client!.PostAsync(
+            "/events/post-tool-use",
+            new StringContent(payload, Encoding.UTF8, "application/json"));
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+
+        var usage = _server!.State.GetToolUsage(sessionId);
+        Assert.Equal(1, usage.McpHits["serena__find_symbol"]);
+        Assert.Empty(usage.SkillHits);
+    }
+
+    [Fact]
+    public async Task PostToolUse_NonMcpNonSkillToolName_IsIgnored()
+    {
+        string sessionId = $"session-{Guid.NewGuid():N}";
+
+        string payload = JsonSerializer.Serialize(new Dictionary<string, object?>
+        {
+            ["session_id"] = sessionId,
+            ["tool_name"] = "Read",
+        });
+
+        var response = await _client!.PostAsync(
+            "/events/post-tool-use",
+            new StringContent(payload, Encoding.UTF8, "application/json"));
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+
+        var usage = _server!.State.GetToolUsage(sessionId);
+        Assert.Empty(usage.McpHits);
+        Assert.Empty(usage.SkillHits);
+    }
+
+    [Fact]
+    public async Task PostToolUse_MalformedJson_DoesNotThrow_Returns204()
+    {
+        var response = await _client!.PostAsync(
+            "/events/post-tool-use",
+            new StringContent("{not valid json", Encoding.UTF8, "application/json"));
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task PostToolUse_MissingSessionId_IsNoOp()
+    {
+        string payload = JsonSerializer.Serialize(new Dictionary<string, object?>
+        {
+            ["tool_name"] = "mcp__serena__find_symbol",
+        });
+
+        var response = await _client!.PostAsync(
+            "/events/post-tool-use",
+            new StringContent(payload, Encoding.UTF8, "application/json"));
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+
+        // No session_id -> nothing to key the record on; must not throw and must not create
+        // a phantom empty-string session bucket.
+        var usage = _server!.State.GetToolUsage(string.Empty);
+        Assert.Empty(usage.McpHits);
+        Assert.Empty(usage.SkillHits);
+    }
+
     [Fact]
     public async Task SubagentStop_MissingAgentTranscriptPath_StillEndsAgent_NoThrow()
     {

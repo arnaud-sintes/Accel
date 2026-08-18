@@ -3,17 +3,22 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              SnapsToDevicePixels="True">
     <!--
-        A single dot gauge next to the model badge: Level 0 (unknown/irrelevant) shows only the
-        hollow, unfilled TrackRing outline - "visibly different from no control at all" without
-        implying any actual effort value. Level 1-4 (see EffortBarLevel.Resolve) shows a solid
-        filled disc colored along a green -> amber -> red ramp (EffortBarsControl.xaml.cs's
-        LevelBrush) - low effort reads as calm/green, max effort reads as hot/red, at a glance.
-        Colour is not this state's only signal for non-visual users: AutomationProperties.Name
-        (set in ApplyLevel) always carries the same "Effort level N of 4"/"unknown" text a screen
-        reader or accessibility inspector would use instead of colour.
+        Effort as a moon phase: Level 0 (unknown/irrelevant) shows only the hollow TrackRing
+        outline - "visibly different from no control at all" without implying any actual effort
+        value. Level 1-4 (see EffortBarLevel.Resolve) fills LitPath with a waxing moon shape that
+        grows from a thin crescent (level 1) through half (level 2) and gibbous (level 3) to a
+        full disc (level 4) - see EffortBarsControl.xaml.cs's ApplyLevel for how the crescent
+        geometry is computed.
     -->
     <Grid Width="14" Height="14" VerticalAlignment="Bottom">
-        <Ellipse x:Name="TrackRing" Width="12" Height="12" StrokeThickness="2" Fill="Transparent" />
-        <Ellipse x:Name="FillDisc" Width="12" Height="12" Visibility="Collapsed" />
+        <Ellipse x:Name="TrackRing" Width="12" Height="12" StrokeThickness="1.25" Fill="Transparent" />
+        <!--
+            Width/Height must match TrackRing's exactly: Path has no intrinsic size of its own, so
+            without an explicit size it defaults to Stretch-filling the full 14x14 Grid cell (Shape's
+            default Stretch="Fill" then scales+repositions the 12x12 geometry to fill that larger box)
+            while TrackRing's explicit 12x12 size gets centered in the same cell - the two would then
+            disagree on both size and offset, showing as the moon fill drifting from the ring's edge.
+        -->
+        <Path x:Name="LitPath" Width="12" Height="12" Visibility="Collapsed" />
     </Grid>
 </UserControl>

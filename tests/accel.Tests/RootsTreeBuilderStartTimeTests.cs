@@ -186,6 +186,54 @@ public class RootsTreeBuilderStartTimeTests : IDisposable
     }
 
     [Fact]
+    public void LiveSession_WithRecordedToolUsage_PopulatesSortedMcpAndSkillUsageArrays()
+    {
+        string sessionId = $"session-{Guid.NewGuid():N}";
+
+        WriteSessionFile("C--projects", sessionId, new[] { UserLine("hi", @"C:\projects") });
+
+        var state = new SessionState();
+        state.UpdateSessionSnapshot(new SessionSnapshot(
+            SessionId: sessionId, ModelId: "claude-opus-5", ModelDisplayName: "Opus", EffortLevel: "high",
+            ContextWindowSize: 200_000, UsedTokens: 1000, UsedPercentage: 0.5, RemainingPercentage: 99.5,
+            CostUsd: null, PayloadVersion: null, ReceivedAtUtc: DateTime.UtcNow));
+
+        state.IncrementToolUsage(sessionId, ToolUsageKind.Mcp, "serena__find_symbol");
+        state.IncrementToolUsage(sessionId, ToolUsageKind.Mcp, "serena__find_symbol");
+        state.IncrementToolUsage(sessionId, ToolUsageKind.Mcp, "jira__jira_search");
+        state.IncrementToolUsage(sessionId, ToolUsageKind.Skill, "code-review");
+
+        var builder = new RootsTreeBuilder();
+        var result = builder.Build(new[] { @"C:\projects" }, state, _fixtureRoot);
+
+        var session = result.Roots.Single(r => r.Path == @"C:\projects").Sessions.Single(s => s.SessionId == sessionId);
+
+        Assert.Equal(
+            new[] { new ToolHitCountDto("serena__find_symbol", 2), new ToolHitCountDto("jira__jira_search", 1) },
+            session.McpUsage);
+        Assert.Equal(new[] { new ToolHitCountDto("code-review", 1) }, session.SkillUsage);
+    }
+
+    [Fact]
+    public void HistoricalSession_WithNoLiveState_GetsEmptyMcpAndSkillUsageArrays()
+    {
+        string sessionId = $"session-{Guid.NewGuid():N}";
+
+        WriteSessionFile("C--projects", sessionId, new[] { UserLine("hi", @"C:\projects") });
+
+        var state = new SessionState();
+
+        var builder = new RootsTreeBuilder();
+        var result = builder.Build(new[] { @"C:\projects" }, state, _fixtureRoot);
+
+        var session = result.Roots.Single(r => r.Path == @"C:\projects").Sessions.Single(s => s.SessionId == sessionId);
+
+        Assert.False(session.IsLive);
+        Assert.Empty(session.McpUsage!);
+        Assert.Empty(session.SkillUsage!);
+    }
+
+    [Fact]
     public void AgentStart_UnattributedAgentWithNoSessionDir_DegradesToNull()
     {
         string agentId = $"agent-{Guid.NewGuid():N}";

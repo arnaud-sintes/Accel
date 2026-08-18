@@ -86,6 +86,28 @@ public static class RootFoldersConfig
     };
 
     /// <summary>
+    /// The path every write should target: whichever of <see cref="DefaultCandidatePaths"/>
+    /// <see cref="Load()"/>'s "first that exists" probe would actually read back, or candidate 1
+    /// (the durable home) if none exist yet. Writing to a fixed candidate while a *different*,
+    /// pre-existing candidate (e.g. a legacy <c>folder.json</c> next to the exe) is the one every
+    /// read keeps resolving to would silently split writes and reads onto two different files -
+    /// a change written here would never be seen by a reader, and vice versa.
+    /// </summary>
+    public static string ResolveWritePath()
+    {
+        var candidates = DefaultCandidatePaths();
+        foreach (string path in candidates)
+        {
+            if (File.Exists(path))
+            {
+                return path;
+            }
+        }
+
+        return candidates[0];
+    }
+
+    /// <summary>
     /// Core probe/parse logic, taking an explicit candidate list (in probe order) so tests can
     /// exercise every branch (missing/malformed/valid, at each of the three slots) without
     /// depending on real machine state.

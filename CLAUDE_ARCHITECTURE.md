@@ -103,15 +103,19 @@ directly (real child processes, real WebView2/WPF) rather than being unit tests.
 
 ### 2.2 `Settings/` — merging Accel's hooks into Claude Code's `settings.json`
 
-Two independently modeled, never-conflated mechanisms: (1) `hooks` **event entries** (exec-form curl
-POSTs) and (2) the top-level `statusLine`/`subagentStatusLine` **fields**.
+Two independently modeled, never-conflated mechanisms: (1) `hooks` **event entries** (exec-form,
+self-invoked `accel.exe notify` calls) and (2) the top-level `statusLine`/`subagentStatusLine`
+**fields**.
 
 - **`AccelHookSpec.cs`** — the complete expected set of Accel's settings.json entries for a given
   `(port, exePath)`. Always includes `SessionStart`/`SessionEnd`/`SubagentStop`; conditionally includes
   `SubagentStart` when version-gated support is present. Builds each hook as
-  `HookEntry{Command="curl.exe", Args=[... -H "X-Accel-Hook: <Event>" ...]}`. `statusLine`/
-  `subagentStatusLine` fields point back at Accel itself (`"<exePath>" statusline --port <port>`), since
-  there's no exec form for those.
+  `HookEntry{Command=<exePath>, Args=["notify", "--port", <port>, "--route", <route>, "-H",
+  "X-Accel-Hook: <Event>"]}` — Accel notifies *itself* rather than shelling out to `curl.exe`, so
+  `Cli/NotifyCommand.cs` can swallow every failure (Accel not running yet, connection refused, ...)
+  and always exit 0, instead of a bare `curl -s` failing non-blocking-but-visibly whenever Accel
+  isn't up when a session starts. `statusLine`/`subagentStatusLine` fields point back at Accel
+  itself too (`"<exePath>" statusline --port <port>`), since there's no exec form for those.
 - **`HookEntry.cs`** — always exec form (never shell form) to avoid quoting ambiguity/injection.
   Ownership of a hook entry is decided **purely** by presence of the `X-Accel-Hook: <Event>` marker header
   arg — never by assuming Accel owns a whole matcher group or the whole `hooks` object.
@@ -373,7 +377,8 @@ and guarantees they don't outlive the app even across crashes.
 
 ### 3.1 Hook event → UI-ready state
 
-1. A Claude Code hook fires → `curl.exe` POSTs JSON to `http://127.0.0.1:<port>/events/<name>` (or
+1. A Claude Code hook fires → `accel.exe notify` (self-invoked, see `Cli/NotifyCommand.cs`) POSTs
+   JSON to `http://127.0.0.1:<port>/events/<name>` (or
    `/events/status-line` / `/events/subagent-status-line`), per the entries `Settings.SettingsMerger`
    installed into `settings.json`.
 2. `Server/EventServer.cs`'s mapped route reads the body, optionally writes it via
@@ -461,10 +466,10 @@ caller removes the `PtyPidRegistry` entry.
   planning is pure and re-validated at execute time rather than trusted, specifically to defend against
   TOCTOU issues (symlink/junction swaps, a session going live mid-delete) — the plan can go stale between
   being computed and being executed.
-- **Exec-form-only hook commands.** `HookEntry` never uses shell form for the curl-based event hooks,
-  eliminating an entire class of quoting/injection bugs across `cmd.exe`/PowerShell/sh at the cost of
-  needing a separate `ShellCommandRunner` specifically for chaining the pre-existing `statusLine` field
-  (which Claude Code only supports as a shell string).
+- **Exec-form-only hook commands.** `HookEntry` never uses shell form for the self-invoked
+  `notify` event hooks, eliminating an entire class of quoting/injection bugs across
+  `cmd.exe`/PowerShell/sh at the cost of needing a separate `ShellCommandRunner` specifically for
+  chaining the pre-existing `statusLine` field (which Claude Code only supports as a shell string).
 - **Single shared `TerminalView`/WebView2 instance**, reattached per tab, rather than one per tab — an
   explicit resource-vs-scrollback tradeoff (each WebView2 instance costs multiple OS processes + GPU
   surface).

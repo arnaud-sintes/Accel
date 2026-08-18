@@ -96,6 +96,9 @@ switch (parsed.Verb)
     case Verb.SubagentStatusLine:
         return await SubagentStatusLineCommand.RunAsync(parsed.Port);
 
+    case Verb.Notify:
+        return await NotifyCommand.RunAsync(parsed.Port, parsed.Route ?? string.Empty);
+
     case Verb.Doctor:
         return DoctorCommand.Run(Console.Out);
 
@@ -153,6 +156,38 @@ static async Task<int> RunCombinedAsync(int port, string? dumpRawDir, bool verbo
             dispatcher,
             new Accel.App.Services.DispatcherDebounceTimer(System.Windows.Threading.Dispatcher.CurrentDispatcher));
 
+        // A session's live "status_line" name (any /rename - Accel's own or one typed directly
+        // into a `claude` terminal Accel never opened a tab for, since the rename hook is
+        // installed globally, not per-tab) is otherwise only ever a snapshot of a still-running
+        // process: RootsTreeBuilder.BuildSessionDto deliberately stops trusting it the moment the
+        // session ends, so without writing it through to the durable accel_override tier the
+        // instant it's first observed live, that name is lost for good as soon as the process
+        // exits or Accel restarts. Wired here (rather than into RootsTreeRoute/RootsPanelViewModel
+        // themselves) so it only ever runs against the real config file in the real running app,
+        // never against a test double's fixture path.
+        feed.SnapshotAvailable += PersistLiveRenames;
+
+        void PersistLiveRenames(Accel.Metrics.RootsTreeDto tree)
+        {
+            string configPath = Accel.Server.RootFoldersConfig.ResolveWritePath();
+            var overrides = Accel.Server.RootFoldersConfig.LoadFull(new[] { configPath }).Sessions;
+
+            foreach (var s in tree.Roots.SelectMany(r => r.Sessions).Concat(tree.UnattributedSessions))
+            {
+                if (s.NameSource != "status_line")
+                {
+                    continue;
+                }
+
+                bool alreadyCaptured = overrides.TryGetValue(s.SessionId, out var existing)
+                    && string.Equals(existing.DisplayName, s.Name, StringComparison.Ordinal);
+                if (!alreadyCaptured)
+                {
+                    Accel.App.Services.RootFolderEditor.SetSessionDisplayName(configPath, s.SessionId, s.Name);
+                }
+            }
+        }
+
         // The selection hub is created here, its single write capability goes to panel C's
         // TabsViewModel and nothing else, and panel A gets the read-only interface (locked-in
         // decision 8 - TabsViewModel is the only writer of FocusedSessionId).
@@ -174,6 +209,9 @@ static async Task<int> RunCombinedAsync(int port, string? dumpRawDir, bool verbo
         // tree switches this section to that repo (GitPanelViewModel's remarks).
         var gitPanel = new Accel.App.ViewModels.GitPanelViewModel(feed, dispatcher, selection, rootsPanel);
         filesPanel.FolderExpanded += gitPanel.OnFilesPanelFolderExpanded;
+        // Mirror image of the above: minimizing a folder the git section is currently following must
+        // move it off that now-hidden subtree (GitPanelViewModel.OnFilesPanelFolderCollapsed's remarks).
+        filesPanel.FolderCollapsed += gitPanel.OnFilesPanelFolderCollapsed;
         // statusPollInterval: re-checks the selected tab's Claude Code status file for a session id
         // that has drifted from the launch-time tabId (e.g. the user typed /clear) - see
         // TabsViewModel.PollFocusedSessionId's remarks for why panel A would otherwise show that
@@ -184,7 +222,17 @@ static async Task<int> RunCombinedAsync(int port, string? dumpRawDir, bool verbo
             dispatcher,
             statusPollInterval: TimeSpan.FromSeconds(1));
 
-        mainWindow = new Accel.App.MainWindow(rootsPanel, server.PtySessions, port, tabs, sessionRegistry, selection, agentGraph, filesPanel, gitPanel);
+        // Closing a tab must not make panel A's row for that session vanish - it's still on disk,
+        // just no longer open here - so force an immediate refresh instead of leaving it stale until
+        // the next telemetry tick (same reasoning as RemoveSession_Click's own refresh call).
+        tabs.TabClosed += (_, _) => rootsPanel.RefreshCommand.Execute(null);
+
+        // Panel A's bottom third: the focused session's MCP-tool / Skill hit counts. Another reader on
+        // the same feed/dispatcher/selection triple - all its data already rides on the pushed
+        // SessionTreeDto (mcp_usage/skill_usage), so it does no I/O of its own.
+        var mcpSkillsPanel = new Accel.App.ViewModels.McpSkillsPanelViewModel(feed, dispatcher, selection);
+
+        mainWindow = new Accel.App.MainWindow(rootsPanel, server.PtySessions, port, tabs, sessionRegistry, selection, agentGraph, filesPanel, gitPanel, mcpSkillsPanel);
         mainWindow.Loaded += (_, _) => rootsPanel.Start();
         mainWindow.Closed += (_, _) =>
         {
@@ -192,8 +240,10 @@ static async Task<int> RunCombinedAsync(int port, string? dumpRawDir, bool verbo
             // unhooks from a feed that still exists.
             agentGraph.Dispose();
             filesPanel.FolderExpanded -= gitPanel.OnFilesPanelFolderExpanded;
+            filesPanel.FolderCollapsed -= gitPanel.OnFilesPanelFolderCollapsed;
             filesPanel.Dispose();
             gitPanel.Dispose();
+            mcpSkillsPanel.Dispose();
             rootsPanel.Dispose();
             feed.Dispose();
 

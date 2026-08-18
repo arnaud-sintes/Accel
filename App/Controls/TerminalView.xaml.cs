@@ -148,6 +148,18 @@ public partial class TerminalView : UserControl, IDisposable
     }
 
     /// <summary>
+    /// Closes any live pty socket and wipes the xterm.js screen buffer, via
+    /// <c>window.accelDetachPty()</c> - used when panel C has no tab left to show (the last open
+    /// session's tab just closed), so panel D goes back to a blank black surface instead of
+    /// freezing on the closed session's last rendered frame.
+    /// </summary>
+    public async Task DetachPtyAsync()
+    {
+        await Initialization;
+        await Browser.CoreWebView2.ExecuteScriptAsync("window.accelDetachPty();");
+    }
+
+    /// <summary>
     /// Builds the <c>window.accelAttachPty(tabId, port)</c> call, JSON-encoding
     /// <paramref name="tabId"/> so it cannot break out of the generated script regardless of its
     /// contents. Pure and side-effect-free — split out from <see cref="AttachPtyAsync"/> purely so

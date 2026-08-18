@@ -117,10 +117,11 @@
                            FontFamily="{StaticResource FontFamilyDisplay}"
                            FontSize="{StaticResource FontSizeBody}" FontWeight="SemiBold"
                            Foreground="{StaticResource TextPrimaryBrush}" />
-                <TextBlock Text="{Binding VersionText, ElementName=Root}" VerticalAlignment="Bottom"
-                           Margin="6,0,0,2"
+                <TextBlock Text="{Binding VersionText, ElementName=Root}" VerticalAlignment="Center"
+                           Margin="6,2,0,0"
                            FontFamily="{StaticResource FontFamilyDisplay}"
                            FontSize="{StaticResource FontSizeCaption}"
+                           FontWeight="Light"
                            Foreground="{StaticResource TextMutedBrush}"
                            Visibility="{Binding VersionText, ElementName=Root, Converter={StaticResource StringToVis}}" />
             </StackPanel>

@@ -95,6 +95,73 @@ public static class MetricsPipeline
     }
 
     /// <summary>
+    /// Handles a <c>PostToolUse</c> payload: classifies <c>tool_name</c> as a Skill invocation
+    /// (<c>tool_name == "Skill"</c>, display name from <c>tool_input.skill</c>, falling back to
+    /// the literal <c>"Skill"</c> if absent) or an MCP tool call (<c>tool_name</c> starts with
+    /// <c>mcp__</c>, display name is the remainder after stripping that prefix), and records a
+    /// hit in <paramref name="state"/>. Anything else (a built-in tool like Read/Edit/Bash) is
+    /// silently ignored - this pipeline only tracks MCP/Skill usage. Best-effort, same
+    /// never-throw contract as <see cref="HandleSubagentStop"/>.
+    /// </summary>
+    public static void HandlePostToolUse(string rawBody, SessionState state)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(rawBody);
+            var root = doc.RootElement;
+
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                return;
+            }
+
+            string? sessionId = GetString(root, "session_id");
+            if (string.IsNullOrEmpty(sessionId))
+            {
+                return;
+            }
+
+            string? toolName = GetString(root, "tool_name");
+            if (string.IsNullOrEmpty(toolName))
+            {
+                return;
+            }
+
+            if (toolName == "Skill")
+            {
+                string name = GetToolInputSkillName(root) ?? "Skill";
+                state.IncrementToolUsage(sessionId, ToolUsageKind.Skill, name);
+            }
+            else if (toolName.StartsWith("mcp__", StringComparison.Ordinal))
+            {
+                string name = toolName["mcp__".Length..];
+                state.IncrementToolUsage(sessionId, ToolUsageKind.Mcp, name);
+            }
+            // Else: not an MCP/Skill call - ignore silently.
+        }
+        catch
+        {
+            // Best-effort: a malformed PostToolUse body must never break the event route.
+        }
+    }
+
+    // Tolerant sibling of GetTaskModelId/GetTaskEffort: pulls the nested
+    // tool_input.skill string field out of a PostToolUse payload shaped
+    // {"tool_name":"Skill","tool_input":{"skill":"some-skill-name",...},...}. Absent or
+    // wrong-typed simply yields null, never throws.
+    private static string? GetToolInputSkillName(JsonElement root)
+    {
+        if (root.ValueKind != JsonValueKind.Object
+            || !root.TryGetProperty("tool_input", out var toolInput)
+            || toolInput.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        return GetString(toolInput, "skill");
+    }
+
+    /// <summary>
     /// Handles a status-line payload: extracts the main-session model/effort/context/cost
     /// fields (all optional/nullable per project.md) and records them as the latest
     /// snapshot for that session_id.

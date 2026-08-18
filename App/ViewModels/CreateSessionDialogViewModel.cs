@@ -85,7 +85,7 @@ public sealed partial class CreateSessionDialogViewModel : ObservableObject
         _sessionStarter = sessionStarter ?? (spec => PtySession.Start(spec));
         _folderPicker = folderPicker ?? new WinFormsFolderPickerService();
 
-        _selectedModelFamily = ModelFamilies[0];
+        _selectedModelFamily = ModelFamilies.FirstOrDefault(f => f == "Sonnet") ?? ModelFamilies[0];
         _selectedEffortLevel = EffortLevels[0];
         _workingDirectory = initialWorkingDirectory;
     }

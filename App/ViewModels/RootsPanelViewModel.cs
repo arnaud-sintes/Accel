@@ -344,7 +344,7 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
         _dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
         _folderPicker = folderPicker ?? new WinFormsFolderPickerService();
         _confirmation = confirmation ?? new MessageBoxConfirmationService();
-        _configPath = configPath ?? Accel.Server.RootFoldersConfig.DefaultCandidatePaths()[0];
+        _configPath = configPath ?? Accel.Server.RootFoldersConfig.ResolveWritePath();
         _selection = selection;
 
         _feed.SnapshotAvailable += OnSnapshotAvailable;
@@ -457,7 +457,22 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
     /// <summary>True once at least one snapshot has been rendered - lets the view distinguish
     /// "no data yet" from "data arrived and there genuinely are no sessions".</summary>
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(NoSnapshot))]
     private bool _hasSnapshot;
+
+    /// <summary>Inverse of <see cref="HasSnapshot"/> - lets the view swap between the plain
+    /// "waiting"/"failed" caption and the icon-per-counter row purely in XAML.</summary>
+    public bool NoSnapshot => !HasSnapshot;
+
+    /// <summary>"Refreshed at h:mm tt" for the last rendered snapshot - split out from
+    /// <see cref="StatusText"/> so the view can put its own icon in front of just this line.</summary>
+    [ObservableProperty]
+    private string _refreshedAtText = string.Empty;
+
+    /// <summary>Just the "h:mm tt" portion of <see cref="RefreshedAtText"/> - split out so the view
+    /// can bold only the time value, not the "Refreshed at" label.</summary>
+    [ObservableProperty]
+    private string _refreshedAtValueText = string.Empty;
 
     /// <summary>Starts the feed (idempotent) - separate from the constructor so a host can build the
     /// whole panel graph before any telemetry starts flowing.</summary>
@@ -520,6 +535,18 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
         }
 
         RootFolderEditor.RemoveRoot(_configPath, node.Key);
+        _feed.RequestRefresh();
+    }
+
+    /// <summary>
+    /// Persists <paramref name="displayName"/> as <paramref name="sessionId"/>'s <c>accel_override</c>
+    /// name (see <see cref="RootFolderEditor.SetSessionDisplayName"/>) and refreshes, so a freshly
+    /// created session's row picks up the same name its tab already shows on the next tick, rather
+    /// than whatever the transcript-derived tiers of the name ladder happen to fall back to.
+    /// </summary>
+    public void SetSessionDisplayName(string sessionId, string displayName)
+    {
+        RootFolderEditor.SetSessionDisplayName(_configPath, sessionId, displayName);
         _feed.RequestRefresh();
     }
 
@@ -650,9 +677,11 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
         }
 
         string refreshedAt = snapshot.GeneratedAtUtc.ToLocalTime().ToString("h:mm tt", CultureInfo.InvariantCulture);
+        RefreshedAtValueText = refreshedAt;
+        RefreshedAtText = $"Refreshed at {refreshedAt}";
         StatusText = string.Create(
             CultureInfo.InvariantCulture,
-            $"{RootCount} root(s), {SessionCount} session(s), {LiveSessionCount} running\nRefreshed at {refreshedAt}\nSessions running before Accel startup are shown as historical");
+            $"{RootCount} root(s), {SessionCount} session(s)\n{LiveSessionCount} running — {RefreshedAtText}\nSessions running before Accel startup are shown as historical");
     }
 
     /// <summary>Called by a node whose <c>IsSelected</c> changed (the WPF <c>TreeViewItem</c> is

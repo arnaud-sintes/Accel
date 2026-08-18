@@ -4,11 +4,12 @@
         xmlns:controls="clr-namespace:Accel.App.Controls"
         Title="Rename session" Height="260" Width="440"
         WindowStartupLocation="CenterOwner" ResizeMode="NoResize"
-        ShowInTaskbar="False" WindowStyle="None">
+        ShowInTaskbar="False" WindowStyle="None" Style="{StaticResource DialogWindowStyle}">
     <Window.Resources>
         <ResourceDictionary Source="Theme.xaml" />
     </Window.Resources>
     <!-- Same elevation ladder as CreateSessionDialog: L1 surface body under the L2 title bar. -->
+    <Border BorderBrush="{StaticResource WindowBorderBrush}" BorderThickness="1">
     <DockPanel LastChildFill="True" Background="{StaticResource SurfaceBrush}">
         <controls:CustomTitleBar DockPanel.Dock="Top" TitleText="Rename session"
                                   ShowMinimizeButton="False" ShowMaximizeButton="False" />
@@ -44,4 +45,5 @@
             </StackPanel>
         </Grid>
     </DockPanel>
+    </Border>
 </Window>

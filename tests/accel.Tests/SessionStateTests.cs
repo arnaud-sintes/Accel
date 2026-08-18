@@ -415,6 +415,85 @@ public class SessionStateTests
         Assert.Equal(1, raised);
     }
 
+    // ---- IncrementToolUsage/GetToolUsage: PostToolUse MCP/Skill hit-count tracking ------
+
+    [Fact]
+    public void GetToolUsage_UnknownSession_ReturnsEmptyDictionaries_NoThrow()
+    {
+        var state = new SessionState();
+
+        var usage = state.GetToolUsage("does-not-exist");
+
+        Assert.Empty(usage.McpHits);
+        Assert.Empty(usage.SkillHits);
+    }
+
+    [Fact]
+    public void IncrementToolUsage_SameNameMultipleTimes_AccumulatesCount()
+    {
+        var state = new SessionState();
+
+        state.IncrementToolUsage("session-1", ToolUsageKind.Mcp, "serena__find_symbol");
+        state.IncrementToolUsage("session-1", ToolUsageKind.Mcp, "serena__find_symbol");
+        state.IncrementToolUsage("session-1", ToolUsageKind.Mcp, "serena__find_symbol");
+
+        var usage = state.GetToolUsage("session-1");
+        Assert.Equal(3, usage.McpHits["serena__find_symbol"]);
+    }
+
+    [Fact]
+    public void IncrementToolUsage_McpAndSkill_AreTrackedIndependently()
+    {
+        var state = new SessionState();
+
+        state.IncrementToolUsage("session-1", ToolUsageKind.Mcp, "serena__find_symbol");
+        state.IncrementToolUsage("session-1", ToolUsageKind.Skill, "code-review");
+        state.IncrementToolUsage("session-1", ToolUsageKind.Skill, "code-review");
+
+        var usage = state.GetToolUsage("session-1");
+        Assert.Equal(1, usage.McpHits["serena__find_symbol"]);
+        Assert.Equal(2, usage.SkillHits["code-review"]);
+        Assert.False(usage.McpHits.ContainsKey("code-review"));
+        Assert.False(usage.SkillHits.ContainsKey("serena__find_symbol"));
+    }
+
+    [Fact]
+    public void IncrementToolUsage_DifferentSessions_AreTrackedIndependently()
+    {
+        var state = new SessionState();
+
+        state.IncrementToolUsage("session-1", ToolUsageKind.Mcp, "serena__find_symbol");
+        state.IncrementToolUsage("session-2", ToolUsageKind.Mcp, "serena__find_symbol");
+        state.IncrementToolUsage("session-2", ToolUsageKind.Mcp, "serena__find_symbol");
+
+        Assert.Equal(1, state.GetToolUsage("session-1").McpHits["serena__find_symbol"]);
+        Assert.Equal(2, state.GetToolUsage("session-2").McpHits["serena__find_symbol"]);
+    }
+
+    [Fact]
+    public void IncrementToolUsage_WithEmptySessionIdOrName_IsNoOp_NoThrow()
+    {
+        var state = new SessionState();
+
+        state.IncrementToolUsage(string.Empty, ToolUsageKind.Mcp, "serena__find_symbol");
+        state.IncrementToolUsage("session-1", ToolUsageKind.Mcp, string.Empty);
+
+        Assert.Empty(state.GetToolUsage("session-1").McpHits);
+        Assert.Empty(state.GetToolUsage(string.Empty).McpHits);
+    }
+
+    [Fact]
+    public void IncrementToolUsage_RaisesChanged()
+    {
+        var state = new SessionState();
+        int raised = 0;
+        state.Changed += () => raised++;
+
+        state.IncrementToolUsage("session-1", ToolUsageKind.Mcp, "serena__find_symbol");
+
+        Assert.Equal(1, raised);
+    }
+
     [Fact]
     public void ReconcileLiveAgents_NoAgentsTransition_DoesNotRaiseChanged()
     {

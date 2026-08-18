@@ -139,7 +139,7 @@ public class SettingsMergerTests
         var detected = SettingsMerger.Detect(root, Spec());
         Assert.Equal(InstallState.Installed, detected.State);
         Assert.Equal(
-            new[] { "SessionStart", "SessionEnd", "SubagentStart", "SubagentStop" }.OrderBy(x => x),
+            new[] { "SessionStart", "SessionEnd", "SubagentStart", "SubagentStop", "PostToolUse" }.OrderBy(x => x),
             detected.FoundEvents.Keys.OrderBy(x => x));
         Assert.Equal(StatusLineOwnership.Accel, detected.StatusLine);
         Assert.Equal(StatusLineOwnership.Accel, detected.SubagentStatusLine);
@@ -196,16 +196,15 @@ public class SettingsMergerTests
 
         Assert.Equal("café — naïve", root["env"]!["GREETING"]!.GetValue<string>());
 
-        // Accel's own entries are present and exec-form.
+        // Accel's own entries are present and exec-form (self-invoked via `notify`, not curl).
         var sessionStart = SingleAccelEntry(root, "SessionStart");
-        Assert.Equal("curl.exe", sessionStart["command"]!.GetValue<string>());
+        Assert.Equal(ExePath, sessionStart["command"]!.GetValue<string>());
         Assert.IsType<JsonArray>(sessionStart["args"]);
         var args = sessionStart["args"]!.AsArray().Select(a => a!.GetValue<string>()).ToArray();
         Assert.Contains("X-Accel-Hook: SessionStart", args);
-        Assert.Contains($"http://127.0.0.1:{Port}/events/session-start", args);
-        Assert.Contains("-d", args);
-        Assert.Contains("@-", args);
-        Assert.Contains("NUL", args);
+        Assert.Contains("notify", args);
+        Assert.Contains("/events/session-start", args);
+        Assert.Contains(Port.ToString(), args);
 
         // SessionEnd must be async with a short timeout (1.5 s shared budget).
         var sessionEnd = SingleAccelEntry(root, "SessionEnd");
@@ -238,7 +237,7 @@ public class SettingsMergerTests
         var groups = root["hooks"]!["SessionStart"]!.AsArray();
         Assert.Equal(2, groups.Count);
         Assert.Equal("other-tool.exe", groups[0]!["hooks"]![0]!["command"]!.GetValue<string>());
-        Assert.Equal("curl.exe", groups[1]!["hooks"]![0]!["command"]!.GetValue<string>());
+        Assert.Equal(ExePath, groups[1]!["hooks"]![0]!["command"]!.GetValue<string>());
     }
 
     [Fact]
@@ -354,8 +353,8 @@ public class SettingsMergerTests
         SettingsMerger.Install(root, Spec(), store);
 
         var accel = SettingsMerger.EnumerateAccelEntries(root).ToList();
-        Assert.Equal(4, accel.Count);
-        Assert.Equal(4, accel.Select(g => g.EventName).Distinct().Count());
+        Assert.Equal(5, accel.Count);
+        Assert.Equal(5, accel.Select(g => g.EventName).Distinct().Count());
     }
 
     // ---- port drift ------------------------------------------------------------------

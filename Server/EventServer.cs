@@ -147,6 +147,7 @@ public class EventServer
         app.MapPost("/events/session-end", ctx => HandleEventAsync(ctx, "SessionEnd", capture, state, verbose));
         app.MapPost("/events/subagent-start", ctx => HandleEventAsync(ctx, "SubagentStart", capture, state, verbose));
         app.MapPost("/events/subagent-stop", ctx => HandleEventAsync(ctx, "SubagentStop", capture, state, verbose));
+        app.MapPost("/events/post-tool-use", ctx => HandleEventAsync(ctx, "PostToolUse", capture, state, verbose));
         app.MapPost("/events/status-line", ctx => HandleStatusLineAsync(ctx, capture, state));
         app.MapPost("/events/subagent-status-line", ctx => HandleSubagentStatusLineAsync(ctx, capture, state));
 
@@ -192,6 +193,12 @@ public class EventServer
             // Phase 3d eviction: SessionEnd -> session marked ended in SessionState, same
             // best-effort contract as the SubagentStop handling above.
             SafePrint(() => MarkSessionEndedFromPayload(body, state));
+        }
+        else if (eventName == "PostToolUse")
+        {
+            // MCP/Skill hit-count tracking: observation-only, same best-effort contract as
+            // the SubagentStop handling above.
+            SafePrint(() => MetricsPipeline.HandlePostToolUse(body, state));
         }
 
         ctx.Response.StatusCode = StatusCodes.Status204NoContent;

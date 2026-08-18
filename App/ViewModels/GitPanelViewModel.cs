@@ -117,6 +117,35 @@ public sealed partial class GitPanelViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     private bool _hasRepo;
 
+    /// <summary>The repo's folder name (e.g. "Accel") - empty when <see cref="HasRepo"/> is false.</summary>
+    [ObservableProperty]
+    private string _repoName = string.Empty;
+
+    /// <summary>The current branch's upstream (e.g. "origin/main"), or a "no upstream" hint when the
+    /// branch isn't tracking one - empty when <see cref="HasRepo"/> is false.</summary>
+    [ObservableProperty]
+    private string _remoteBranchText = string.Empty;
+
+    /// <summary>"N change(s)" summary across <see cref="StagedChanges"/> and <see cref="Changes"/>
+    /// combined - empty when <see cref="HasRepo"/> is false.</summary>
+    [ObservableProperty]
+    private string _changesSummaryText = string.Empty;
+
+    /// <summary>Just the numeric count portion of <see cref="ChangesSummaryText"/> - split out so the
+    /// view can bold only the count, not the "change(s)" label.</summary>
+    [ObservableProperty]
+    private string _changesCountText = string.Empty;
+
+    /// <summary>"N commit(s) to push" summary (commits on the current branch ahead of its upstream) -
+    /// empty when <see cref="HasRepo"/> is false or the branch has no upstream configured.</summary>
+    [ObservableProperty]
+    private string _pendingPushSummaryText = string.Empty;
+
+    /// <summary>Just the numeric count portion of <see cref="PendingPushSummaryText"/> - split out so
+    /// the view can bold only the count, not the "commit(s) to push" label.</summary>
+    [ObservableProperty]
+    private string _pendingPushCountText = string.Empty;
+
     /// <summary>The full rebuild. Public so tests can drive it directly with a fixture
     /// <see cref="RootsTreeDto"/>, exactly as <see cref="FilesPanelViewModel.Rebuild"/> is. A resolved
     /// root equal to the last one is a no-op (see this class's remarks) - a genuine change clears any
@@ -148,6 +177,31 @@ public sealed partial class GitPanelViewModel : ObservableObject, IDisposable
         RefreshDisplay();
     }
 
+    /// <summary>Called (via the composition root's wiring) whenever the file tree's
+    /// <see cref="FilesPanelViewModel.FolderCollapsed"/> fires. Only reacts when the collapsed folder
+    /// is the one currently driving this section (or an ancestor of it, since collapsing a folder also
+    /// hides every expanded descendant) - falls back to <paramref name="nearestExpandedAncestor"/>
+    /// (or the resolved root, when <see langword="null"/>) rather than continuing to show a subtree
+    /// that's no longer visible in the file tree.</summary>
+    public void OnFilesPanelFolderCollapsed(string collapsedFolderPath, string? nearestExpandedAncestor)
+    {
+        if (_expandedFolderPath is null)
+        {
+            return;
+        }
+
+        bool showingCollapsedSubtree = string.Equals(_expandedFolderPath, collapsedFolderPath, StringComparison.OrdinalIgnoreCase)
+            || _expandedFolderPath.StartsWith(collapsedFolderPath + System.IO.Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+
+        if (!showingCollapsedSubtree)
+        {
+            return;
+        }
+
+        _expandedFolderPath = nearestExpandedAncestor;
+        RefreshDisplay();
+    }
+
     private void RefreshDisplay()
     {
         StagedChanges.Clear();
@@ -159,6 +213,7 @@ public sealed partial class GitPanelViewModel : ObservableObject, IDisposable
         {
             HasRepo = false;
             StatusText = "No folder or session focused.";
+            ClearSummary();
             return;
         }
 
@@ -184,6 +239,7 @@ public sealed partial class GitPanelViewModel : ObservableObject, IDisposable
         {
             HasRepo = false;
             StatusText = $"Not a git repository: {effectivePath}";
+            ClearSummary();
             return;
         }
 
@@ -195,6 +251,37 @@ public sealed partial class GitPanelViewModel : ObservableObject, IDisposable
 
         HasRepo = true;
         StatusText = entries.Length == 0 ? $"{effectivePath} (clean)" : effectivePath!;
+
+        var summary = GitStatusBuilder.BuildSummary(effectivePath);
+        RepoName = summary?.RepoName ?? string.Empty;
+        RemoteBranchText = summary is null
+            ? string.Empty
+            : summary.RemoteBranch ?? $"{summary.Branch} (no upstream)";
+
+        int changeCount = StagedChanges.Count + Changes.Count;
+        ChangesCountText = changeCount.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        ChangesSummaryText = $"{changeCount} change(s)";
+
+        if (summary?.RemoteBranch is null)
+        {
+            PendingPushCountText = string.Empty;
+            PendingPushSummaryText = string.Empty;
+        }
+        else
+        {
+            PendingPushCountText = summary.AheadCount.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            PendingPushSummaryText = $"{summary.AheadCount} commit(s) to push";
+        }
+    }
+
+    private void ClearSummary()
+    {
+        RepoName = string.Empty;
+        RemoteBranchText = string.Empty;
+        ChangesSummaryText = string.Empty;
+        ChangesCountText = string.Empty;
+        PendingPushSummaryText = string.Empty;
+        PendingPushCountText = string.Empty;
     }
 
     private void OnSnapshotAvailable(RootsTreeDto snapshot) => _dispatcher.Post(() =>

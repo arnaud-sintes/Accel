@@ -160,7 +160,8 @@ public class RootsPanelViewModelTests
         Assert.Equal(2, vm.RootCount);
         Assert.Equal(3, vm.SessionCount);
         Assert.Equal(1, vm.LiveSessionCount);
-        Assert.Contains("2 root(s), 3 session(s), 1 running", vm.StatusText);
+        Assert.Contains("2 root(s), 3 session(s)", vm.StatusText);
+        Assert.Contains("1 running — ", vm.StatusText);
     }
 
     [Fact]

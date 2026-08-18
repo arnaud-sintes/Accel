@@ -1,8 +1,10 @@
 namespace Accel.App.ViewModels;
 
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.IO;
 using CommunityToolkit.Mvvm.ComponentModel;
 using Accel.App.Services;
 using Accel.Cli;
@@ -31,14 +33,19 @@ using Accel.Metrics;
 public sealed partial class FilesPanelNodeViewModel : ObservableObject
 {
     private readonly Action<string>? _onDirectoryExpanded;
+    private readonly Action<string>? _onDirectoryCollapsed;
     private bool _childrenLoaded;
 
-    public FilesPanelNodeViewModel(FileTreeNode node, Action<string>? onDirectoryExpanded = null)
+    public FilesPanelNodeViewModel(
+        FileTreeNode node,
+        Action<string>? onDirectoryExpanded = null,
+        Action<string>? onDirectoryCollapsed = null)
     {
         Key = node.Path;
         Name = node.Name;
         IsDirectory = node.IsDirectory;
         _onDirectoryExpanded = onDirectoryExpanded;
+        _onDirectoryCollapsed = onDirectoryCollapsed;
 
         if (IsDirectory && node.HasChildren)
         {
@@ -71,6 +78,19 @@ public sealed partial class FilesPanelNodeViewModel : ObservableObject
 
     public bool IsDirectory { get; }
 
+    /// <summary>Dotfile/dot-directory convention (<c>.git</c>, <c>.vscode</c>, ...) - the only
+    /// "hidden" signal available without a filesystem round-trip per row, and the one every
+    /// cross-platform tool already treats as the hidden convention.</summary>
+    public bool IsHidden => Name.Length > 0 && Name[0] == '.';
+
+    /// <summary>Short chip text for the file-type badge (e.g. "TS", "{}"), empty for a directory or
+    /// an unrecognized extension - see <see cref="FileTypeIconResolver"/>.</summary>
+    public string IconLabel => IsDirectory ? string.Empty : FileTypeIconResolver.Resolve(Name).Label;
+
+    /// <summary>Chip background colour for <see cref="IconLabel"/>, as a hex string ready for
+    /// <see cref="Accel.App.Converters.HexToBrushConverter"/>.</summary>
+    public string IconColorHex => IsDirectory ? string.Empty : FileTypeIconResolver.Resolve(Name).ColorHex;
+
     public ObservableCollection<FilesPanelNodeViewModel> Children { get; } = new();
 
     [ObservableProperty]
@@ -82,9 +102,16 @@ public sealed partial class FilesPanelNodeViewModel : ObservableObject
         // B's git section (GitPanelViewModel.OnFilesPanelFolderExpanded) uses this to follow
         // whichever folder the user is actually looking at, so re-expanding an already-loaded
         // folder must still notify.
-        if (value && IsDirectory)
+        if (IsDirectory)
         {
-            _onDirectoryExpanded?.Invoke(Key);
+            if (value)
+            {
+                _onDirectoryExpanded?.Invoke(Key);
+            }
+            else
+            {
+                _onDirectoryCollapsed?.Invoke(Key);
+            }
         }
 
         if (!value || !IsDirectory || _childrenLoaded)
@@ -97,14 +124,15 @@ public sealed partial class FilesPanelNodeViewModel : ObservableObject
 
         foreach (var child in FilesTreeBuilder.BuildChildren(Key))
         {
-            Children.Add(new FilesPanelNodeViewModel(child, _onDirectoryExpanded));
+            Children.Add(new FilesPanelNodeViewModel(child, _onDirectoryExpanded, _onDirectoryCollapsed));
         }
     }
 
     /// <summary>Accessible text description for <c>AutomationProperties.Name</c> - same
     /// never-colour/weight-alone rule <see cref="RootsPanelNodeViewModel"/> follows, even though this
     /// row's only visual distinction (bold for a folder) is already independent of colour.</summary>
-    public string AutomationDescription => IsDirectory ? $"Folder: {Name}." : $"File: {Name}.";
+    public string AutomationDescription =>
+        (IsDirectory ? $"Folder: {Name}." : $"File: {Name}.") + (IsHidden ? " Hidden." : string.Empty);
 }
 
 /// <summary>
@@ -140,6 +168,12 @@ public sealed partial class FilesPanelViewModel : ObservableObject, IDisposable
     private string? _currentRootPath;
     private bool _rootResolvedOnce;
     private bool _disposed;
+
+    /// <summary>Every directory path currently expanded in <see cref="Nodes"/> - lets
+    /// <see cref="FolderCollapsed"/> report the nearest still-expanded ancestor of a folder that just
+    /// collapsed, so the git section (<see cref="GitPanelViewModel.OnFilesPanelFolderCollapsed"/>) can
+    /// fall back to it instead of clinging to a subtree that's no longer visible.</summary>
+    private readonly HashSet<string> _expandedFolderPaths = new(StringComparer.OrdinalIgnoreCase);
 
     public FilesPanelViewModel(
         ITelemetryFeed feed,
@@ -184,6 +218,13 @@ public sealed partial class FilesPanelViewModel : ObservableObject, IDisposable
     /// that folder is itself a git repository.</summary>
     public event Action<string>? FolderExpanded;
 
+    /// <summary>Raised whenever a directory node collapses, with that folder's path and the nearest
+    /// still-expanded ancestor folder's path (or <see langword="null"/> when no ancestor is still
+    /// expanded, meaning the session/root itself) - lets panel B's git section
+    /// (<see cref="GitPanelViewModel.OnFilesPanelFolderCollapsed"/>) fall back off a subtree that just
+    /// disappeared instead of continuing to show it.</summary>
+    public event Action<string, string?>? FolderCollapsed;
+
     /// <summary>The full rebuild. Public so tests can drive it directly with a fixture
     /// <see cref="RootsTreeDto"/>, exactly as <see cref="AgentGraphViewModel.Rebuild"/> is. See this
     /// class's remarks for why resolving to the same root path as last time is a no-op.</summary>
@@ -202,6 +243,7 @@ public sealed partial class FilesPanelViewModel : ObservableObject, IDisposable
         _currentRootPath = rootPath;
 
         Nodes.Clear();
+        _expandedFolderPaths.Clear();
 
         if (string.IsNullOrEmpty(rootPath))
         {
@@ -220,11 +262,30 @@ public sealed partial class FilesPanelViewModel : ObservableObject, IDisposable
 
         foreach (var child in children)
         {
-            Nodes.Add(new FilesPanelNodeViewModel(child, path => FolderExpanded?.Invoke(path)));
+            Nodes.Add(new FilesPanelNodeViewModel(child, OnNodeExpanded, OnNodeCollapsed));
         }
 
         HasTree = true;
         StatusText = Nodes.Count == 0 ? $"{rootPath} (empty)" : rootPath;
+    }
+
+    private void OnNodeExpanded(string path)
+    {
+        _expandedFolderPaths.Add(path);
+        FolderExpanded?.Invoke(path);
+    }
+
+    private void OnNodeCollapsed(string path)
+    {
+        _expandedFolderPaths.Remove(path);
+
+        string? ancestor = Path.GetDirectoryName(path);
+        while (!string.IsNullOrEmpty(ancestor) && !_expandedFolderPaths.Contains(ancestor))
+        {
+            ancestor = Path.GetDirectoryName(ancestor);
+        }
+
+        FolderCollapsed?.Invoke(path, string.IsNullOrEmpty(ancestor) ? null : ancestor);
     }
 
     private void OnSnapshotAvailable(RootsTreeDto snapshot) => _dispatcher.Post(() =>

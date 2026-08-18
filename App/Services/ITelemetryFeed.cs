@@ -105,7 +105,11 @@ public sealed class EventServerTelemetrySource : ITelemetrySource
         "projects");
 
     public RootsTreeDto BuildSnapshot() =>
-        _server.RootsTree.Build(_server.Roots, _server.State, _server.ProjectsDirOverride);
+        _server.RootsTree.Build(
+            _server.Roots,
+            _server.State,
+            _server.ProjectsDirOverride,
+            RootFoldersConfig.LoadFull().Sessions);
 }
 
 /// <summary>

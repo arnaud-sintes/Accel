@@ -15,6 +15,23 @@ public enum AgentStatus
     Stale,
 }
 
+/// <summary>Which per-session tool-usage counter a <see cref="SessionState.IncrementToolUsage"/>
+/// call targets - MCP tool calls (<c>mcp__*</c>) vs. Skill invocations (<c>tool_name == "Skill"</c>).</summary>
+public enum ToolUsageKind
+{
+    Mcp,
+    Skill,
+}
+
+/// <summary>
+/// Point-in-time snapshot of a session's MCP/Skill hit counts, keyed by display name -&gt;
+/// hit count. Returned by <see cref="SessionState.GetToolUsage"/>; empty dictionaries (never
+/// null) when the session is unknown - matches this file's other tolerant readers.
+/// </summary>
+public sealed record ToolUsageSnapshot(
+    IReadOnlyDictionary<string, int> McpHits,
+    IReadOnlyDictionary<string, int> SkillHits);
+
 /// <summary>
 /// A snapshot of a main session's model/effort/context/cost metrics, as reported by one
 /// <c>/events/status-line</c> POST. Per project.md, every snapshot is stamped with its
@@ -79,6 +96,11 @@ public sealed class SessionState
 {
     private readonly ConcurrentDictionary<string, SessionSnapshot> _sessions = new();
     private readonly ConcurrentDictionary<string, AgentRecord> _agents = new();
+
+    // PostToolUse hit-count tracking: sessionId -> toolName -> count, one dictionary per
+    // ToolUsageKind. Never persisted, same lifetime/contract as _sessions/_agents above.
+    private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, int>> _mcpHits = new();
+    private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, int>> _skillHits = new();
 
     /// <summary>
     /// Raised at the end of every mutating method below, whenever this store's data actually
@@ -304,4 +326,47 @@ public sealed class SessionState
 
     /// <summary>Returns a point-in-time snapshot of every known agent record.</summary>
     public IReadOnlyCollection<AgentRecord> GetAllAgents() => _agents.Values.ToList();
+
+    /// <summary>
+    /// Atomically increments the hit count for one tool <paramref name="name"/> under one
+    /// session/kind bucket. No-op (never throws) for an empty <paramref name="sessionId"/> or
+    /// <paramref name="name"/>, same guard style as the mutators above.
+    /// </summary>
+    public void IncrementToolUsage(string sessionId, ToolUsageKind kind, string name)
+    {
+        if (string.IsNullOrEmpty(sessionId) || string.IsNullOrEmpty(name))
+        {
+            return;
+        }
+
+        ConcurrentDictionary<string, ConcurrentDictionary<string, int>> store =
+            kind == ToolUsageKind.Skill ? _skillHits : _mcpHits;
+
+        ConcurrentDictionary<string, int> perTool = store.GetOrAdd(sessionId, _ => new ConcurrentDictionary<string, int>());
+        perTool.AddOrUpdate(name, 1, (_, existing) => existing + 1);
+
+        RaiseChanged();
+    }
+
+    /// <summary>Looks up a session's MCP/Skill hit counts. Returns empty dictionaries (never
+    /// throws) if the session is unknown - see <see cref="ToolUsageSnapshot"/>.</summary>
+    public ToolUsageSnapshot GetToolUsage(string sessionId)
+    {
+        if (string.IsNullOrEmpty(sessionId))
+        {
+            return new ToolUsageSnapshot(EmptyToolCounts, EmptyToolCounts);
+        }
+
+        IReadOnlyDictionary<string, int> mcp = _mcpHits.TryGetValue(sessionId, out var mcpCounts)
+            ? mcpCounts
+            : EmptyToolCounts;
+
+        IReadOnlyDictionary<string, int> skill = _skillHits.TryGetValue(sessionId, out var skillCounts)
+            ? skillCounts
+            : EmptyToolCounts;
+
+        return new ToolUsageSnapshot(mcp, skill);
+    }
+
+    private static readonly IReadOnlyDictionary<string, int> EmptyToolCounts = new Dictionary<string, int>();
 }

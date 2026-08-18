@@ -20,6 +20,7 @@
         </ResourceDictionary.MergedDictionaries>
         <conv:HexToBrushConverter x:Key="HexToBrush" />
         <conv:CountToVisibilityConverter x:Key="CountToVis" />
+        <conv:StringToVisibilityConverter x:Key="StringToVis" />
         <BooleanToVisibilityConverter x:Key="BoolToVis" />
 
         <!--
@@ -81,6 +82,28 @@
             </Grid>
         </DataTemplate>
 
+        <!--
+            Panel A's MCP/SKILLS row template - a tool (or skill) name plus its hit count, same
+            Star/Auto two-column shape as GitChangeRowTemplate above. The count badge is never the
+            only cue (same accessibility rule): AutomationDescription/ToolTip spell "N call(s)" out
+            in full, so the badge can be ignored entirely without losing information.
+        -->
+        <DataTemplate x:Key="ToolUsageRowTemplate">
+            <Grid Margin="8,3" ToolTip="{Binding AutomationDescription}"
+                  AutomationProperties.Name="{Binding AutomationDescription}">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" Text="{Binding Name}" TextTrimming="CharacterEllipsis"
+                           VerticalAlignment="Center" Style="{StaticResource SecondaryTextStyle}" />
+                <TextBlock Grid.Column="1" Text="{Binding HitCount}" Margin="8,0,0,0"
+                           FontWeight="Bold" HorizontalAlignment="Center" MinWidth="14"
+                           VerticalAlignment="Center" Foreground="{StaticResource TealBrush}"
+                           Style="{StaticResource SecondaryTextStyle}" />
+            </Grid>
+        </DataTemplate>
+
         <SolidColorBrush x:Key="RunningFocusedBrush" Color="#FF4FC3F7" />
         <SolidColorBrush x:Key="RunningBrush" Color="#FF66BB6A" />
         <SolidColorBrush x:Key="IdleFocusedBrush" Color="#FF9FA8DA" />
@@ -112,7 +135,10 @@
                     Running rows are now emphasized (Bold) even when not focused - the bullet glyph
                     that used to be the sole "this is running" signal is gone from the row, so weight
                     (already differing from colour, never colour alone) has to carry that half of the
-                    state on its own.
+                    state on its own. Deliberately no Foreground override here (stays the base
+                    IdleBrush): green + Bold together over-emphasized these rows relative to the
+                    actually-focused session, leaving nothing left to visually distinguish "handled
+                    right now by Accel" from merely "running somewhere."
                 -->
                 <MultiDataTrigger>
                     <MultiDataTrigger.Conditions>
@@ -120,7 +146,6 @@
                         <Condition Binding="{Binding IsFocused}" Value="False" />
                     </MultiDataTrigger.Conditions>
                     <Setter Property="FontWeight" Value="Bold" />
-                    <Setter Property="Foreground" Value="{StaticResource RunningBrush}" />
                 </MultiDataTrigger>
                 <MultiDataTrigger>
                     <MultiDataTrigger.Conditions>
@@ -208,9 +233,25 @@
                 data path: feed -> ViewModel -> bound TreeView.
             -->
             <Border x:Name="PanelA" Grid.Column="0" BorderBrush="{StaticResource StrokeSubtleBrush}" BorderThickness="0,0,1,0" Background="{StaticResource SurfaceBrush}">
-                <DockPanel LastChildFill="True">
-                    <TextBlock DockPanel.Dock="Top" Text="SESSIONS" Margin="16,16,16,10"
-                               Style="{StaticResource SectionHeaderTextStyle}" />
+                <!--
+                    Panel A is split 3/4 (the session tree, unchanged) over 1/4 (the MCP/SKILLS
+                    hit-count mini-panels), independently resizable - the same top/splitter/bottom
+                    Grid panel B already uses for FILES over GIT. The two mini-panels share one
+                    McpSkillsPanelViewModel (set as both McpSectionRoot's and SkillsSectionRoot's
+                    DataContext by MainWindow's constructor): one focused-session lookup feeding two
+                    collections, never a filtered view of panel A's own RootsPanelViewModel.
+                -->
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="3*" MinHeight="120" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="1*" MinHeight="80" />
+                    </Grid.RowDefinitions>
+
+                <DockPanel Grid.Row="0" LastChildFill="True">
+                    <Border DockPanel.Dock="Top" Margin="16,16,16,10" Style="{StaticResource SectionHeaderBackdropStyle}">
+                        <TextBlock Text="SESSIONS" Style="{StaticResource SectionHeaderTextStyle}" />
+                    </Border>
 
                     <!--
                         P1-T3b: minimal add/remove toolbar. "Add root…" prompts for a folder,
@@ -227,8 +268,27 @@
                     <!-- Feed status / counts: makes "working but empty" visibly different from "broken". -->
                     <Border DockPanel.Dock="Bottom" BorderBrush="{StaticResource StrokeSubtleBrush}" BorderThickness="0,1,0,0"
                             Padding="16,10">
-                        <TextBlock x:Name="PanelAStatus" TextWrapping="Wrap"
-                                   Style="{StaticResource SecondaryTextStyle}" Text="{Binding StatusText}" />
+                        <StackPanel>
+                            <TextBlock x:Name="PanelAStatus" TextWrapping="Wrap"
+                                       Style="{StaticResource SecondaryTextStyle}" Foreground="{StaticResource TealBrush}"
+                                       Text="{Binding StatusText}"
+                                       Visibility="{Binding NoSnapshot, Converter={StaticResource BoolToVis}}" />
+                            <StackPanel Visibility="{Binding HasSnapshot, Converter={StaticResource BoolToVis}}">
+                                <TextBlock Margin="0,0,0,0" Style="{StaticResource SecondaryTextStyle}"
+                                           Foreground="{StaticResource TealBrush}">
+                                    <Run Text="{Binding RootCount, Mode=OneWay}" Foreground="{StaticResource TextPrimaryBrush}" FontWeight="Bold" /><Run Text=" root(s), " />
+                                    <Run Text="{Binding SessionCount, Mode=OneWay}" Foreground="{StaticResource TextPrimaryBrush}" FontWeight="Bold" /><Run Text=" session(s)" />
+                                </TextBlock>
+                                <TextBlock Margin="0,2,0,0" Style="{StaticResource SecondaryTextStyle}"
+                                           Foreground="{StaticResource TealBrush}">
+                                    <Run Text="{Binding LiveSessionCount, Mode=OneWay}" Foreground="{StaticResource TextPrimaryBrush}" FontWeight="Bold" /><Run Text=" running — Refreshed at " />
+                                    <Run Text="{Binding RefreshedAtValueText}" Foreground="{StaticResource TextPrimaryBrush}" FontWeight="Bold" />
+                                </TextBlock>
+                                <TextBlock Text="Sessions running before Accel startup are shown as historical"
+                                           TextWrapping="Wrap" Margin="0,4,0,0"
+                                           Style="{StaticResource SecondaryTextStyle}" Foreground="{StaticResource TealBrush}" />
+                            </StackPanel>
+                        </StackPanel>
                     </Border>
 
                     <!--
@@ -291,6 +351,13 @@
                                     RootsPanelNodeViewModel.TooltipText.
                                 -->
                                 <Setter Property="ToolTip" Value="{Binding TooltipText}" />
+                                <!--
+                                    Double-click: attach (resume) a sleeping session, or confirm-then-stop
+                                    a running one - see MainWindow.SessionRow_MouseDoubleClick, which
+                                    no-ops (and leaves the TreeView's own expand/collapse toggle alone) for
+                                    every row Kind other than Session.
+                                -->
+                                <EventSetter Event="MouseDoubleClick" Handler="SessionRow_MouseDoubleClick" />
                                 <Setter Property="ContextMenu">
                                     <Setter.Value>
                                         <ContextMenu>
@@ -309,8 +376,11 @@
                                                 CreateSessionAtRoot_Click's doc comment.
                                             -->
                                             <MenuItem Header="Create session…">
+                                                <MenuItem.Icon>
+                                                    <TextBlock Text="&#xE710;" FontFamily="Segoe MDL2 Assets" FontSize="14" />
+                                                </MenuItem.Icon>
                                                 <MenuItem.Style>
-                                                    <Style TargetType="MenuItem">
+                                                    <Style TargetType="MenuItem" BasedOn="{StaticResource {x:Type MenuItem}}">
                                                         <Setter Property="Tag" Value="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
                                                         <Setter Property="Visibility" Value="Collapsed" />
                                                         <EventSetter Event="MenuItem.Click" Handler="CreateSessionAtRoot_Click" />
@@ -324,7 +394,7 @@
                                             </MenuItem>
                                             <Separator>
                                                 <Separator.Style>
-                                                    <Style TargetType="Separator">
+                                                    <Style TargetType="Separator" BasedOn="{StaticResource {x:Type Separator}}">
                                                         <Setter Property="Visibility" Value="Collapsed" />
                                                         <Style.Triggers>
                                                             <DataTrigger Binding="{Binding PlacementTarget.DataContext.Kind, RelativeSource={RelativeSource AncestorType=ContextMenu}}" Value="Root">
@@ -343,8 +413,11 @@
                                             <MenuItem Header="Stop monitoring this folder…"
                                                       Command="{Binding PlacementTarget.Tag.RemoveRootCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
                                                       CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}">
+                                                <MenuItem.Icon>
+                                                    <TextBlock Text="&#xE738;" FontFamily="Segoe MDL2 Assets" FontSize="14" />
+                                                </MenuItem.Icon>
                                                 <MenuItem.Style>
-                                                    <Style TargetType="MenuItem">
+                                                    <Style TargetType="MenuItem" BasedOn="{StaticResource {x:Type MenuItem}}">
                                                         <Setter Property="Visibility" Value="Collapsed" />
                                                         <Style.Triggers>
                                                             <DataTrigger Binding="{Binding PlacementTarget.DataContext.Kind, RelativeSource={RelativeSource AncestorType=ContextMenu}}" Value="Root">
@@ -375,8 +448,11 @@
                                                 attribute form.
                                             -->
                                             <MenuItem Header="Rename…">
+                                                <MenuItem.Icon>
+                                                    <TextBlock Text="&#xE70F;" FontFamily="Segoe MDL2 Assets" FontSize="14" />
+                                                </MenuItem.Icon>
                                                 <MenuItem.Style>
-                                                    <Style TargetType="MenuItem">
+                                                    <Style TargetType="MenuItem" BasedOn="{StaticResource {x:Type MenuItem}}">
                                                         <Setter Property="Tag" Value="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
                                                         <Setter Property="Visibility" Value="Collapsed" />
                                                         <EventSetter Event="MenuItem.Click" Handler="RenameSession_Click" />
@@ -389,8 +465,11 @@
                                                 </MenuItem.Style>
                                             </MenuItem>
                                             <MenuItem Header="Resume">
+                                                <MenuItem.Icon>
+                                                    <TextBlock Text="&#xE768;" FontFamily="Segoe MDL2 Assets" FontSize="14" />
+                                                </MenuItem.Icon>
                                                 <MenuItem.Style>
-                                                    <Style TargetType="MenuItem">
+                                                    <Style TargetType="MenuItem" BasedOn="{StaticResource {x:Type MenuItem}}">
                                                         <Setter Property="Tag" Value="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
                                                         <Setter Property="Visibility" Value="Collapsed" />
                                                         <EventSetter Event="MenuItem.Click" Handler="ResumeSession_Click" />
@@ -403,8 +482,11 @@
                                                 </MenuItem.Style>
                                             </MenuItem>
                                             <MenuItem Header="Resume as fork…">
+                                                <MenuItem.Icon>
+                                                    <TextBlock Text="&#xE8C8;" FontFamily="Segoe MDL2 Assets" FontSize="14" />
+                                                </MenuItem.Icon>
                                                 <MenuItem.Style>
-                                                    <Style TargetType="MenuItem">
+                                                    <Style TargetType="MenuItem" BasedOn="{StaticResource {x:Type MenuItem}}">
                                                         <Setter Property="Tag" Value="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
                                                         <Setter Property="Visibility" Value="Collapsed" />
                                                         <EventSetter Event="MenuItem.Click" Handler="ResumeSessionAsFork_Click" />
@@ -424,8 +506,11 @@
                                                 which cannot change once launched.
                                             -->
                                             <MenuItem Header="Edit launch args…">
+                                                <MenuItem.Icon>
+                                                    <TextBlock Text="&#xE713;" FontFamily="Segoe MDL2 Assets" FontSize="14" />
+                                                </MenuItem.Icon>
                                                 <MenuItem.Style>
-                                                    <Style TargetType="MenuItem">
+                                                    <Style TargetType="MenuItem" BasedOn="{StaticResource {x:Type MenuItem}}">
                                                         <Setter Property="Tag" Value="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
                                                         <Setter Property="Visibility" Value="Collapsed" />
                                                         <EventSetter Event="MenuItem.Click" Handler="EditSessionArgs_Click" />
@@ -439,7 +524,7 @@
                                             </MenuItem>
                                             <Separator>
                                                 <Separator.Style>
-                                                    <Style TargetType="Separator">
+                                                    <Style TargetType="Separator" BasedOn="{StaticResource {x:Type Separator}}">
                                                         <Setter Property="Visibility" Value="Collapsed" />
                                                         <Style.Triggers>
                                                             <DataTrigger Binding="{Binding PlacementTarget.DataContext.Kind, RelativeSource={RelativeSource AncestorType=ContextMenu}}" Value="Session">
@@ -457,8 +542,11 @@
                                                 SessionRemovalMode.PermanentDelete.
                                             -->
                                             <MenuItem Header="Remove…">
+                                                <MenuItem.Icon>
+                                                    <TextBlock Text="&#xE74D;" FontFamily="Segoe MDL2 Assets" FontSize="14" />
+                                                </MenuItem.Icon>
                                                 <MenuItem.Style>
-                                                    <Style TargetType="MenuItem">
+                                                    <Style TargetType="MenuItem" BasedOn="{StaticResource {x:Type MenuItem}}">
                                                         <Setter Property="Tag" Value="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
                                                         <Setter Property="Visibility" Value="Collapsed" />
                                                         <EventSetter Event="MenuItem.Click" Handler="RemoveSession_Click" />
@@ -538,6 +626,81 @@
                         </TreeView.ItemTemplate>
                     </TreeView>
                 </DockPanel>
+
+                    <GridSplitter Grid.Row="1" Height="4" HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                                  Background="{StaticResource SplitterBrush}" ResizeBehavior="PreviousAndNext" />
+
+                    <!--
+                        MCP (left half) and SKILLS (right half) hit counts for the focused session,
+                        split by a vertical GridSplitter of the same 4px/SplitterBrush kind the
+                        window's own column splitters use. Both halves bind to the same
+                        McpSkillsPanelViewModel instance; only the collection differs.
+                    -->
+                    <Grid Grid.Row="2">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" MinWidth="80" />
+                            <ColumnDefinition Width="4" />
+                            <ColumnDefinition Width="*" MinWidth="80" />
+                        </Grid.ColumnDefinitions>
+
+                        <Border x:Name="McpSectionRoot" Grid.Column="0">
+                            <DockPanel LastChildFill="True">
+                                <Border DockPanel.Dock="Top" Margin="16,12,8,8" Style="{StaticResource SectionHeaderBackdropStyle}">
+                                    <TextBlock Text="MCP" Style="{StaticResource SectionHeaderTextStyle}" />
+                                </Border>
+
+                                <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="8,0,4,8">
+                                    <StackPanel>
+                                        <TextBlock Text="No MCP calls yet." Margin="8,4">
+                                            <TextBlock.Style>
+                                                <Style TargetType="TextBlock" BasedOn="{StaticResource SecondaryTextStyle}">
+                                                    <Setter Property="Foreground" Value="{StaticResource TextMutedBrush}" />
+                                                    <Setter Property="Visibility" Value="Collapsed" />
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding McpUsage.Count}" Value="0">
+                                                            <Setter Property="Visibility" Value="Visible" />
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </TextBlock.Style>
+                                        </TextBlock>
+                                        <ItemsControl ItemsSource="{Binding McpUsage}" ItemTemplate="{StaticResource ToolUsageRowTemplate}" />
+                                    </StackPanel>
+                                </ScrollViewer>
+                            </DockPanel>
+                        </Border>
+
+                        <GridSplitter Grid.Column="1" Width="4" HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                                      Background="{StaticResource SplitterBrush}" ResizeBehavior="PreviousAndNext" />
+
+                        <Border x:Name="SkillsSectionRoot" Grid.Column="2">
+                            <DockPanel LastChildFill="True">
+                                <Border DockPanel.Dock="Top" Margin="8,12,16,8" Style="{StaticResource SectionHeaderBackdropStyle}">
+                                    <TextBlock Text="SKILLS" Style="{StaticResource SectionHeaderTextStyle}" />
+                                </Border>
+
+                                <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="4,0,8,8">
+                                    <StackPanel>
+                                        <TextBlock Text="No skills used yet." Margin="8,4">
+                                            <TextBlock.Style>
+                                                <Style TargetType="TextBlock" BasedOn="{StaticResource SecondaryTextStyle}">
+                                                    <Setter Property="Foreground" Value="{StaticResource TextMutedBrush}" />
+                                                    <Setter Property="Visibility" Value="Collapsed" />
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding SkillUsage.Count}" Value="0">
+                                                            <Setter Property="Visibility" Value="Visible" />
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </TextBlock.Style>
+                                        </TextBlock>
+                                        <ItemsControl ItemsSource="{Binding SkillUsage}" ItemTemplate="{StaticResource ToolUsageRowTemplate}" />
+                                    </StackPanel>
+                                </ScrollViewer>
+                            </DockPanel>
+                        </Border>
+                    </Grid>
+                </Grid>
             </Border>
 
             <GridSplitter Grid.Column="1" Width="4" HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
@@ -685,7 +848,9 @@
                 <Border x:Name="PanelE" Grid.Row="2" BorderBrush="{StaticResource StrokeSubtleBrush}" BorderThickness="0,1,0,0" Background="{StaticResource SurfaceBrush}">
                     <DockPanel LastChildFill="True">
                         <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="16,10,16,0">
-                            <TextBlock Text="AGENT GRAPH" Style="{StaticResource SectionHeaderTextStyle}" />
+                            <Border Style="{StaticResource SectionHeaderBackdropStyle}" VerticalAlignment="Center">
+                                <TextBlock Text="AGENT GRAPH" Style="{StaticResource SectionHeaderTextStyle}" />
+                            </Border>
                             <TextBlock Text="{Binding StatusText}" Margin="10,0,0,0" VerticalAlignment="Center"
                                        FontSize="{StaticResource FontSizeCaption}" Foreground="{StaticResource TextMutedBrush}"
                                        TextTrimming="CharacterEllipsis" AutomationProperties.LiveSetting="Polite" />
@@ -726,8 +891,9 @@
                         below took over naming the focused root for panel B as a whole.
                     -->
                     <DockPanel x:Name="FilesSectionRoot" Grid.Row="0" LastChildFill="True">
-                        <TextBlock DockPanel.Dock="Top" Text="FILES" Margin="16,16,16,10"
-                                   Style="{StaticResource SectionHeaderTextStyle}" />
+                        <Border DockPanel.Dock="Top" Margin="16,16,16,10" Style="{StaticResource SectionHeaderBackdropStyle}">
+                            <TextBlock Text="FILES" Style="{StaticResource SectionHeaderTextStyle}" />
+                        </Border>
 
                         <TreeView x:Name="FilesTreeView" ItemsSource="{Binding Nodes}" BorderThickness="0" Background="Transparent"
                                   Padding="8,0,8,8" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
@@ -743,22 +909,44 @@
                             </TreeView.ItemContainerStyle>
                             <TreeView.ItemTemplate>
                                 <HierarchicalDataTemplate ItemsSource="{Binding Children}">
-                                    <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis">
-                                        <TextBlock.Style>
-                                            <Style TargetType="TextBlock" BasedOn="{StaticResource SecondaryTextStyle}">
-                                                <Style.Triggers>
-                                                    <!-- Folder vs file distinction never relies on colour
-                                                         alone - the TreeView's own expand arrow already
-                                                         differs, and AutomationDescription above carries
-                                                         the same distinction as text. -->
-                                                    <DataTrigger Binding="{Binding IsDirectory}" Value="True">
-                                                        <Setter Property="FontWeight" Value="Bold" />
-                                                        <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
-                                                    </DataTrigger>
-                                                </Style.Triggers>
-                                            </Style>
-                                        </TextBlock.Style>
-                                    </TextBlock>
+                                    <StackPanel Orientation="Horizontal">
+                                        <!-- Fixed-width icon slot so every row's name starts at the same
+                                             x-offset, whether or not this entry has an extension icon
+                                             (IconLabel empty) - the border itself always occupies the
+                                             slot; only its fill/label are conditional. -->
+                                        <Border VerticalAlignment="Center" CornerRadius="2" Padding="3,0" Width="18"
+                                                Margin="0,0,4,0"
+                                                Background="{Binding IconColorHex, Converter={StaticResource HexToBrush}}">
+                                            <TextBlock Text="{Binding IconLabel}" FontSize="8" FontWeight="Bold"
+                                                       Foreground="#FF1A1A1A" HorizontalAlignment="Center"
+                                                       Visibility="{Binding IconLabel, Converter={StaticResource StringToVis}}" />
+                                        </Border>
+                                        <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center">
+                                            <TextBlock.Style>
+                                                <Style TargetType="TextBlock" BasedOn="{StaticResource SecondaryTextStyle}">
+                                                    <Style.Triggers>
+                                                        <!-- Folder vs file distinction never relies on colour
+                                                             alone - the TreeView's own expand arrow already
+                                                             differs, and AutomationDescription above carries
+                                                             the same distinction as text. -->
+                                                        <DataTrigger Binding="{Binding IsDirectory}" Value="True">
+                                                            <Setter Property="FontWeight" Value="Bold" />
+                                                            <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
+                                                        </DataTrigger>
+                                                        <!-- Applied after the directory trigger so a hidden
+                                                             directory (e.g. ".git") still reads as dimmed,
+                                                             not bright-bold. TextMutedBrush (not
+                                                             TextDisabledBrush) so hidden entries stay
+                                                             legible instead of nearly invisible. -->
+                                                        <DataTrigger Binding="{Binding IsHidden}" Value="True">
+                                                            <Setter Property="Foreground" Value="{StaticResource TextMutedBrush}" />
+                                                            <Setter Property="FontStyle" Value="Italic" />
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </TextBlock.Style>
+                                        </TextBlock>
+                                    </StackPanel>
                                 </HierarchicalDataTemplate>
                             </TreeView.ItemTemplate>
                         </TreeView>
@@ -775,11 +963,42 @@
                         push action yet - list-only, same restraint the file tree applies.
                     -->
                     <DockPanel x:Name="GitSectionRoot" Grid.Row="2" LastChildFill="True">
-                        <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="16,16,16,10">
-                            <TextBlock Text="GIT" Style="{StaticResource SectionHeaderTextStyle}" />
-                            <TextBlock Text="{Binding StatusText}" Margin="10,0,0,0" VerticalAlignment="Center"
-                                       FontSize="{StaticResource FontSizeCaption}" Foreground="{StaticResource TextMutedBrush}"
-                                       TextTrimming="CharacterEllipsis" AutomationProperties.LiveSetting="Polite" />
+                        <StackPanel DockPanel.Dock="Top" Margin="16,16,16,10">
+                            <StackPanel Orientation="Horizontal">
+                                <Border Style="{StaticResource SectionHeaderBackdropStyle}" VerticalAlignment="Center">
+                                    <TextBlock Text="GIT" Style="{StaticResource SectionHeaderTextStyle}" />
+                                </Border>
+                                <TextBlock Text="{Binding StatusText}" Margin="10,0,0,0" VerticalAlignment="Center"
+                                           FontSize="{StaticResource FontSizeCaption}" Foreground="{StaticResource TextMutedBrush}"
+                                           TextTrimming="CharacterEllipsis" AutomationProperties.LiveSetting="Polite" />
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal" Margin="0,4,0,0"
+                                        Visibility="{Binding HasRepo, Converter={StaticResource BoolToVis}}">
+                                <TextBlock Text="&#xE74C;" FontFamily="Segoe MDL2 Assets" FontSize="12"
+                                           VerticalAlignment="Center" Foreground="{StaticResource TealBrush}" />
+                                <TextBlock Text="{Binding RepoName}" Margin="4,0,0,0" FontSize="{StaticResource FontSizeCaption}"
+                                           Foreground="{StaticResource TextPrimaryBrush}" FontWeight="Bold" />
+                                <TextBlock Text="&#xE7BB;" FontFamily="Segoe MDL2 Assets" FontSize="12" Margin="10,0,0,0"
+                                           VerticalAlignment="Center" Foreground="{StaticResource TealBrush}" />
+                                <TextBlock Text="{Binding RemoteBranchText}" Margin="4,0,0,0"
+                                           FontSize="{StaticResource FontSizeCaption}" Foreground="{StaticResource TextPrimaryBrush}"
+                                           FontWeight="Bold" />
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal" Margin="0,4,0,0"
+                                        Visibility="{Binding HasRepo, Converter={StaticResource BoolToVis}}">
+                                <TextBlock Text="&#xE81C;" FontFamily="Segoe MDL2 Assets" FontSize="12"
+                                           VerticalAlignment="Center" Foreground="{StaticResource TealBrush}" />
+                                <TextBlock Margin="4,0,0,0" FontSize="{StaticResource FontSizeCaption}" Foreground="{StaticResource TealBrush}">
+                                    <Run Text="{Binding ChangesCountText, Mode=OneWay}" Foreground="{StaticResource TextPrimaryBrush}" FontWeight="Bold" /><Run Text=" change(s)" />
+                                </TextBlock>
+                                <TextBlock Text="&#xE74E;" FontFamily="Segoe MDL2 Assets" FontSize="12" Margin="10,0,0,0"
+                                           VerticalAlignment="Center" Foreground="{StaticResource TealBrush}"
+                                           Visibility="{Binding PendingPushSummaryText, Converter={StaticResource StringToVis}}" />
+                                <TextBlock Margin="4,0,0,0" FontSize="{StaticResource FontSizeCaption}" Foreground="{StaticResource TealBrush}"
+                                           Visibility="{Binding PendingPushSummaryText, Converter={StaticResource StringToVis}}">
+                                    <Run Text="{Binding PendingPushCountText, Mode=OneWay}" Foreground="{StaticResource TextPrimaryBrush}" FontWeight="Bold" /><Run Text=" commit(s) to push" />
+                                </TextBlock>
+                            </StackPanel>
                         </StackPanel>
 
                         <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="8,0,8,8">

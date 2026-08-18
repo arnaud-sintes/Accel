@@ -83,4 +83,33 @@ public static class RootFolderEditor
         // the config entry is the entire operation.
         RootFoldersConfig.Save(configPath, newRoots, current.Sessions, keepSessionIds);
     }
+
+    /// <summary>
+    /// Records <paramref name="displayName"/> as <paramref name="sessionId"/>'s <c>accel_override</c>
+    /// (the top tier of <c>RootsTreeBuilder.BuildSessionDto</c>'s name ladder), preserving any existing
+    /// <see cref="SessionOverride.Pinned"/>/<see cref="SessionOverride.Hidden"/>/<see cref="SessionOverride.LastOpenedUtc"/>
+    /// already on file for this session. Used right after a session is created so panel A's row shows
+    /// the same name the tab strip does, instead of falling through to the transcript-derived tiers
+    /// until a live <c>/rename</c> happens to set one.
+    /// </summary>
+    public static void SetSessionDisplayName(string configPath, string sessionId, string displayName)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(configPath);
+        ArgumentException.ThrowIfNullOrEmpty(sessionId);
+        ArgumentException.ThrowIfNullOrEmpty(displayName);
+
+        var current = RootFoldersConfig.LoadFull(new[] { configPath });
+
+        var updated = current.Sessions.TryGetValue(sessionId, out var existing)
+            ? existing with { DisplayName = displayName }
+            : new SessionOverride(displayName, Pinned: false, Hidden: false, LastOpenedUtc: null);
+
+        var newSessions = new Dictionary<string, SessionOverride>(current.Sessions, StringComparer.Ordinal)
+        {
+            [sessionId] = updated,
+        };
+        var keepSessionIds = new HashSet<string>(newSessions.Keys, StringComparer.Ordinal);
+
+        RootFoldersConfig.Save(configPath, current.Roots, newSessions, keepSessionIds);
+    }
 }

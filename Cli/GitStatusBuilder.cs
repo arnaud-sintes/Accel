@@ -11,6 +11,12 @@ using System.IO;
 /// "Staged Changes" and "Changes" when it differs in both places.</summary>
 public sealed record GitChangeEntry(string Path, char StatusCode, string StatusDescription, bool IsStaged);
 
+/// <summary>Panel B's git header summary: the repo's folder name, its current branch's upstream
+/// (when one is configured), and how many local commits on that branch haven't been pushed to it
+/// yet. <see cref="RemoteBranch"/> is <c>null</c> when the branch has no upstream configured, in
+/// which case <see cref="AheadCount"/> is always 0 (there's nothing to compare against).</summary>
+public sealed record GitRepoSummary(string RepoName, string? Branch, string? RemoteBranch, int AheadCount);
+
 /// <summary>
 /// Pure, WPF-free builder for panel B's git status list - the git-status counterpart to
 /// <see cref="FilesTreeBuilder"/> (which walks disk, not `git status`). Shells out to the `git`
@@ -57,6 +63,67 @@ public static class GitStatusBuilder
             process.WaitForExit(5000);
 
             return process.ExitCode == 0 ? Parse(output) : null;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Runs the handful of `git rev-parse`/`git rev-list` calls needed for panel B's git
+    /// header summary, or <c>null</c> under the same "not a repo" conditions as <see cref="Build"/>.
+    /// Each call degrades independently: no upstream configured for the current branch leaves
+    /// <see cref="GitRepoSummary.RemoteBranch"/> null and <see cref="GitRepoSummary.AheadCount"/> at
+    /// 0 rather than failing the whole summary.</summary>
+    public static GitRepoSummary? BuildSummary(string? repoRootPath)
+    {
+        if (string.IsNullOrWhiteSpace(repoRootPath) || !Directory.Exists(repoRootPath))
+        {
+            return null;
+        }
+
+        string? toplevel = RunGitCommand(repoRootPath, "rev-parse --show-toplevel");
+        if (toplevel is null)
+        {
+            return null;
+        }
+
+        string repoName = Path.GetFileName(toplevel.TrimEnd('/', '\\'));
+        string? branch = RunGitCommand(repoRootPath, "rev-parse --abbrev-ref HEAD");
+        string? remoteBranch = RunGitCommand(repoRootPath, "rev-parse --abbrev-ref --symbolic-full-name @{u}");
+
+        int aheadCount = 0;
+        if (!string.IsNullOrEmpty(remoteBranch))
+        {
+            string? aheadText = RunGitCommand(repoRootPath, "rev-list --count @{u}..HEAD");
+            int.TryParse(aheadText, out aheadCount);
+        }
+
+        return new GitRepoSummary(repoName, branch, remoteBranch, aheadCount);
+    }
+
+    private static string? RunGitCommand(string workingDirectory, string arguments)
+    {
+        try
+        {
+            using var process = new Process
+            {
+                StartInfo = new ProcessStartInfo("git", arguments)
+                {
+                    WorkingDirectory = workingDirectory,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                },
+            };
+
+            process.Start();
+            string output = process.StandardOutput.ReadToEnd().Trim();
+            process.StandardError.ReadToEnd();
+            process.WaitForExit(5000);
+
+            return process.ExitCode == 0 ? output : null;
         }
         catch (Exception)
         {

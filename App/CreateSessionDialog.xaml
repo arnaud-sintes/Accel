@@ -5,7 +5,7 @@
         xmlns:conv="clr-namespace:Accel.App.Converters"
         Title="Create session" Height="620" Width="560"
         WindowStartupLocation="CenterOwner" ResizeMode="NoResize"
-        ShowInTaskbar="False" WindowStyle="None">
+        ShowInTaskbar="False" WindowStyle="None" Style="{StaticResource DialogWindowStyle}">
     <!--
         P2-T6 originally set Language="" here, matching MainWindow.xaml's now-removed workaround -
         see Accel.csproj's comment on why InvariantGlobalization was removed entirely instead (it
@@ -25,6 +25,7 @@
         (L2) on top - the same elevation ladder the main window uses, so a dialog reads as a raised
         card of the same design system rather than a differently-skinned window.
     -->
+    <Border BorderBrush="{StaticResource WindowBorderBrush}" BorderThickness="1">
     <DockPanel LastChildFill="True" Background="{StaticResource SurfaceBrush}">
         <controls:CustomTitleBar DockPanel.Dock="Top" TitleText="Create session"
                                   ShowMinimizeButton="False" ShowMaximizeButton="False" />
@@ -178,4 +179,5 @@
         </StackPanel>
         </Grid>
     </DockPanel>
+    </Border>
 </Window>
