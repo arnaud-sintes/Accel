@@ -24,9 +24,11 @@ DI container and no separate server/UI processes talking over HTTP to each other
    `http://127.0.0.1:<port>` (default port `EventServer.DefaultPort` / `AccelHookSpec.DefaultPort`,
    never `0.0.0.0`) that receives hook-event POSTs from Claude Code CLI sessions and serves state/PTY
    WebSocket routes.
-3. **A WPF monitor UI** — a single `MainWindow` showing a tree of tracked project folders/sessions/agents
-   (panel A), a tab strip of live PTY sessions (panel C), and an embedded terminal (panel D via WebView2 +
-   xterm.js).
+3. **A WPF monitor UI** — a single `MainWindow` showing, across five panels (A–E): a tree of tracked
+   project folders/sessions/agents plus the focused session's MCP-tool/Skill hit counts (panel A), a
+   read-only file tree and a `git status` list for the focused folder (panel B), a tab strip of live PTY
+   sessions (panel C), an embedded terminal (panel D via WebView2 + xterm.js), and a left-to-right node
+   graph of the focused session's running sub-agents (panel E).
 
 `Program.cs` also acts as a **CLI dispatcher**: Claude Code itself invokes the *same* `accel.exe` as a
 short-lived child process for two verbs — `accel statusline` and `accel subagent-statusline` — which do
@@ -63,8 +65,8 @@ directly (real child processes, real WebView2/WPF) rather than being unit tests.
 ### 2.1 `Cli/` — process entry, verb dispatch, install/uninstall/doctor, monitor-tree projection
 
 - **`ArgParser.cs`** — hand-rolled, never-throwing argv parser. First non-`--` token is the verb
-  (`Start`/`StatusLine`/`SubagentStatusLine`/`Doctor`/`Unknown`); flags: `--port <n>`, `--uninstall`,
-  `--dump-raw <dir>`.
+  (`Start`/`StatusLine`/`SubagentStatusLine`/`Notify`/`Doctor`/`Unknown`); flags: `--port <n>`,
+  `--uninstall`, `--dump-raw <dir>`; `Notify` additionally carries a `--route <path>` value.
 - **`AccelPaths.cs`** — static path/exe-resolution helpers used so CLI verbs stay unit-testable:
   `DefaultSettingsPath()` (`%USERPROFILE%\.claude\settings.json`, user-scope only), `CurrentExePath()`
   (so installed hooks call the real binary, not `dotnet`), `SafeProbe(...)` (wraps a version probe so
@@ -95,6 +97,12 @@ directly (real child processes, real WebView2/WPF) rather than being unit tests.
   captured original `statusLine`/`subagentStatusLine` commands to `%USERPROFILE%\.claude\accel-state.json`
   — needed because `install` (which captures) and `statusline`/`subagent-statusline` (which need to chain
   to the capture) are separate short-lived process invocations.
+- **`NotifyCommand.cs`** — the `notify` verb: Accel's own replacement for the old `curl.exe`-based hook
+  commands. Claude Code invokes `accel.exe notify --port <n> --route <path> -H "X-Accel-Hook: <Event>"`
+  once per lifecycle event (see `Settings/AccelHookSpec.cs`), reads the payload from stdin, POSTs it to
+  `http://127.0.0.1:<port><route>`, and always exits 0 having printed nothing — swallowing a connection
+  refusal (Accel not running yet) is the whole point, since `curl.exe -s` failing silently used to surface
+  as a "hook error" at every session start.
 - **`DebounceCoalescer.cs`** — pure, timer-framework-agnostic debounce primitive (`Signal()`/`Elapsed()`)
   reused by `App/Services/TelemetryFeed.cs`.
 - **`ShellCommandRunner.cs`** — runs an arbitrary shell command *string* (not exe+argv) with a hard
@@ -234,11 +242,14 @@ self-invoked `accel.exe notify` calls) and (2) the top-level `statusLine`/`subag
 - **`TranscriptReader.cs` / `TranscriptHeadReader.cs` / `MetaJsonReader.cs`** — tail/head readers over
   session `.jsonl` transcripts and their sibling `.meta.json` files; extract model id, token usage,
   effort level, cwd, and derived display labels.
-- **`ModelBadgeTable.cs` / `ModelWindowTable.cs` / `EffortBarLevel.cs`** — pure, static, side-effect-free
-  lookup tables shared between backend metrics computation and UI rendering (also reused directly by
-  `Cli/MonitorTreeBuilder.cs` and UI controls): model id → badge letter/color, model id → context-window
-  token size (with an "assumed, not matched" flag propagated through the DTOs), effort level string →
-  0–4 bar level.
+- **`ModelBadgeTable.cs` / `ModelWindowTable.cs` / `EffortBarLevel.cs` / `ModelEffortTable.cs`** — pure,
+  static, side-effect-free lookup tables shared between backend metrics computation and UI rendering
+  (also reused directly by `Cli/MonitorTreeBuilder.cs` and UI controls): model id → badge letter/color,
+  model id → context-window token size (with an "assumed, not matched" flag propagated through the
+  DTOs), effort level string → 0–5 bar level (five tiers: low/medium/high/xhigh/max), and
+  `ModelEffortTable.SupportsEffort(...)` — whether a model family/badge recognizes the effort knob at
+  all (Haiku does not; an unrecognized family/badge degrades to "supports effort" rather than hiding the
+  control on an unmatched model).
 
 ### 2.6 `Orchestration/` — PTY/process spawn, tracking, and teardown
 
@@ -367,6 +378,25 @@ and guarantees they don't outlive the app even across crashes.
   `EffortBarsControl`) renders them via a `DataTemplate`-per-card `ItemsControl` over a `Canvas`, with bezier
   connectors built in code-behind from the pure, WPF-free `AgentGraphLayout.Compute` (horizontal,
   left-to-right, column-major layout math, unit-tested without any UI thread).
+- **`FilesPanelViewModel.cs`** (panel B, top) — a read-only file/folder tree rooted at the focused
+  session's cwd (falling back to panel A's own tree selection when no session is focused, via a
+  `RootsPanelViewModel` reference), another independent reader of the same `ITelemetryFeed`/
+  `ISessionSelectionService` pair panel A and E use. `FilesPanelNodeViewModel` children load lazily on
+  first expand (`FilesTreeBuilder.BuildChildren`, one level at a time) rather than eagerly for the whole
+  subtree — an earlier eager/shared-budget walk could silently truncate a top-level listing when an
+  earlier sibling's subtree was large. Raises `FolderExpanded`/`FolderCollapsed` so `GitPanelViewModel`
+  can follow which folder is being drilled into. Expand/collapse only — no file-open, no stage/commit.
+- **`GitPanelViewModel.cs`** (panel B, bottom) — a flat `git status` list (via `GitStatusBuilder.Build`)
+  for the same focused root `FilesPanelViewModel` resolves, split into `StagedChanges`/`Changes`
+  (unstaged + untracked), VS Code Source Control-style. Wired to `FilesPanelViewModel.FolderExpanded`/
+  `FolderCollapsed` in `Program.cs` so drilling into a repo folder in the file tree switches this section
+  to that repo. List-only — no stage/unstage/discard/commit action yet.
+- **`McpSkillsPanelViewModel.cs`** (panel A, bottom third) — the focused session's MCP-tool and Skill
+  hit counts as two flat lists (`ToolUsageRowViewModel`), most-used first. A third independent reader of
+  the same `ITelemetryFeed`/`ISessionSelectionService` pair; all its data already rides on the pushed
+  `SessionTreeDto` (`McpUsage`/`SkillUsage`, populated by `RootsTreeBuilder`), so a rebuild is a lookup
+  plus clear-and-repopulate, no I/O of its own. Historical (not-currently-running) sessions report empty
+  usage arrays — Accel only counts `PostToolUse` hits observed while it was running.
 - **Remaining `Services/`**: `CommonCliFlags` (permission-mode enum → `--permission-mode` argv),
   `ExtraArgsParser` (tokenizes free-text into a real argv array, quote-aware), `IFolderPickerService`/
   `IUserConfirmationService` (testable wrappers over WinForms folder picker / MessageBox),

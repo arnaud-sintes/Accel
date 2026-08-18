@@ -215,12 +215,14 @@ used to cascade dependent-property notifications (`TabViewModel.OnHasEndedChange
 the setter body.
 
 **Pure logic is deliberately kept WPF-free so it is unit-testable without a UI thread.**
-`SessionVisualStateResolver`, `ModelBadgeTable`, `EffortBarLevel`, and panel E's `AgentGraphLayout`
-(the horizontal, column-major tree layout + bezier control-point math behind `AgentGraphControl`)
-return plain data (hex strings, enums, record structs, plain `double`s) with no `System.Windows`
-dependency; WPF-specific conversion is isolated to tiny one-way `IValueConverter`s in
-`App/Converters/` (`HexToBrushConverter` — explicit doc comment states this split is precisely so
-the resolver logic "stays unit-testable"). This is a repeated, explicit design rule, not incidental.
+`SessionVisualStateResolver`, `ModelBadgeTable`, `EffortBarLevel`, `ModelEffortTable`, and panel E's
+`AgentGraphLayout` (the horizontal, column-major tree layout + bezier control-point math behind
+`AgentGraphControl`) return plain data (hex strings, enums, record structs, plain `double`s, `bool`)
+with no `System.Windows` dependency; WPF-specific conversion is isolated to tiny one-way
+`IValueConverter`s in `App/Converters/` (`HexToBrushConverter`, `BoolToEffortTooltipConverter` — the
+latter turns `CreateSessionDialogViewModel.EffortSupported` into the disabled Effort combo's
+explanatory tooltip — explicit doc comments state this split is precisely so the resolver logic "stays
+unit-testable"). This is a repeated, explicit design rule, not incidental.
 
 **Strict single-writer ownership for shared mutable state**, documented as a "locked-in decision."
 E.g. `TabsViewModel` is documented as "the only writer of the focused session id" via

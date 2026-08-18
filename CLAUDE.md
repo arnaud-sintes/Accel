@@ -11,6 +11,6 @@ This file is the entry point for Claude Code (and any coding agent) working in t
 
 ## Quick orientation
 
-Accel is a native Windows C#/.NET 8 tool that monitors Claude Code local session activity: it installs itself into Claude Code's hooks, runs a local HTTP server to receive events, and shows a WPF monitor window of sessions, sub-agents, and PTY terminals — all in one process.
+Accel is a native Windows C#/.NET 8 tool that monitors Claude Code local session activity: it installs itself into Claude Code's hooks, runs a local HTTP server to receive events, and shows a WPF monitor window — sessions/sub-agents/MCP-Skill usage, a file tree + git status, PTY terminal tabs, and an agent graph, across five panels — all in one process.
 
 For anything beyond a one-line lookup, prefer the dedicated file above over guessing from file names.

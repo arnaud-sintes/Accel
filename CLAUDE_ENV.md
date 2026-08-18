@@ -21,8 +21,9 @@ This document describes file/folder organization, build/test/publish mechanics, 
 | `Server/` | Kestrel-based HTTP event server, route handlers (`/events/*`, `/roots`, `/roots/tree`), WebSocket PTY routes |
 | `Settings/` | Claude Code settings.json merge/diff/hook registration logic |
 | `Versioning/` | Version gate and compatibility checks |
-| `tests/accel.Tests/` | xUnit test project (288+ tests) covering all layers |
-| `bin/`, `obj/`, `publish/` | Build artifacts (gitignored) |
+| `tests/accel.Tests/` | xUnit test project (977+ tests) covering all layers |
+| `installer/` | Inno Setup script (`accel.iss`) that packages the published exe into `Accel-Setup-<version>.exe`; invoked by `publish.ps1`, never run standalone |
+| `bin/`, `obj/`, `publish/`, `dist/` | Build/publish artifacts (gitignored) — `dist/` holds `publish.ps1`'s zip and installer output |
 | `.serena/` | Serena code-nav cache (gitignored) |
 | `.gitignore` | Standard: `bin/`, `obj/`, `.vs/`, `TestResults/`, `coverage/`, OS files |
 
@@ -35,7 +36,7 @@ This document describes file/folder organization, build/test/publish mechanics, 
 | `global.json` | Locks .NET SDK to 8.0.424 with `rollForward: latestFeature` |
 | `Program.cs` | Entry point; routes CLI args to ArgParser, smoke tests, and RunCombinedAsync |
 | `folder.json` | JSON array of root folder paths for monitoring (format: `["C:/projects", ...]`) |
-| `publish.ps1` | PowerShell script wrapping `dotnet publish` for single-file executable |
+| `publish.ps1` | Wraps `dotnet publish` for the single-file executable, then packages a portable zip and (if Inno Setup is installed) a `Setup.exe` into `dist\` |
 
 ## Build Instructions
 
@@ -73,7 +74,7 @@ Output: `bin/Release/net8.0-windows/accel.exe` + dependencies
 dotnet test accel.sln
 ```
 
-Runs all 288+ xUnit tests across unit, integration, and targeted E2E categories; total runtime ~30–60 seconds.
+Runs all 977+ xUnit tests across unit, integration, and targeted E2E categories; total runtime ~20–30 seconds.
 
 **Verbose output (shows individual test names)**:
 ```bash
@@ -88,15 +89,16 @@ dotnet test accel.sln -v detailed
 
 **Naming convention**: `*Tests.cs` for unit/integration tests; `*SmokeTest.cs` for E2E validation tests (see section below)
 
-**Test count**: ~54 files, 288+ test cases covering:
+**Test count**: ~61 files, 977+ test cases covering:
 - CLI parsing (CliTests, CommonCliFlagsTests)
 - Settings merge/diff (SettingsMergerTests)
 - Hook registration (StatusLineCommandTests, SubagentStatusLineCommandTests)
 - Session/folder tree enumeration (RootsTreeRouteTests, RootsPanelViewModelTests, MonitorTreeBuilderTests)
 - PTY lifecycle (PtySessionTests, PtyRegistryTests, PtyOrphanReconcilerTests)
 - ConPTY interop marshalling (ConPtyTests)
-- Dialog/ViewModel logic (CreateSessionDialogViewModelTests, TabsViewModelTests)
+- Dialog/ViewModel logic (CreateSessionDialogViewModelTests, TabsViewModelTests, McpSkillsPanelViewModelTests)
 - EventServer/HTTP routes (EventServerTests, RootsRouteTests, StateQueryRoutesTests)
+- Metrics/model lookup tables (EffortBarLevelTests, ModelEffortTableTests, ModelWindowTableTests)
 
 ### Smoke Tests (E2E Validation)
 
@@ -158,17 +160,26 @@ dotnet publish accel.csproj -r win-x64 -c Release
 .\publish.ps1
 ```
 
-Equivalent to the dotnet publish command above but with added validation:
-- Confirms publish succeeded (checks exit code)
-- Verifies accel.exe exists at expected path
+Runs the dotnet publish command above, then packages the redistributables into `dist\` (version read
+from `accel.csproj`'s `<Version>`, the single source of truth also read by `App/Controls/AppVersionInfo.cs`):
+- Confirms publish succeeded (checks exit code) and that `accel.exe` exists at the expected path
+- Always produces a portable zip (`dist\Accel-<version>-win-x64.zip`): a staged copy of `accel.exe` +
+  the `wwwroot\xterm` terminal assets + the default `folder.json` fallback (`.pdb`/xml docs/`global.json`/
+  `web.config` are excluded — none are needed at runtime)
+- If Inno Setup 6's `ISCC.exe` is found on PATH or its default install location, also compiles
+  `installer\accel.iss` into `dist\Accel-Setup-<version>.exe`; otherwise skips that step with a warning
+  (the zip is still a complete redistributable) — install Inno Setup from
+  https://jrsoftware.org/isinfo.php to enable it
 - Reports final file size in MB
 
 ### Artifact Details
 
 - **Size**: ~179 MB (single executable includes .NET 8 runtime + all dependencies)
 - **Format**: PE32+ (x64 Windows executable)
-- **Dependencies**: None on target system
-- **Sign/notarize**: Not automated (publish.ps1 omits signing; add `/d` cert path and `/sha256` to `signtool` if needed)
+- **Dependencies**: None on target system (the installer's `[Setup]` section notes `accel.exe` is
+  already self-contained/self-extracting, so there's no .NET-runtime prerequisite page)
+- **Sign/notarize**: Not automated (neither `publish.ps1` nor `installer\accel.iss` sign the output;
+  add a `signtool` step with a `/d` cert path and `/sha256` if needed)
 
 ## Environment Quirks & Notes
 
