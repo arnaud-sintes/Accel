@@ -1,17 +1,17 @@
 # Accel — Another Claude Code Ecosystem Layer
 
-![Accel](docs/screenshots/accel.png)
+![image-20260818135945612](README.assets/image-20260818135945612.png)
 
 ## What is Accel?
 
-Native Windows C# tool that monitors Claude Code local session activity. Running `accel` with no arguments does everything in one combined process: it auto-installs itself into Claude Code hooks (`%USERPROFILE%\.claude\settings.json`) so Claude Code events are forwarded to Accel via curl POST calls, starts a local, non-HTTPS HTTP server (default port **40010**, overridable via `--port`) to receive them in-process, and opens a WinForms monitor window showing the configured root folders → Claude Code sessions → running sub-agents, refreshing live as events arrive (no polling).
+Native Windows C# tool that monitors Claude Code local session activity. Running `accel` with no arguments does everything in one combined process: it auto-installs itself into Claude Code hooks (`%USERPROFILE%\.claude\settings.json`) so Claude Code events are forwarded to Accel by self-invoking `accel.exe notify` (no `curl.exe` involved), starts a local, non-HTTPS HTTP server (default port **40010**, overridable via `--port`) to receive them in-process, and opens a WPF monitor window showing the configured root folders → Claude Code sessions → running sub-agents, plus a file tree, `git status`, MCP-tool/Skill usage, a PTY terminal with tabs, and an agent graph — refreshing live as events arrive (no polling).
 
 ## Building
 
 ### Requirements
 
 - .NET 8 SDK (pinned to 8.0.424 via `global.json` — this avoids a broken workload-manifest resolver in newer versions)
-- Windows 10 1803+ or Windows 11 (for built-in `curl.exe`)
+- Windows 10 1809+ or Windows 11 (for the ConPTY pseudoconsole API used to host PTY sessions) plus the WebView2 Evergreen runtime (usually preinstalled; needed by the terminal panel — `accel doctor` checks for it)
 
 ### Build
 
@@ -19,7 +19,7 @@ Native Windows C# tool that monitors Claude Code local session activity. Running
 dotnet build accel.sln
 ```
 
-This builds the main `accel` project and the `accel.Tests` project (xUnit, 936 tests).
+This builds the main `accel` project and the `accel.Tests` project (xUnit, 977 tests).
 
 ## Publishing
 
@@ -46,6 +46,7 @@ The exe requires no .NET runtime on the target machine — it includes everythin
 - **`accel --verbose`** — Same as the default start, but also prints the diagnostic console output that a normal launch suppresses (per-event lifecycle lines, the full hook-install summary).
 - **`accel --uninstall`** — Remove all Accel-registered hooks from settings.json and restore any pre-existing `statusLine`/`subagentStatusLine` settings, then exit immediately (no server/UI started).
 - **`accel doctor`** — Short-lived, UI-less pre-flight diagnostic. Checks that `claude` resolves to a native executable (not an npm-style `.cmd`/`.bat`/`.ps1` shim) and that the WebView2 Evergreen runtime is installed (needed by the terminal panel). Prints `[OK]`/`[FAIL]` per check and exits 1 if anything failed.
+- **`accel notify --port <n> --route <path> -H "X-Accel-Hook: <Event>"`** — **Internal verb, invoked by Claude Code itself as a short-lived child process** (this is what the four installed hooks actually run instead of `curl.exe`). Reads the hook's JSON payload from stdin, POSTs it to `http://127.0.0.1:<port><path>`, and always exits 0 having printed nothing — a connection refusal (Accel not running yet) is swallowed silently rather than surfacing as a hook error.
 - **`accel statusline --port <n>`** — **Internal verb, invoked by Claude Code itself as a short-lived child process.** Reads the statusline payload from stdin, posts it to the server, and re-prints the chained original status line. Always exits 0.
 - **`accel subagent-statusline --port <n>`** — **Internal verb, invoked by Claude Code itself as a short-lived child process.** Reads the subagent status array from stdin and posts it to the server without printing.
 
@@ -55,7 +56,7 @@ No other user-facing verbs are recognized (there is no separate `run`/`install`/
 
 1. **Hook Registration:** On startup, Accel reads `%USERPROFILE%\.claude\settings.json` and registers itself into four event hooks (`SessionStart`, `SessionEnd`, `SubagentStart`, `SubagentStop`) and two status-line commands (`statusLine`, `subagentStatusLine`).
 
-2. **Event Forwarding:** Claude Code fires these hooks at the appropriate times, and each hook issues a curl POST request to Accel's HTTP server with the event payload as JSON.
+2. **Event Forwarding:** Claude Code fires these hooks at the appropriate times, and each hook runs `accel.exe notify --port <n> --route <path> -H "X-Accel-Hook: <Event>"` — Accel notifying itself rather than shelling out to `curl.exe` — which POSTs the event payload as JSON to Accel's HTTP server and always exits 0, even if Accel isn't running yet.
 
 3. **Status Line:** Accel installs itself as the `statusLine` command — when Claude Code requests a status-line update, Accel receives the payload on stdin, posts it to the server for metrics collection, and then re-invokes any pre-existing status-line command (or a default fallback) so the status bar continues to render normally.
 
@@ -99,15 +100,16 @@ The monitor window is split into five panels (`A`–`E`), each bound to its own 
 
 ```
 +------------------+---------------------------------------+------------------+
-| Panel A          | Panel C (tab strip)                   | Panel B          |
+| Panel A (top 3/4)| Panel C (tab strip)                   | Panel B          |
 | Roots / sessions | Panel D (terminal, WebView2+xterm.js) | Files (top)      |
 | / sub-agents     |                                       | Git status (bot) |
 | (tree, left)     +---------------------------------------+                  |
-|                  | Panel E (agent graph, bottom)         |                  |
+| Panel A (bottom  | Panel E (agent graph, bottom)         |                  |
+| 1/4): MCP/Skills |                                       |                  |
 +------------------+---------------------------------------+------------------+
 ```
 
-- **Panel A — Roots / Sessions / Sub-agents** (`RootsPanelViewModel`, left column): a tree of the configured root folders, every Claude Code session found under them (live or historical), and, for a live session, its currently running sub-agents. Right-clicking a row opens a context menu whose items are gated by the row's kind:
+- **Panel A — Roots / Sessions / Sub-agents** (`RootsPanelViewModel`, left column, top 3/4): a tree of the configured root folders (sorted alphabetically), every Claude Code session found under them (live or historical), and, for a live session, its currently running sub-agents. Right-clicking a row opens a context menu whose items are gated by the row's kind:
   - **On a root folder:** *Create session…* (opens the "Create session" dialog with that folder pre-filled as the working directory), *Stop monitoring this folder…* (removes the root from `folder.json`/`accel-folders.json` — see [Root Folders Configuration](#how-it-works) above).
 
     ![Panel A — root folder context menu](docs/screenshots/panel-a-root-context-menu.png)
@@ -116,11 +118,13 @@ The monitor window is split into five panels (`A`–`E`), each bound to its own 
 
     ![Panel A — session context menu](docs/screenshots/panel-a-roots-context-menu.png)
 
-- **Panel B — Files / Git** (right column, top/bottom split): a read-only file tree for whichever folder is currently focused (top), and a flat `git status` list for that same folder grouped into "Staged Changes"/"Changes" (bottom, VS Code Source Control style). Expand/collapse only — no file-open, no stage/commit/push actions yet.
+- **Panel A — MCP / Skills usage** (`McpSkillsPanelViewModel`, left column, bottom 1/4): two flat, most-used-first lists of the focused session's MCP-tool and Skill hit counts. Accel only counts `PostToolUse` hits observed while it was running, so a historical (not-currently-open) session always shows empty lists here.
+
+- **Panel B — Files / Git** (right column, top/bottom split): a read-only file tree for whichever folder is currently focused (top, with per-file-type icons), and a flat `git status` list for that same folder grouped into "Staged Changes"/"Changes" (bottom, VS Code Source Control style). Expand/collapse only — no file-open, no stage/commit/push actions yet.
 
   ![Panel B — Files and Git status](docs/screenshots/panel-b-files-git.png)
 
-- **"Create session…" dialog**: opened from Panel A's root context menu. Lets you set a display name, model, effort, permission mode, working directory, and (advanced/unvalidated) extra CLI arguments before spawning the PTY session.
+- **"Create session…" dialog**: opened from Panel A's root context menu. Lets you set a display name, model, effort, permission mode, working directory, and (advanced/unvalidated) extra CLI arguments before spawning the PTY session. Effort is a 5-tier scale (low/medium/high/xhigh/max) gated per model family — Haiku has no reasoning-effort knob at all, so the control hides/disables itself rather than offering a setting the CLI would reject.
 
   ![Create session dialog](docs/screenshots/panel-create-session-dialog.png)
 
@@ -128,7 +132,7 @@ The monitor window is split into five panels (`A`–`E`), each bound to its own 
 
   ![Panel C/D — tab strip and terminal](docs/screenshots/panel-cd-tabs-terminal.png)
 
-- **Panel E — Agent Graph** (`AgentGraphViewModel`, bottom of the center column): a left-to-right node graph of the focused session's currently running sub-agents (parent first, bezier connectors), each card showing model badge and an `EffortBarsControl` radial gauge for its effort level. Visible but empty ("no session focused" / "no longer in the tree") in the screenshot above, since that session had no focus and no sub-agents running yet — a genuine sub-agent graph capture is still pending a session that spawns Task sub-agents while under the monitor.
+- **Panel E — Agent Graph** (`AgentGraphViewModel`, bottom of the center column): a left-to-right node graph of the focused session's currently running sub-agents (parent first, bezier connectors), each card showing model badge and an `EffortBarsControl` radial gauge for its effort level (five tiers: low/medium/high/xhigh/max). Visible but empty ("no session focused" / "no longer in the tree") in the screenshot above, since that session had no focus and no sub-agents running yet — a genuine sub-agent graph capture is still pending a session that spawns Task sub-agents while under the monitor.
 
 ## Example Usage
 
@@ -152,4 +156,4 @@ accel doctor
 dotnet test Accel.sln
 ```
 
-Runs 936 unit tests covering settings merge/diff, hook registration, state management, CLI parsing, and session/folder tree enumeration.
+Runs 977 unit tests covering settings merge/diff, hook registration, state management, CLI parsing, session/folder tree enumeration, the file/git/MCP-Skills panels, and per-model effort gating.
