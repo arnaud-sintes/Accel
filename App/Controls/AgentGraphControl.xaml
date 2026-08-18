@@ -151,9 +151,11 @@
                                        HorizontalAlignment="Center" VerticalAlignment="Center" />
                         </Border>
 
-                        <!-- Effort ring: reused verbatim from panel A. -->
+                        <!-- Effort ring: reused verbatim from panel A. Hidden (not an empty ring) for a
+                             model family with no effort concept - see ShowEffortBars/ModelEffortTable. -->
                         <controls:EffortBarsControl Grid.Row="0" Grid.Column="2" Level="{Binding EffortLevel}"
-                                                     Margin="0,0,8,0" VerticalAlignment="Center" />
+                                                     Margin="0,0,8,0" VerticalAlignment="Center"
+                                                     Visibility="{Binding ShowEffortBars, Converter={StaticResource BoolToVis}}" />
 
                         <!-- Name: Star-width, ellipsis-trimmed. -->
                         <TextBlock Grid.Row="0" Grid.Column="3" Text="{Binding DisplayName}"

@@ -47,6 +47,7 @@ public sealed partial class AgentGraphNodeViewModel : ObservableObject
 
         ModelBadge = ModelBadgeTable.Resolve(Columns.Model);
         EffortLevel = EffortBarLevel.Resolve(Columns.Effort);
+        ShowEffortBars = ModelEffortTable.SupportsEffort(ModelBadge);
         DisplayName = ResolveDisplayName();
         DetailText = $"{Columns.Duration} · {Columns.Tokens} · {Columns.Context}";
         TooltipText = BuildTooltipText();
@@ -100,6 +101,10 @@ public sealed partial class AgentGraphNodeViewModel : ObservableObject
     public ModelBadge ModelBadge { get; }
 
     public int EffortLevel { get; }
+
+    /// <summary>Whether the effort-ring badge should render for this card at all - false for a
+    /// Haiku card (a model family with no effort concept, per <see cref="ModelEffortTable"/>).</summary>
+    public bool ShowEffortBars { get; }
 
     /// <summary>The row's name, falling back to its type then its id - never blank.</summary>
     public string DisplayName { get; }

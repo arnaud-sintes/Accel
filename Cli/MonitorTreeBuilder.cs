@@ -54,8 +54,9 @@ public sealed record MonitorSessionNode(string SessionId, string Text, MonitorNo
 /// under one of its <see cref="Sessions"/>.</summary>
 public sealed record MonitorRootNode(string Path, string Text, MonitorSessionNode[] Sessions, MonitorAgentNode[] OrphanAgents, MonitorRowColumns Columns);
 
-/// <summary>The whole tree panel A renders: the configured roots in order, plus an optional
-/// sibling "(unattributed)" node - see project-ui.md's "Rendering" section.</summary>
+/// <summary>The whole tree panel A renders: the configured roots sorted alphabetically by path
+/// (ordinal, case-insensitive - <see cref="MonitorTreeBuilder.Build"/>), plus an optional sibling
+/// "(unattributed)" node - see project-ui.md's "Rendering" section.</summary>
 public sealed record MonitorTree(MonitorRootNode[] Roots, MonitorRootNode? Unattributed);
 
 /// <summary>
@@ -75,7 +76,10 @@ public static class MonitorTreeBuilder
     public static MonitorTree Build(RootsTreeDto? dto)
     {
         var rootDtos = dto?.Roots ?? Array.Empty<RootTreeDto>();
-        var roots = rootDtos.Select(BuildRootNode).ToArray();
+        var roots = rootDtos
+            .OrderBy(r => r.Path, StringComparer.OrdinalIgnoreCase)
+            .Select(BuildRootNode)
+            .ToArray();
 
         var unattributedSessions = dto?.UnattributedSessions ?? Array.Empty<SessionTreeDto>();
         var unattributedAgents = dto?.UnattributedAgents ?? Array.Empty<AgentTreeDto>();

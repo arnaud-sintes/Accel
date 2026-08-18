@@ -86,7 +86,7 @@ public sealed partial class CreateSessionDialogViewModel : ObservableObject
         _folderPicker = folderPicker ?? new WinFormsFolderPickerService();
 
         _selectedModelFamily = ModelFamilies.FirstOrDefault(f => f == "Sonnet") ?? ModelFamilies[0];
-        _selectedEffortLevel = EffortLevels[0];
+        _selectedEffortLevel = EffortLevels.FirstOrDefault(l => l == "medium") ?? EffortLevels[0];
         _workingDirectory = initialWorkingDirectory;
     }
 
@@ -103,6 +103,15 @@ public sealed partial class CreateSessionDialogViewModel : ObservableObject
     /// <summary>Effort vocabulary - exactly <see cref="EffortBarLevel.Levels"/>, the same table
     /// panel A's effort bars resolve against.</summary>
     public IReadOnlyList<string> EffortLevels => EffortBarLevel.Levels;
+
+    /// <summary>Whether <see cref="SelectedModelFamily"/> recognizes an effort level at all - per
+    /// <see cref="ModelEffortTable"/>, false only for Haiku. The view binds this to the Effort
+    /// field's visibility/enabled state, and <see cref="BuildArguments"/> uses it to omit
+    /// <c>--effort</c> entirely for a family that doesn't support it, regardless of whatever value
+    /// <see cref="SelectedEffortLevel"/> was left at from a previous model selection.</summary>
+    public bool EffortSupported => ModelEffortTable.SupportsEffort(SelectedModelFamily);
+
+    partial void OnSelectedModelFamilyChanged(string value) => OnPropertyChanged(nameof(EffortSupported));
 
     /// <summary>Combo-box source for <see cref="SelectedPermissionModeChoice"/> - see <see cref="CommonCliFlags"/>.</summary>
     public IReadOnlyList<PermissionModeChoice> PermissionModeChoices => CommonCliFlags.PermissionModeChoices;
@@ -176,7 +185,7 @@ public sealed partial class CreateSessionDialogViewModel : ObservableObject
             arguments.Add(SelectedModelFamily);
         }
 
-        if (!string.IsNullOrWhiteSpace(SelectedEffortLevel))
+        if (!string.IsNullOrWhiteSpace(SelectedEffortLevel) && EffortSupported)
         {
             arguments.Add("--effort");
             arguments.Add(SelectedEffortLevel);

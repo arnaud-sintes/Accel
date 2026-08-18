@@ -234,18 +234,22 @@
             -->
             <Border x:Name="PanelA" Grid.Column="0" BorderBrush="{StaticResource StrokeSubtleBrush}" BorderThickness="0,0,1,0" Background="{StaticResource SurfaceBrush}">
                 <!--
-                    Panel A is split 3/4 (the session tree, unchanged) over 1/4 (the MCP/SKILLS
-                    hit-count mini-panels), independently resizable - the same top/splitter/bottom
-                    Grid panel B already uses for FILES over GIT. The two mini-panels share one
-                    McpSkillsPanelViewModel (set as both McpSectionRoot's and SkillsSectionRoot's
-                    DataContext by MainWindow's constructor): one focused-session lookup feeding two
-                    collections, never a filtered view of panel A's own RootsPanelViewModel.
+                    Panel A is split over the session tree and the MCP/SKILLS hit-count mini-panels,
+                    independently resizable - the same top/splitter/bottom Grid panel B already uses
+                    for FILES over GIT. The bottom row's 5*/1* ratio and MinHeight/MaxHeight
+                    (88/220) deliberately mirror the center column's own top/bottom split around
+                    Panel E (agent graph) below, so the MCP/SKILLS panel renders at the same default
+                    height as Panel E - the two sit side by side visually and looked mismatched
+                    otherwise. The two mini-panels share one McpSkillsPanelViewModel (set as both
+                    McpSectionRoot's and SkillsSectionRoot's DataContext by MainWindow's
+                    constructor): one focused-session lookup feeding two collections, never a
+                    filtered view of panel A's own RootsPanelViewModel.
                 -->
                 <Grid>
                     <Grid.RowDefinitions>
-                        <RowDefinition Height="3*" MinHeight="120" />
+                        <RowDefinition Height="5*" MinHeight="120" />
                         <RowDefinition Height="Auto" />
-                        <RowDefinition Height="1*" MinHeight="80" />
+                        <RowDefinition Height="1*" MinHeight="88" MaxHeight="220" />
                     </Grid.RowDefinitions>
 
                 <DockPanel Grid.Row="0" LastChildFill="True">

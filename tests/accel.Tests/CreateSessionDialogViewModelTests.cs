@@ -52,6 +52,36 @@ public class CreateSessionDialogViewModelTests
     }
 
     // ---------------------------------------------------------------------------------------------
+    // Haiku has no effort concept (ModelEffortTable) - the dialog must reflect that instead of
+    // pretending it sits on the same five-tier scale as Sonnet/Opus/Fable.
+    // ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void EffortSupported_FalseForHaiku_TrueForOtherFamilies()
+    {
+        var viewModel = new CreateSessionDialogViewModel { SelectedModelFamily = "Haiku" };
+        Assert.False(viewModel.EffortSupported);
+
+        viewModel.SelectedModelFamily = "Opus";
+        Assert.True(viewModel.EffortSupported);
+    }
+
+    [Fact]
+    public void BuildArguments_HaikuSelected_OmitsEffortEvenWhenOneIsSelected()
+    {
+        var viewModel = new CreateSessionDialogViewModel
+        {
+            SelectedModelFamily = "Haiku",
+            SelectedEffortLevel = "high",
+        };
+
+        var arguments = viewModel.BuildArguments(Guid.NewGuid());
+
+        Assert.Contains("--model", arguments);
+        Assert.DoesNotContain("--effort", arguments);
+    }
+
+    // ---------------------------------------------------------------------------------------------
     // GUID uniqueness.
     // ---------------------------------------------------------------------------------------------
 

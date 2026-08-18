@@ -13,10 +13,10 @@ public class EffortBarLevelTests
     [InlineData("medium", 2)]
     [InlineData("mid", 2)]
     [InlineData("high", 3)]
-    [InlineData("max", 4)]
     [InlineData("xhigh", 4)]
-    [InlineData("maximum", 4)]
-    [InlineData("highest", 4)]
+    [InlineData("max", 5)]
+    [InlineData("maximum", 5)]
+    [InlineData("highest", 5)]
     public void RecognizedEffortStrings_ResolveToExpectedBarCount(string effort, int expected)
     {
         Assert.Equal(expected, EffortBarLevel.Resolve(effort));
@@ -34,8 +34,8 @@ public class EffortBarLevelTests
     }
 
     [Fact]
-    public void MaxBarsConstant_Is4()
+    public void MaxBarsConstant_Is5()
     {
-        Assert.Equal(4, EffortBarLevel.MaxBars);
+        Assert.Equal(5, EffortBarLevel.MaxBars);
     }
 }

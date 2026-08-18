@@ -72,7 +72,7 @@ public sealed partial class RootsPanelNodeViewModel : ObservableObject
         ShowModelBadge = Kind == RootsPanelNodeKind.Session || Kind == RootsPanelNodeKind.Agent;
 
         EffortLevel = ShowModelBadge ? EffortBarLevel.Resolve(Columns.Effort) : 0;
-        ShowEffortBars = ShowModelBadge;
+        ShowEffortBars = ShowModelBadge && ModelEffortTable.SupportsEffort(ModelBadge);
 
         _automationDescription = BuildAutomationDescription();
         TooltipText = BuildTooltipText();
@@ -194,7 +194,9 @@ public sealed partial class RootsPanelNodeViewModel : ObservableObject
     /// <see cref="EffortBarLevel"/>.</summary>
     public int EffortLevel { get; }
 
-    /// <summary>Whether the effort-bar badge should render for this row at all.</summary>
+    /// <summary>Whether the effort-bar badge should render for this row at all - false for a
+    /// placeholder/root row (no model at all) or a Haiku row (a model family with no effort concept,
+    /// per <see cref="ModelEffortTable"/>).</summary>
     public bool ShowEffortBars { get; }
 
     /// <summary>Accessible text description of this row's state, for

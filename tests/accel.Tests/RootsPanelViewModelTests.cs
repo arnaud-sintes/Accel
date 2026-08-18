@@ -64,9 +64,11 @@ public class RootsPanelViewModelTests
             TelemetryFixtures.Root(OtherRootPath),
         }));
 
-        Assert.Equal(new[] { RootPath, OtherRootPath }, vm.Roots.Select(r => r.Key));
+        // Alphabetical (ordinal, case-insensitive - MonitorTreeBuilder.Build), not insertion order:
+        // "C:\other" sorts before "C:\projects".
+        Assert.Equal(new[] { OtherRootPath, RootPath }, vm.Roots.Select(r => r.Key));
 
-        var rootNode = vm.Roots[0];
+        var rootNode = Node(vm, RootPath);
         Assert.Equal(RootsPanelNodeKind.Root, rootNode.Kind);
 
         var sessionNode = Assert.Single(rootNode.Children);

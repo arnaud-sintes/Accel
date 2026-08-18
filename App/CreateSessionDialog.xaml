@@ -18,6 +18,7 @@
                 <ResourceDictionary Source="Theme.xaml" />
             </ResourceDictionary.MergedDictionaries>
             <conv:EffortLevelToBarCountConverter x:Key="EffortLevelToBarCount" />
+            <conv:BoolToEffortTooltipConverter x:Key="EffortSupportedToTooltip" />
         </ResourceDictionary>
     </Window.Resources>
     <!--
@@ -79,9 +80,17 @@
             Same EffortBarsControl/EffortBarLevel.Resolve scheme panel A/E's effort badges use (via
             EffortLevelToBarCountConverter) - not a second, dialog-only rendering of "effort".
         -->
+        <!--
+            IsEnabled, not Visibility=Collapsed: the field stays in place (no layout jump when
+            switching models) and the ToolTip explains why it's greyed out - Haiku has no
+            reasoning-effort knob at all (ModelEffortTable.SupportsEffort), so SelectedEffortLevel
+            is simply left as-is but never sent (CreateSessionDialogViewModel.BuildArguments).
+        -->
         <ComboBox x:Name="EffortComboBox" Grid.Row="5"
                   ItemsSource="{Binding EffortLevels}"
                   SelectedItem="{Binding SelectedEffortLevel}"
+                  IsEnabled="{Binding EffortSupported}"
+                  ToolTip="{Binding EffortSupported, Converter={StaticResource EffortSupportedToTooltip}}"
                   Margin="0,0,0,16">
             <ComboBox.ItemTemplate>
                 <DataTemplate>
