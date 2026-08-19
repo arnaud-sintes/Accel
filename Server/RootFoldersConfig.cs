@@ -23,15 +23,25 @@ namespace Accel.Server;
 /// <c>sessions</c>). Any other shape, or unparseable JSON, degrades to an empty config - this
 /// method never throws.</para>
 ///
-/// <para><b>Probe order (per project-ui.md's "Root folders (`folder.json`)" section,
+/// <para><b>Read probe order (per project-ui.md's "Root folders (`folder.json`)" section,
 /// decision 0):</b></para>
 /// <list type="number">
 /// <item><c>%USERPROFILE%\.claude\accel-folders.json</c> - the durable home, colocated with
 /// the <c>accel-state.json</c> that <see cref="Accel.Cli.FileBackedStatusLineChainStore.DefaultPath"/>
 /// already writes to <c>%USERPROFILE%\.claude\</c>.</item>
-/// <item><c>&lt;directory of the running executable&gt;\folder.json</c>.</item>
-/// <item><c>&lt;current working directory&gt;\folder.json</c>.</item>
+/// <item><c>&lt;directory of the running executable&gt;\folder.json</c> (legacy / portable,
+/// read-only).</item>
+/// <item><c>&lt;current working directory&gt;\folder.json</c> (legacy / dev, read-only).</item>
 /// </list>
+///
+/// <para><b>Writes only ever target candidate 1, the durable home</b> - see
+/// <see cref="ResolveWritePath()"/>. Candidates 2 and 3 are read-only legacy slots: the exe
+/// directory of a default install is <c>C:\Program Files\Accel</c>, which a standard
+/// (non-elevated) user cannot write to, so treating a pre-existing <c>folder.json</c> there as
+/// the write target turned the very first "add root folder" click on a fresh install into an
+/// <see cref="UnauthorizedAccessException"/>. A legacy file that is still the one a read would
+/// resolve to is *migrated* into the durable home the first time a write path is resolved, so
+/// reads and writes stay on one file instead of splitting.</para>
 ///
 /// <para><b>"First that exists AND parses" - exact semantics used here:</b> candidates are
 /// tried strictly in order. The first candidate whose file *exists on disk* is the one that
@@ -77,34 +87,92 @@ public static class RootFoldersConfig
     /// </summary>
     public static string[] DefaultCandidatePaths() => new[]
     {
-        Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-            ".claude",
-            DurableFileName),
+        DurableConfigPath(),
         Path.Combine(AppContext.BaseDirectory, LocalFileName),
         Path.Combine(Directory.GetCurrentDirectory(), LocalFileName),
     };
 
     /// <summary>
-    /// The path every write should target: whichever of <see cref="DefaultCandidatePaths"/>
-    /// <see cref="Load()"/>'s "first that exists" probe would actually read back, or candidate 1
-    /// (the durable home) if none exist yet. Writing to a fixed candidate while a *different*,
-    /// pre-existing candidate (e.g. a legacy <c>folder.json</c> next to the exe) is the one every
-    /// read keeps resolving to would silently split writes and reads onto two different files -
-    /// a change written here would never be seen by a reader, and vice versa.
+    /// The single durable, always-per-user-writable config location:
+    /// <c>%USERPROFILE%\.claude\accel-folders.json</c>. Candidate 1 of
+    /// <see cref="DefaultCandidatePaths"/> and the only path <see cref="ResolveWritePath()"/>
+    /// ever returns.
     /// </summary>
-    public static string ResolveWritePath()
+    public static string DurableConfigPath() => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+        ".claude",
+        DurableFileName);
+
+    /// <summary>
+    /// The path every write targets: <see cref="DurableConfigPath"/>, always. The other two
+    /// candidates are read-only legacy slots that may sit under a directory the current user has
+    /// no write access to (a default install puts the exe in <c>C:\Program Files\Accel</c>), so
+    /// they must never be chosen as a write target.
+    ///
+    /// <para>To keep reads and writes on the same file, this also performs a one-time
+    /// <b>migration</b>: if the durable file does not exist yet but a legacy candidate does and
+    /// carries content, that content is copied into the durable home first (which then wins the
+    /// read probe from here on). Migration is best-effort - a failure to write it leaves the
+    /// legacy file untouched and still readable, and never throws out of this method.</para>
+    /// </summary>
+    public static string ResolveWritePath() => ResolveWritePath(DefaultCandidatePaths());
+
+    /// <summary>
+    /// Core write-path resolution, taking an explicit candidate list (in probe order, durable
+    /// home first) so tests can exercise the migration without touching real machine locations.
+    /// </summary>
+    public static string ResolveWritePath(IReadOnlyList<string> candidatePaths)
     {
-        var candidates = DefaultCandidatePaths();
-        foreach (string path in candidates)
+        ArgumentNullException.ThrowIfNull(candidatePaths);
+        if (candidatePaths.Count == 0)
         {
-            if (File.Exists(path))
-            {
-                return path;
-            }
+            throw new ArgumentException("At least one candidate path is required.", nameof(candidatePaths));
         }
 
-        return candidates[0];
+        string durablePath = candidatePaths[0];
+        if (File.Exists(durablePath))
+        {
+            return durablePath;
+        }
+
+        MigrateLegacyConfig(candidatePaths, durablePath);
+        return durablePath;
+    }
+
+    /// <summary>
+    /// Copies the first legacy candidate that exists and carries content into
+    /// <paramref name="durablePath"/> (upgrading it to v2 in the process). No-op when no legacy
+    /// candidate exists or the one that does is empty/malformed - in that case there is nothing
+    /// worth preserving and the next <see cref="Save"/> creates the durable file anyway.
+    /// </summary>
+    private static void MigrateLegacyConfig(IReadOnlyList<string> candidatePaths, string durablePath)
+    {
+        var legacyCandidates = new List<string>(candidatePaths.Count - 1);
+        for (int i = 1; i < candidatePaths.Count; i++)
+        {
+            legacyCandidates.Add(candidatePaths[i]);
+        }
+
+        var legacy = LoadFull(legacyCandidates);
+        if (legacy.Roots.Length == 0 && legacy.Sessions.Count == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            Save(
+                durablePath,
+                legacy.Roots,
+                legacy.Sessions,
+                new HashSet<string>(legacy.Sessions.Keys, StringComparer.Ordinal));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Best effort: if even the durable home is unwritable there is nothing useful left to
+            // do here, and the caller's own Save will surface the real error at the point where
+            // it can be reported.
+        }
     }
 
     /// <summary>

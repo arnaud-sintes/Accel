@@ -53,7 +53,8 @@ public sealed partial class RootsPanelNodeViewModel : ObservableObject
         long? durationMs = null,
         long? consumedTokens = null,
         DateTime? waitingSinceUtc = null,
-        bool isWaiting = false)
+        bool isWaiting = false,
+        string cwd = "")
     {
         Key = key ?? string.Empty;
         Text = text ?? string.Empty;
@@ -61,6 +62,7 @@ public sealed partial class RootsPanelNodeViewModel : ObservableObject
         State = state;
         Columns = columns ?? MonitorRowColumns.Empty;
         ProjectDir = projectDir ?? string.Empty;
+        Cwd = cwd ?? string.Empty;
         DurationMs = durationMs;
         ConsumedTokens = consumedTokens;
         _owner = owner;
@@ -130,6 +132,21 @@ public sealed partial class RootsPanelNodeViewModel : ObservableObject
     /// <c>projectDir</c> parameter) without a second disk scan.
     /// </summary>
     public string ProjectDir { get; }
+
+    /// <summary>
+    /// The session's own recorded working directory (<see cref="MonitorSessionNode.Cwd"/> -> the
+    /// transcript head's <c>cwd</c>), empty for root/agent/placeholder rows and for a session whose
+    /// transcript never recorded one. <b>Not</b> the same thing as <see cref="ProjectDir"/>, which is
+    /// a <c>~/.claude/projects</c> slug and is not a usable filesystem path.
+    ///
+    /// <para>This is what "Resume session" launches <c>claude</c> in
+    /// (<see cref="RootsPanelViewModel.ResolveWorkingDirectoryFor"/>): the owning root row's key is
+    /// the wrong answer for a session under the synthetic "(unattributed)" root, because that key is
+    /// the literal label <c>"(unattributed)"</c>, not a directory. Unvalidated here - callers go
+    /// through <see cref="RootsPanelViewModel.ResolveWorkingDirectoryFor"/>, which is the one place
+    /// that checks the directory still exists.</para>
+    /// </summary>
+    public string Cwd { get; }
 
     /// <summary>Raw, unformatted duration/consumed-tokens values behind
     /// <see cref="DurationText"/>/<see cref="TokensText"/> - null for rows with no data (root/
@@ -488,6 +505,78 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
     /// </summary>
     public string? FirstAvailableRootPath =>
         Roots.FirstOrDefault(r => r.Kind == RootsPanelNodeKind.Root && Directory.Exists(r.Key))?.Key;
+
+    /// <summary>
+    /// The working directory a session row should be <i>launched</i> in ("Resume session" /
+    /// "Resume as fork", <c>MainWindow.ResumeSessionCore</c>) - deliberately a different question
+    /// from <see cref="RootPathFor"/>'s "which row owns this one", and the only one of the two whose
+    /// result is safe to hand to <c>CreateProcessW</c>'s <c>lpCurrentDirectory</c>.
+    ///
+    /// <para><b>Invariant: every non-null value this returns is a directory that exists on disk.</b>
+    /// <see cref="RootPathFor"/> guarantees no such thing, and two ways of violating it both ended in
+    /// the same hard failure - <c>CreateProcessW</c> returning Win32 error 267 (<c>ERROR_DIRECTORY</c>,
+    /// "the directory name is invalid") and the resume producing no session at all:
+    /// <list type="number">
+    /// <item>a session under the synthetic "(unattributed)" root, whose root key is the literal label
+    /// <c>"(unattributed)"</c> (<c>MonitorTreeBuilder</c>'s <c>UnattributedLabel</c>, used as both
+    /// <c>Path</c> and <c>Text</c>) rather than any path at all;</item>
+    /// <item>a session under a perfectly real root folder that has since been deleted, renamed, or
+    /// unmounted.</item>
+    /// </list></para>
+    ///
+    /// <para>Precedence, first hit that exists on disk wins:
+    /// <list type="number">
+    /// <item><paramref name="node"/>'s own <see cref="RootsPanelNodeViewModel.Cwd"/> - the directory
+    /// the session actually recorded in its transcript, so resuming lands the process back where it
+    /// was. Preferred over the owning root even when that root is valid: the root is only the
+    /// <i>ancestor</i> the session was attributed to, and it is the only meaningful answer at all for
+    /// the "(unattributed)" case;</item>
+    /// <item>the owning root (<see cref="RootPathFor"/>), for an older/degraded snapshot with no
+    /// recorded cwd;</item>
+    /// <item><see cref="FirstAvailableRootPath"/>, matching what "Create session" already falls back
+    /// to;</item>
+    /// <item><c>null</c> - last resort, letting <c>claude</c> inherit Accel's own process directory.
+    /// That is a genuinely bad outcome (see <see cref="FirstAvailableRootPath"/>'s remarks: an
+    /// untrusted cwd makes Claude Code's first-run trust prompt block the session until someone
+    /// answers it in the terminal), but it is a <i>visible, recoverable</i> bad outcome inside a tab
+    /// the user can see and act on, whereas passing the invalid path through produced no tab and no
+    /// session whatsoever.</item>
+    /// </list></para>
+    /// </summary>
+    public string? ResolveWorkingDirectoryFor(RootsPanelNodeViewModel? node)
+    {
+        if (node is not null && ExistingDirectoryOrNull(node.Cwd) is { } sessionCwd)
+        {
+            return sessionCwd;
+        }
+
+        if (ExistingDirectoryOrNull(RootPathFor(node?.Key)) is { } owningRoot)
+        {
+            return owningRoot;
+        }
+
+        return FirstAvailableRootPath;
+    }
+
+    /// <summary>The one gate every launch path's working directory goes through - null/empty/
+    /// whitespace, the "(unattributed)" placeholder, and any path that is not a directory right now
+    /// all collapse to <c>null</c> so the caller falls through to its next candidate.
+    /// <see cref="Directory.Exists"/> never throws (it returns <c>false</c> for a malformed path, a
+    /// permission failure, or a disconnected UNC share), so no guard around it is needed.</summary>
+    private static string? ExistingDirectoryOrNull(string? path) =>
+        !string.IsNullOrWhiteSpace(path) && Directory.Exists(path) ? path : null;
+
+    /// <summary>
+    /// <see cref="ResolveWorkingDirectoryFor"/> applied to the panel's own current selection - the
+    /// "Create session" dialog's pre-filled working directory (<c>MainWindow.CreateSessionCore</c>).
+    /// Same existence invariant, for the same reason, one step earlier in the flow: the dialog's own
+    /// <see cref="Directory.Exists"/> guard already stops an invalid path from reaching
+    /// <c>CreateProcessW</c>, so this is not a second crash path - it just means a user who happens to
+    /// have an "(unattributed)" row selected gets a usable folder pre-filled instead of a label they
+    /// have to notice and replace before the dialog will let them confirm.
+    /// </summary>
+    public string? SelectedWorkingDirectory =>
+        ResolveWorkingDirectoryFor(string.IsNullOrEmpty(SelectedKey) ? null : FindByKey(Roots, SelectedKey!));
 
     /// <summary>Number of configured roots in the last snapshot.</summary>
     [ObservableProperty]
@@ -890,7 +979,7 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
         var node = new RootsPanelNodeViewModel(
             session.SessionId, session.Text, RootsPanelNodeKind.Session, session.State, session.Columns, this,
             projectDir: session.ProjectDir, durationMs: session.DurationMs, consumedTokens: session.ConsumedTokens,
-            waitingSinceUtc: session.WaitingSinceUtc, isWaiting: isWaiting);
+            waitingSinceUtc: session.WaitingSinceUtc, isWaiting: isWaiting, cwd: session.Cwd);
 
         foreach (var agent in session.Agents)
         {

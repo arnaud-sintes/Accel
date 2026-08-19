@@ -138,6 +138,7 @@ public static class TerminalE2ESmokeTest
             ok &= await CheckRawCtrlCArrivesAsBinaryFrameAsync(output, terminal, server, port);
             ok &= await CheckShiftEnterSendsExactlyOneEscCrAsync(output, terminal, server, port);
             ok &= await CheckIntegerCellMetricsAsync(output, terminal);
+            ok &= await CheckConPtyModeAsync(output, terminal);
             return ok;
         }
         finally
@@ -381,6 +382,61 @@ public static class TerminalE2ESmokeTest
         output.WriteLine($"  css cell size: {cssWidth} x {cssHeight} px (device cell size: {deviceWidth} x {deviceHeight} px)");
         output.WriteLine($"  [{(integerCss ? "PASS" : "FAIL")}] css cell width/height are integer pixel sizes (fontSize=14, lineHeight=1, letterSpacing auto-corrected by snapCellWidthToIntegerPixels)");
         return integerCss;
+    }
+
+    /// <summary>
+    /// Reported bug (this check's reason to exist): scrolling back through a resumed session's replayed
+    /// transcript showed old and new glyphs interleaved into unreadable text. Cause was
+    /// <c>windowsMode: true</c>, which forces xterm's <i>legacy</i> ConPTY workarounds on unconditionally
+    /// (wrapped-line guessing plus reflow disabled) on a modern ConPTY that does not need them — see
+    /// <c>terminal.js</c>'s <c>windowsPty</c> comment. This asserts the replacement is actually in effect:
+    /// the host's injected build number reached the Terminal, and xterm's own decision for that build is
+    /// what is active. Not a unit-testable property — it needs the real page, with the real script the
+    /// real <see cref="TerminalView"/> injects before navigation.
+    /// </summary>
+    private static async Task<bool> CheckConPtyModeAsync(TextWriter output, TerminalView terminal)
+    {
+        output.WriteLine();
+        output.WriteLine("== check: ConPTY mode comes from the injected build number, not legacy windowsMode ==");
+
+        string outer = await terminal.Browser.CoreWebView2.ExecuteScriptAsync("JSON.stringify(window.accelConPtyOptions())");
+        string? inner = JsonSerializer.Deserialize<string>(outer);
+        output.WriteLine($"  window.accelConPtyOptions() raw: {inner}");
+
+        if (string.IsNullOrEmpty(inner) || inner == "null")
+        {
+            output.WriteLine("  [FAIL] accelConPtyOptions() returned null - terminal.js was not initialized");
+            return false;
+        }
+
+        using var doc = JsonDocument.Parse(inner);
+        var root = doc.RootElement;
+        if (root.GetProperty("injectedBuildNumber").ValueKind != JsonValueKind.Number)
+        {
+            output.WriteLine("  [FAIL] the host's window.accelConPtyBuildNumber never reached the page, so terminal.js " +
+                "fell back to legacy windowsMode");
+            return false;
+        }
+
+        int buildNumber = root.GetProperty("injectedBuildNumber").GetInt32();
+        bool windowsMode = root.GetProperty("windowsMode").GetBoolean();
+        string? backend = root.GetProperty("windowsPtyBackend").GetString();
+
+        // 21376 is xterm's own cutoff for a ConPTY that reports line wrapping itself (see its
+        // _handleWindowsPtyOptionChange / Buffer._isReflowEnabled): at or above it the legacy heuristics
+        // must be off and reflow on; below it they must still apply, which is why the host passes the real
+        // build number rather than just switching the workarounds off.
+        bool legacyExpected = buildNumber < 21376;
+        bool reflowEnabled = root.GetProperty("reflowEnabled").ValueKind == JsonValueKind.True;
+
+        bool ok = !windowsMode
+            && string.Equals(backend, "conpty", StringComparison.Ordinal)
+            && reflowEnabled == !legacyExpected;
+
+        output.WriteLine($"  [{(ok ? "PASS" : "FAIL")}] build {buildNumber} -> windowsMode={windowsMode}, " +
+            $"windowsPty.backend={backend}, reflowEnabled={reflowEnabled} " +
+            $"(expected legacy ConPTY workarounds {(legacyExpected ? "ON" : "OFF")} for this build)");
+        return ok;
     }
 
     private static async Task<bool> WaitForAsync(Func<Task<bool>> condition, TimeSpan timeout)

@@ -13,6 +13,7 @@ using System.Windows.Documents;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Threading;
+using Rectangle = System.Windows.Shapes.Rectangle;
 using Accel.App.Services;
 using Accel.App.ViewModels;
 using Accel.Cli;
@@ -177,6 +178,13 @@ public partial class MainWindow : Window
         McpSkillsPanelViewModel? mcpSkillsPanel)
     {
         InitializeComponent();
+
+        // Line-number gutters and the two diff panes' scroll sync are wired here rather than in XAML
+        // since ScrollViewer.ScrollChangedEvent has no attached-property XAML shorthand - see
+        // FileViewerText_ScrollChanged/DiffOldText_ScrollChanged/DiffNewText_ScrollChanged's remarks.
+        FileViewerText.AddHandler(ScrollViewer.ScrollChangedEvent, new ScrollChangedEventHandler(FileViewerText_ScrollChanged), true);
+        DiffOldText.AddHandler(ScrollViewer.ScrollChangedEvent, new ScrollChangedEventHandler(DiffOldText_ScrollChanged), true);
+        DiffNewText.AddHandler(ScrollViewer.ScrollChangedEvent, new ScrollChangedEventHandler(DiffNewText_ScrollChanged), true);
 
         RootsPanel = rootsPanel;
         Tabs = tabs;
@@ -784,7 +792,10 @@ public partial class MainWindow : Window
         // terminal, which made a freshly created session look like it had simply never started
         // (reported bug: "no opened session visible in panel A"). The dialog's own working-directory
         // field is still fully editable/browsable before confirm.
-        initialWorkingDirectory ??= RootsPanel?.SelectedRootPath ?? RootsPanel?.FirstAvailableRootPath;
+        // SelectedWorkingDirectory, not SelectedRootPath: the latter happily returns the synthetic
+        // "(unattributed)" root's label or a root folder that no longer exists, neither of which is a
+        // directory anyone can start a session in (see RootsPanelViewModel.ResolveWorkingDirectoryFor).
+        initialWorkingDirectory ??= RootsPanel?.SelectedWorkingDirectory;
         var viewModel = new CreateSessionDialogViewModel(initialWorkingDirectory: initialWorkingDirectory);
         var dialog = new CreateSessionDialog(viewModel) { Owner = this };
         dialog.ShowDialog();
@@ -1107,7 +1118,14 @@ public partial class MainWindow : Window
             return;
         }
 
-        string? workingDirectory = RootsPanel?.RootPathFor(sessionId) ?? RootsPanel?.FirstAvailableRootPath;
+        // Must go through ResolveWorkingDirectoryFor, never RootPathFor directly: this value becomes
+        // CreateProcessW's lpCurrentDirectory (PtySession.CreateClaudeSpec -> ConPty.LaunchChild),
+        // which hard-fails with Win32 267 (ERROR_DIRECTORY) on anything that isn't an existing
+        // directory - and the owning root's key is the literal string "(unattributed)" for a session
+        // under the synthetic root, or a stale path for a root folder that has since been deleted.
+        // See that method's remarks for the full precedence chain and why the session's own recorded
+        // cwd is preferred over its owning root.
+        string? workingDirectory = RootsPanel?.ResolveWorkingDirectoryFor(node);
 
         var baseArguments = fork
             ? new[] { "--resume", sessionId, "--fork-session" }
@@ -1284,7 +1302,10 @@ public partial class MainWindow : Window
             content = $"Could not read file:\n{tab.TabId}\n\n{ex.Message}";
         }
 
+        content = NormalizeLineEndings(content);
         FileViewerText.Document = BuildHighlightedDocument(content, language);
+        SetLineNumbers(FileViewerLineNumbers, CountLines(content));
+        ResetScroll(FileViewerText, FileViewerLineNumbersTransform);
         ShowFileViewerPane();
     }
 
@@ -1319,8 +1340,22 @@ public partial class MainWindow : Window
             newContent = $"Could not read \"after\" content:\n{ex.Message}";
         }
 
+        oldContent = NormalizeLineEndings(oldContent);
+        newContent = NormalizeLineEndings(newContent);
+
         DiffOldText.Document = BuildHighlightedDocument(oldContent, language);
         DiffNewText.Document = BuildHighlightedDocument(newContent, language);
+
+        string[] oldLines = oldContent.Split('\n');
+        string[] newLines = newContent.Split('\n');
+        SetLineNumbers(DiffOldLineNumbers, oldLines.Length);
+        SetLineNumbers(DiffNewLineNumbers, newLines.Length);
+        ResetScroll(DiffOldText, DiffOldLineNumbersTransform);
+        ResetScroll(DiffNewText, DiffNewLineNumbersTransform);
+
+        _diffMarks = ComputeDiffMarks(oldLines, newLines);
+        _diffMarkTotalLines = newLines.Length;
+        RenderDiffMarkStrip();
 
         ShowDiffViewerPane();
     }
@@ -1412,6 +1447,226 @@ public partial class MainWindow : Window
 
         return content;
     });
+
+    /// <summary>Normalizes line endings to <c>'\n'</c> - shared by every reader of a file/diff tab's
+    /// content, so the line count fed to <see cref="SetLineNumbers"/> and the arrays fed to
+    /// <see cref="ComputeDiffMarks"/> agree exactly with what <see cref="BuildHighlightedDocument"/>
+    /// renders (its own normalization below is therefore a no-op on already-normalized input).</summary>
+    private static string NormalizeLineEndings(string content) => content.Replace("\r\n", "\n").Replace("\r", "\n");
+
+    /// <summary>Counts the visual lines <see cref="BuildHighlightedDocument"/>/<see cref="AppendToken"/>
+    /// will render for already-normalized <paramref name="content"/>: one <see cref="LineBreak"/> per
+    /// <c>'\n'</c>, so line count is always <c>'\n'</c> count + 1 (an empty file still renders as one
+    /// blank line).</summary>
+    private static int CountLines(string content)
+    {
+        int count = 1;
+        foreach (char c in content)
+        {
+            if (c == '\n')
+            {
+                count++;
+            }
+        }
+
+        return count;
+    }
+
+    /// <summary>Fills a line-number gutter <see cref="TextBlock"/> with <c>1..lineCount</c>, one number
+    /// per line - see <see cref="FileViewerLineNumbers"/>/<see cref="DiffOldLineNumbers"/>/
+    /// <see cref="DiffNewLineNumbers"/>'s XAML remarks for how it then stays visually aligned with its
+    /// paired <see cref="RichTextBox"/> as that box scrolls.</summary>
+    private static void SetLineNumbers(TextBlock gutter, int lineCount)
+    {
+        gutter.Text = string.Join('\n', Enumerable.Range(1, lineCount));
+    }
+
+    /// <summary>Snaps a just-repopulated pane and its paired line-number gutter back to the top - a
+    /// leftover scroll offset from whatever tab was open before would otherwise leave the newly loaded
+    /// content (and, since the gutter's offset is only ever pushed by <c>ScrollChanged</c>, the gutter
+    /// too) scrolled past its own start.</summary>
+    private static void ResetScroll(RichTextBox pane, TranslateTransform gutterTransform)
+    {
+        pane.ScrollToVerticalOffset(0);
+        gutterTransform.Y = 0;
+    }
+
+    /// <summary>Kept in lock-step with <see cref="FileViewerText"/>'s scroll via a
+    /// <see cref="TranslateTransform"/> rather than a second <see cref="ScrollViewer"/>: the gutter is
+    /// plain text with no scrolling concerns of its own, so mirroring the RichTextBox's own vertical
+    /// offset pixel-for-pixel keeps it aligned without a second scroll position to ever drift out of
+    /// sync.</summary>
+    private void FileViewerText_ScrollChanged(object sender, ScrollChangedEventArgs e)
+    {
+        FileViewerLineNumbersTransform.Y = -e.VerticalOffset;
+    }
+
+    /// <summary>Mirrors <see cref="FileViewerText_ScrollChanged"/>'s gutter-sync trick for the "Before"
+    /// pane, and also drives <see cref="DiffNewText"/> to the same offset (the TODO's "synchronize the
+    /// scroll between the two panes") - guarded by <see cref="_isSyncingDiffScroll"/> so that mirrored
+    /// scroll doesn't bounce back and re-drive this side.</summary>
+    private void DiffOldText_ScrollChanged(object sender, ScrollChangedEventArgs e)
+    {
+        DiffOldLineNumbersTransform.Y = -e.VerticalOffset;
+        SyncDiffScroll(DiffNewText, e.VerticalOffset);
+    }
+
+    /// <summary>See <see cref="DiffOldText_ScrollChanged"/>'s remarks - the "After" pane's half of the
+    /// same two-way sync.</summary>
+    private void DiffNewText_ScrollChanged(object sender, ScrollChangedEventArgs e)
+    {
+        DiffNewLineNumbersTransform.Y = -e.VerticalOffset;
+        SyncDiffScroll(DiffOldText, e.VerticalOffset);
+    }
+
+    /// <summary>
+    /// <see langword="false"/> outside of a sync in progress; briefly <see langword="true"/> while one
+    /// pane's <c>ScrollChanged</c> handler is driving the other pane's offset, so that pane's own
+    /// resulting <c>ScrollChanged</c> (if it fires at all - WPF only raises it when the offset actually
+    /// changes) does not immediately try to drive the first pane again.
+    /// </summary>
+    private bool _isSyncingDiffScroll;
+
+    /// <summary>See <see cref="_isSyncingDiffScroll"/>'s remarks.</summary>
+    private void SyncDiffScroll(RichTextBox target, double verticalOffset)
+    {
+        if (_isSyncingDiffScroll)
+        {
+            return;
+        }
+
+        _isSyncingDiffScroll = true;
+        try
+        {
+            target.ScrollToVerticalOffset(verticalOffset);
+        }
+        finally
+        {
+            _isSyncingDiffScroll = false;
+        }
+    }
+
+    /// <summary>One line-level change for <see cref="ComputeDiffMarks"/>'s overview-ruler marks: an
+    /// added line (present only in the "After" side) is green, a point where one or more lines were
+    /// removed (present only in the "Before" side) is red, anchored at the "After"-side row it would
+    /// have preceded.</summary>
+    private readonly record struct DiffMark(int NewLineIndex, bool IsAdded);
+
+    /// <summary>Diff marks for the currently-shown git-diff tab's "After" pane overview ruler (see
+    /// <see cref="DiffMarkStrip"/>'s XAML remarks) - repopulated by <see cref="ShowGitDiffTabAsync"/>,
+    /// re-rendered by <see cref="RenderDiffMarkStrip"/> whenever the strip itself resizes.</summary>
+    private List<DiffMark> _diffMarks = new();
+
+    /// <summary>Total "After"-side line count backing <see cref="_diffMarks"/>'s row-to-pixel scaling in
+    /// <see cref="RenderDiffMarkStrip"/>.</summary>
+    private int _diffMarkTotalLines;
+
+    /// <summary>
+    /// Line-level diff between <paramref name="oldLines"/> and <paramref name="newLines"/> (already
+    /// normalized/split by <see cref="ShowGitDiffTabAsync"/>), classified into <see cref="DiffMark"/>s
+    /// anchored to "After"-side row indices - via the classic dynamic-programming LCS backtrack, since
+    /// no diff library is referenced anywhere in this codebase. O(N*M) time/space, so it is skipped
+    /// outright above a size cap rather than risking a multi-second UI-thread stall on a huge file - a
+    /// git-diffable text file is overwhelmingly source-sized, not data-dump-sized, so the cap should
+    /// essentially never bite in practice.
+    /// </summary>
+    private static List<DiffMark> ComputeDiffMarks(string[] oldLines, string[] newLines)
+    {
+        int n = oldLines.Length;
+        int m = newLines.Length;
+        if ((long)n * m > 4_000_000)
+        {
+            return new List<DiffMark>();
+        }
+
+        var lengths = new int[n + 1, m + 1];
+        for (int i = n - 1; i >= 0; i--)
+        {
+            for (int j = m - 1; j >= 0; j--)
+            {
+                lengths[i, j] = oldLines[i] == newLines[j]
+                    ? lengths[i + 1, j + 1] + 1
+                    : Math.Max(lengths[i + 1, j], lengths[i, j + 1]);
+            }
+        }
+
+        var marks = new List<DiffMark>();
+        int a = 0, b = 0, lastDeletedAtRow = -1;
+        while (a < n && b < m)
+        {
+            if (oldLines[a] == newLines[b])
+            {
+                a++;
+                b++;
+            }
+            else if (lengths[a + 1, b] >= lengths[a, b + 1])
+            {
+                if (lastDeletedAtRow != b)
+                {
+                    marks.Add(new DiffMark(b, IsAdded: false));
+                    lastDeletedAtRow = b;
+                }
+
+                a++;
+            }
+            else
+            {
+                marks.Add(new DiffMark(b, IsAdded: true));
+                b++;
+            }
+        }
+
+        if (a < n && lastDeletedAtRow != b)
+        {
+            marks.Add(new DiffMark(b, IsAdded: false));
+        }
+
+        while (b < m)
+        {
+            marks.Add(new DiffMark(b, IsAdded: true));
+            b++;
+        }
+
+        return marks;
+    }
+
+    /// <summary>Draws <see cref="_diffMarks"/> onto <see cref="DiffMarkStrip"/>, scaling each mark's
+    /// "After"-row index to the strip's current pixel height - re-run from <see cref="ShowGitDiffTabAsync"/>
+    /// and from <see cref="DiffMarkStrip_SizeChanged"/>, since panel D can be resized (or the app window
+    /// itself) after a diff tab is already showing.</summary>
+    private void RenderDiffMarkStrip()
+    {
+        DiffMarkStrip.Children.Clear();
+
+        double height = DiffMarkStrip.ActualHeight;
+        double width = DiffMarkStrip.ActualWidth;
+        if (height <= 0 || width <= 0 || _diffMarkTotalLines <= 0 || _diffMarks.Count == 0)
+        {
+            return;
+        }
+
+        const double markThickness = 2.0;
+        foreach (var mark in _diffMarks)
+        {
+            var rect = new Rectangle
+            {
+                Width = width,
+                Height = markThickness,
+                Fill = (Brush)FindResource(mark.IsAdded ? "SuccessBrush" : "DangerBrush"),
+            };
+
+            double top = height * mark.NewLineIndex / _diffMarkTotalLines;
+            Canvas.SetTop(rect, Math.Min(top, Math.Max(0, height - markThickness)));
+            Canvas.SetLeft(rect, 0);
+            DiffMarkStrip.Children.Add(rect);
+        }
+    }
+
+    /// <summary>See <see cref="RenderDiffMarkStrip"/>'s remarks.</summary>
+    private void DiffMarkStrip_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        RenderDiffMarkStrip();
+    }
 
     /// <summary>
     /// Tokenizes and colours <paramref name="content"/> (see <see cref="SyntaxHighlighter.Tokenize"/>)

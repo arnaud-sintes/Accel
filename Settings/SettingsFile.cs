@@ -158,7 +158,19 @@ public sealed class SettingsFile
         {
             if (File.Exists(Path))
             {
-                File.Copy(Path, BackupPath, overwrite: true);
+                try
+                {
+                    File.Copy(Path, BackupPath, overwrite: true);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    // The .accel.bak snapshot is a convenience, not a precondition: a file that
+                    // lives somewhere the current user can read but not write (a config left in
+                    // C:\Program Files by an older install, a locked/AV-held copy) must not turn
+                    // a save into a crash *before* the real write has even been attempted. If the
+                    // destination is genuinely unwritable the swap below still throws, at the
+                    // point callers expect to handle it.
+                }
             }
 
             BackupTaken = true;

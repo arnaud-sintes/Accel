@@ -50,11 +50,14 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 ; them are read at runtime by a self-contained exe.
 Source: "{#PublishDir}\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PublishDir}\wwwroot\xterm\*"; DestDir: "{app}\wwwroot\xterm"; Flags: ignoreversion recursesubdirs createallsubdirs
-; The default (empty-array) root-folders fallback - see CLAUDE_ENV.md's "Folder Config Search
-; Order". onlyifdoesntexist so upgrading an existing install never clobbers a user's own edits to
-; this fallback file (their real per-user config normally lives under
-; %USERPROFILE%\.claude\accel-folders.json instead, which this installer never touches).
-Source: "{#PublishDir}\folder.json"; DestDir: "{app}"; Flags: onlyifdoesntexist
+; No folder.json is shipped into {app} any more, deliberately. {app} defaults to
+; C:\Program Files\Accel, which a standard (non-elevated) user cannot write to; a pre-existing
+; folder.json there used to win RootFoldersConfig's write-path resolution and made the first
+; "add root folder" click on a fresh install fail with UnauthorizedAccessException. The one true
+; config now always lives at %USERPROFILE%\.claude\accel-folders.json, which the app creates on
+; demand - see CLAUDE_ENV.md's "Folder Config Search Order". A folder.json left in {app} by an
+; older install is still readable (legacy fallback) and is migrated into the durable per-user
+; file on first write.
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

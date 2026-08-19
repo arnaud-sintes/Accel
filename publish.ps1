@@ -83,16 +83,17 @@ try {
     New-Item -ItemType Directory -Path $distDir -Force | Out-Null
 
     # --- Portable zip: the same file set the installer below packages (accel.exe + the WebView2
-    # terminal panel's loose asset folder + the default folder.json fallback), staged into its own
-    # folder first so Compress-Archive doesn't also pick up .pdb/xml doc comments/global.json/
-    # web.config from the raw publish output - none of those are needed at runtime. ---
+    # terminal panel's loose asset folder), staged into its own folder first so Compress-Archive
+    # doesn't also pick up .pdb/xml doc comments/global.json/web.config from the raw publish
+    # output - none of those are needed at runtime. No folder.json is shipped: the root-folders
+    # config always lives (and is created on demand) at %USERPROFILE%\.claude\accel-folders.json,
+    # which is writable without elevation wherever the exe itself was unpacked. ---
     $stageDir = Join-Path $PSScriptRoot "bin\Release\net8.0-windows\win-x64\publish-stage"
     if (Test-Path $stageDir) {
         Remove-Item $stageDir -Recurse -Force
     }
     New-Item -ItemType Directory -Path $stageDir | Out-Null
     Copy-Item (Join-Path $publishDir "accel.exe") $stageDir
-    Copy-Item (Join-Path $publishDir "folder.json") $stageDir -ErrorAction SilentlyContinue
     Copy-Item (Join-Path $publishDir "wwwroot") $stageDir -Recurse
 
     $zipPath = Join-Path $distDir "Accel-$version-win-x64.zip"

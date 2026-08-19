@@ -1,5 +1,6 @@
 namespace Accel.Tests;
 
+using System;
 using System.Linq;
 using Accel.App.ViewModels;
 using Accel.Cli;
@@ -440,6 +441,155 @@ public class RootsPanelViewModelTests
         feed.Publish(TelemetryFixtures.EmptyTree());
 
         Assert.Null(vm.FirstAvailableRootPath);
+    }
+
+    /// <summary>
+    /// The reported crash: resuming a session that lives under the synthetic "(unattributed)" root
+    /// passed that root's key straight through to <c>CreateProcessW</c>'s <c>lpCurrentDirectory</c>,
+    /// which failed with Win32 267 (ERROR_DIRECTORY) because "(unattributed)" is a label, not a path.
+    /// Asserted non-vacuously: <see cref="RootsPanelViewModel.RootPathFor"/> is checked to still
+    /// return that exact placeholder, so this test fails if the resolver ever starts trusting it.
+    /// </summary>
+    [Fact]
+    public void ResolveWorkingDirectoryFor_UnattributedSession_UsesTheSessionsOwnCwd_NotThePlaceholderLabel()
+    {
+        var (vm, feed, _) = Build();
+        var realDir = System.IO.Path.GetTempPath();
+        feed.Publish(TelemetryFixtures.Tree(
+            roots: new[] { TelemetryFixtures.Root(RootPath) },
+            unattributedSessions: new[] { TelemetryFixtures.Session("orphan-session", cwd: realDir) }));
+
+        // The bug's actual input: the owning "root" of this session really is the literal label.
+        Assert.Equal("(unattributed)", vm.RootPathFor("orphan-session"));
+
+        var resolved = vm.ResolveWorkingDirectoryFor(Node(vm, "orphan-session"));
+
+        Assert.Equal(realDir, resolved);
+        Assert.NotEqual("(unattributed)", resolved);
+    }
+
+    /// <summary>The same "(unattributed)" row with no usable cwd of its own either (an old transcript
+    /// with no recorded cwd): the placeholder must still never leak out - the answer falls all the way
+    /// through to the first configured root that exists, and if none did, to null.</summary>
+    [Fact]
+    public void ResolveWorkingDirectoryFor_UnattributedSessionWithNoCwd_FallsBackToARealRoot_ThenNull()
+    {
+        var (vm, feed, _) = Build();
+        var realDir = System.IO.Path.GetTempPath();
+        feed.Publish(TelemetryFixtures.Tree(
+            roots: new[] { TelemetryFixtures.Root(realDir) },
+            unattributedSessions: new[] { TelemetryFixtures.Session("orphan-session", cwd: null) }));
+
+        Assert.Equal(realDir, vm.ResolveWorkingDirectoryFor(Node(vm, "orphan-session")));
+
+        // No configured root exists on disk any more -> null (inherit), never the placeholder.
+        feed.Publish(TelemetryFixtures.Tree(
+            roots: new[] { TelemetryFixtures.Root(OtherRootPath) },
+            unattributedSessions: new[] { TelemetryFixtures.Session("orphan-session", cwd: null) }));
+
+        Assert.Null(vm.ResolveWorkingDirectoryFor(Node(vm, "orphan-session")));
+    }
+
+    /// <summary>The second, non-synthetic way into the same crash: a session under a perfectly real
+    /// configured root whose folder has since been deleted/renamed/unmounted. Neither the session's own
+    /// stale cwd nor the stale root may be returned.</summary>
+    [Fact]
+    public void ResolveWorkingDirectoryFor_RootFolderThatNoLongerExists_NeverReturnsTheMissingPath()
+    {
+        var (vm, feed, _) = Build();
+        var realDir = System.IO.Path.GetTempPath();
+        feed.Publish(TelemetryFixtures.Tree(new[]
+        {
+            TelemetryFixtures.Root(OtherRootPath, TelemetryFixtures.Session("s-stale", cwd: OtherRootPath)),
+            TelemetryFixtures.Root(realDir),
+        }));
+
+        // Non-vacuous: the owning root really is the since-deleted folder.
+        Assert.Equal(OtherRootPath, vm.RootPathFor("s-stale"));
+
+        Assert.Equal(realDir, vm.ResolveWorkingDirectoryFor(Node(vm, "s-stale")));
+    }
+
+    /// <summary>A session's own recorded cwd wins over its owning root even when both exist - resuming
+    /// should land back in the subfolder the session actually ran in, not at the root it was attributed
+    /// to.</summary>
+    [Fact]
+    public void ResolveWorkingDirectoryFor_PrefersTheSessionsOwnCwd_OverTheOwningRoot()
+    {
+        var (vm, feed, _) = Build();
+        var realRoot = System.IO.Path.GetTempPath();
+        string realSubDir = System.IO.Path.Combine(realRoot, "accel-resume-cwd-" + Guid.NewGuid().ToString("N"));
+        System.IO.Directory.CreateDirectory(realSubDir);
+        try
+        {
+            feed.Publish(TelemetryFixtures.Tree(new[]
+            {
+                TelemetryFixtures.Root(realRoot, TelemetryFixtures.Session("s-1", cwd: realSubDir)),
+            }));
+
+            Assert.Equal(realSubDir, vm.ResolveWorkingDirectoryFor(Node(vm, "s-1")));
+        }
+        finally
+        {
+            System.IO.Directory.Delete(realSubDir);
+        }
+    }
+
+    /// <summary>The invariant stated as one property over every row panel A can show, including the
+    /// keyless placeholder and a null node: whatever comes back is either null or a directory that
+    /// exists right now - the only two things <c>CreateProcessW</c> accepts.</summary>
+    [Fact]
+    public void ResolveWorkingDirectoryFor_NeverReturnsANonExistentDirectory_ForAnyRow()
+    {
+        var (vm, feed, _) = Build();
+        feed.Publish(TelemetryFixtures.Tree(
+            roots: new[]
+            {
+                TelemetryFixtures.Root(OtherRootPath, TelemetryFixtures.Session("s-stale", cwd: @"C:\gone")),
+                TelemetryFixtures.Root(RootPath),
+            },
+            unattributedSessions: new[] { TelemetryFixtures.Session("orphan-session", cwd: @"C:\also-gone") },
+            unattributedAgents: new[] { TelemetryFixtures.Agent("orphan-agent") }));
+
+        foreach (var node in Flatten(vm))
+        {
+            string? resolved = vm.ResolveWorkingDirectoryFor(node);
+            Assert.True(resolved is null || System.IO.Directory.Exists(resolved),
+                $"resolved '{resolved}' for row '{node.Key}' is not an existing directory");
+        }
+
+        // No row at all (defensive null) resolves the same way, never to a bogus path.
+        string? forNoNode = vm.ResolveWorkingDirectoryFor(null);
+        Assert.True(forNoNode is null || System.IO.Directory.Exists(forNoNode));
+    }
+
+    /// <summary>"Create session"'s pre-filled directory goes through the same gate (MainWindow's
+    /// CreateSessionCore), so selecting an "(unattributed)" row never pre-fills the label.</summary>
+    [Fact]
+    public void SelectedWorkingDirectory_NeverYieldsTheUnattributedPlaceholder()
+    {
+        var (vm, feed, _) = Build();
+        var realDir = System.IO.Path.GetTempPath();
+        feed.Publish(TelemetryFixtures.Tree(
+            roots: new[] { TelemetryFixtures.Root(realDir) },
+            unattributedSessions: new[] { TelemetryFixtures.Session("orphan-session", cwd: null) }));
+
+        // The synthetic root row itself - the worst case, since it has no cwd of its own to fall back on.
+        Node(vm, "(unattributed)").IsSelected = true;
+
+        Assert.Equal("(unattributed)", vm.SelectedRootPath);
+        Assert.Equal(realDir, vm.SelectedWorkingDirectory);
+    }
+
+    [Fact]
+    public void SessionNode_CarriesCwd_ForResume()
+    {
+        var (vm, feed, _) = Build();
+        feed.Publish(TelemetryFixtures.Tree(new[] { TelemetryFixtures.Root(RootPath, TelemetryFixtures.Session("s-1")) }));
+
+        // Cwd is the real path; ProjectDir is the ~/.claude/projects slug - never interchangeable.
+        Assert.Equal(RootPath, Node(vm, "s-1").Cwd);
+        Assert.Equal("C--projects", Node(vm, "s-1").ProjectDir);
     }
 
     [Fact]

@@ -187,11 +187,12 @@ internal static class TelemetryFixtures
         AgentTreeDto[]? agents = null,
         string name = "a session",
         long? durationMs = null,
-        long? consumedTokens = null) => new(
+        long? consumedTokens = null,
+        string? cwd = @"C:\projects") => new(
         SessionId: sessionId,
         Name: name,
         NameSource: "first_message",
-        Cwd: @"C:\projects",
+        Cwd: cwd,
         ProjectDir: "C--projects",
         IsLive: isLive,
         Status: isLive ? "live" : "ended",

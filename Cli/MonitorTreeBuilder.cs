@@ -44,14 +44,23 @@ public sealed record MonitorAgentNode(string AgentId, string Text, MonitorNodeSt
 /// carried through purely so P4-T4's "Remove session" action can resolve
 /// <c>projects/&lt;slug&gt;/&lt;sessionId&gt;[.jsonl]</c> without a second disk scan; nothing here
 /// otherwise needed it. <see cref="DurationMs"/>/<see cref="ConsumedTokens"/> mirror
-/// <see cref="MonitorAgentNode"/>'s raw-value fields.</summary>
+/// <see cref="MonitorAgentNode"/>'s raw-value fields.
+///
+/// <para><see cref="Cwd"/> is a different thing entirely from <see cref="ProjectDir"/> and the two
+/// must never be confused: it is the session's <b>real</b> recorded working directory
+/// (<c>SessionTreeDto.Cwd</c>, read from the transcript head), not a <c>~/.claude/projects</c> slug.
+/// Carried through so "Resume session" can relaunch <c>claude</c> in the directory the session
+/// actually ran in - which is the only thing that works for a session under the synthetic
+/// "(unattributed)" root, whose owning "root" is a label, not a path. May be empty (no cwd recorded)
+/// and is never validated here - callers must still check it exists on disk.</para></summary>
 public sealed record MonitorSessionNode(string SessionId, string Text, MonitorNodeState State, MonitorAgentNode[] Agents,
     MonitorRowColumns Columns, string ProjectDir = "",
     long? DurationMs = null, long? ConsumedTokens = null,
     // "Waiting for feedback" (a Stop hook event) - see RootsPanelViewModel's acknowledgment
     // tracking for how this becomes the panel-A row highlight/window-flash, cleared once the
     // user focuses this session's tab rather than when this timestamp itself changes.
-    DateTime? WaitingSinceUtc = null);
+    DateTime? WaitingSinceUtc = null,
+    string Cwd = "");
 
 /// <summary>One rendered root-folder node. <see cref="OrphanAgents"/> is only ever non-empty for
 /// the synthetic "(unattributed)" root - a normal configured root's agents are always nested
@@ -145,7 +154,7 @@ public static class MonitorTreeBuilder
 
         return new MonitorSessionNode(
             session.SessionId ?? string.Empty, text, state, agents, columns, session.ProjectDir ?? string.Empty,
-            session.DurationMs, session.ConsumedTokens, session.WaitingSinceUtc);
+            session.DurationMs, session.ConsumedTokens, session.WaitingSinceUtc, session.Cwd ?? string.Empty);
     }
 
     private static MonitorAgentNode BuildAgentNode(AgentTreeDto agent)

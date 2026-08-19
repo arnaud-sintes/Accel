@@ -1,6 +1,7 @@
 namespace Accel.App.Controls;
 
 using System;
+using System.Globalization;
 using System.IO;
 using System.Text.Json;
 using System.Threading.Tasks;
@@ -148,6 +149,14 @@ public partial class TerminalView : UserControl, IDisposable
         // this profile/user-data-folder's cache (Accel's own vendored page), never a stray path.
         await Browser.CoreWebView2.Profile.ClearBrowsingDataAsync(CoreWebView2BrowsingDataKinds.DiskCache);
 
+        // terminal.js reads this to configure xterm's `windowsPty` option instead of the legacy
+        // `windowsMode` - see the comment on that option for why the distinction matters and what it
+        // fixes. AddScriptToExecuteOnDocumentCreatedAsync (not an ExecuteScriptAsync after
+        // navigation) because terminal.js builds the Terminal during its own initial load: anything
+        // pushed in afterwards would arrive too late to be part of the constructor's options.
+        await Browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(
+            $"window.accelConPtyBuildNumber = {ConPtyBuildNumber().ToString(CultureInfo.InvariantCulture)};");
+
         // Navigate() only starts the navigation - it returns long before index.html's own
         // <script> has run, let alone set document.title. Wait for NavigationCompleted so
         // Initialization (and thus any caller's verification query of document.title) only
@@ -239,6 +248,14 @@ public partial class TerminalView : UserControl, IDisposable
 
         return $"window.accelAttachPty({JsonSerializer.Serialize(tabId)}, {webSocketPort.ToString(System.Globalization.CultureInfo.InvariantCulture)});";
     }
+
+    /// <summary>
+    /// This machine's Windows build number, which is also the ConPTY version xterm.js's
+    /// <c>windowsPty</c> option wants (there is no separate ConPTY version — the pseudoconsole ships
+    /// with conhost, so the OS build <i>is</i> its version, and 21376 is the build xterm compares
+    /// against for whether ConPTY can report line wrapping itself).
+    /// </summary>
+    private static int ConPtyBuildNumber() => Environment.OSVersion.Version.Build;
 
     /// <summary>
     /// <c>%USERPROFILE%\.claude\accel-webview2\</c> — the WebView2 user-data folder. See the

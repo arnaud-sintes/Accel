@@ -179,8 +179,12 @@ self-invoked `accel.exe notify` calls) and (2) the top-level `statusLine`/`subag
 - **`RootFoldersConfig.cs` / `RootsRoutes.cs` / `RootsTreeRoute.cs`** — a "root" is a user-configured
   top-level project folder Accel tracks, used to bucket sessions by the transcript's own `cwd`. Config
   supports v1 (flat array, legacy) and v2 (`{roots, sessions}` where `sessions` is a sparse per-session
-  override map: displayName/pinned/hidden/lastOpenedUtc). Probed at `%USERPROFILE%\.claude\accel-folders.json`
+  override map: displayName/pinned/hidden/lastOpenedUtc). Reads probe `%USERPROFILE%\.claude\accel-folders.json`
   → `<exeDir>\folder.json` → `<cwd>\folder.json` (first found wins, no fallthrough on parse failure).
+  **Writes always target the durable per-user file only** (`ResolveWritePath()` never returns an exe-dir/cwd
+  path — those can sit under `C:\Program Files` and be unwritable without elevation); if a legacy
+  `folder.json` exists while the durable file doesn't, `ResolveWritePath()` migrates it into the durable
+  file first so reads and writes stay on one file.
   `GET /roots` returns the roots loaded once at startup; `GET /roots/tree` calls
   `Metrics.RootsTreeBuilder.Build(...)` fresh each request (including a fresh re-read of the sessions
   override map).

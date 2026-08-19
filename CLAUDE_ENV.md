@@ -35,7 +35,7 @@ This document describes file/folder organization, build/test/publish mechanics, 
 | `accel.csproj` | Main project (SDK: Web, targets net8.0-windows, console exe with WPF/WinForms) |
 | `global.json` | Locks .NET SDK to 8.0.424 with `rollForward: latestFeature` |
 | `Program.cs` | Entry point; routes CLI args to ArgParser, smoke tests, and RunCombinedAsync |
-| `folder.json` | JSON array of root folder paths for monitoring (format: `["C:/projects", ...]`) |
+| `folder.json` | Legacy, read-only dev fallback: JSON array of root folder paths (format: `["C:/projects", ...]`). Not shipped by the installer or portable zip; the real config is `%USERPROFILE%\.claude\accel-folders.json` |
 | `publish.ps1` | Wraps `dotnet publish` for the single-file executable, then packages a portable zip and (if Inno Setup is installed) a `Setup.exe` into `dist\` |
 
 ## Build Instructions
@@ -164,8 +164,8 @@ Runs the dotnet publish command above, then packages the redistributables into `
 from `accel.csproj`'s `<Version>`, the single source of truth also read by `App/Controls/AppVersionInfo.cs`):
 - Confirms publish succeeded (checks exit code) and that `accel.exe` exists at the expected path
 - Always produces a portable zip (`dist\Accel-<version>-win-x64.zip`): a staged copy of `accel.exe` +
-  the `wwwroot\xterm` terminal assets + the default `folder.json` fallback (`.pdb`/xml docs/`global.json`/
-  `web.config` are excluded — none are needed at runtime)
+  the `wwwroot\xterm` terminal assets (`.pdb`/xml docs/`global.json`/`web.config` are excluded — none
+  are needed at runtime; no `folder.json` is shipped, see "Folder Config Search Order")
 - If Inno Setup 6's `ISCC.exe` is found on PATH or its default install location, also compiles
   `installer\accel.iss` into `dist\Accel-Setup-<version>.exe`; otherwise skips that step with a warning
   (the zip is still a complete redistributable) — install Inno Setup from
@@ -219,13 +219,21 @@ xterm.js (WebView2 front-end, panel D) is vendored offline in `App/Controls/wwwr
 
 ### Folder Config Search Order
 
-Accel looks for `folder.json` (JSON array of absolute paths) in this order:
+**Writes** (add/remove root, rename/pin/hide a session) always target one file:
+`%USERPROFILE%\.claude\accel-folders.json` (`RootFoldersConfig.DurableConfigPath()`), created on
+demand. Never the exe directory — a default install lives in `C:\Program Files\Accel`, which a
+standard user cannot write to.
 
-1. `%USERPROFILE%\.claude\accel-folders.json` (preferred, colocated with Accel state)
-2. Executable directory / `folder.json` (portable deployment)
-3. Current working directory / `folder.json` (dev/testing)
+**Reads** probe, in order (first that *exists* wins; a malformed hit does not fall through):
 
-If not found or malformed, treated as empty array `[]`.
+1. `%USERPROFILE%\.claude\accel-folders.json` (durable, per-user — also the only write target)
+2. Executable directory / `folder.json` (legacy portable deployment, read-only)
+3. Current working directory / `folder.json` (legacy dev/testing, read-only)
+
+If a legacy `folder.json` (2 or 3) has content while the durable file is missing, the first
+`ResolveWritePath()` call migrates it into the durable file (upgrading it to the v2 object shape).
+
+If not found or malformed, treated as an empty config (no roots, no session overrides).
 
 ### Event Server Port
 

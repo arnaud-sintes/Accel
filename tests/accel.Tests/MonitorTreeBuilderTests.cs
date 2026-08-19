@@ -143,6 +143,10 @@ public class MonitorTreeBuilderTests
         // P4-T4/T3: ProjectDir is carried through purely for SessionRemover.Plan's projectDir parameter -
         // nothing else in this file's own output depends on it.
         Assert.Equal("C--projects", session.ProjectDir);
+        // ...and Cwd is the real recorded directory, deliberately NOT the slug above: it is what
+        // "Resume session" launches claude in, which is the only usable answer for a session under
+        // the synthetic "(unattributed)" root (whose root Path is a label, not a directory).
+        Assert.Equal(@"C:\projects", session.Cwd);
 
         Assert.Single(session.Agents);
         var agent = session.Agents[0];

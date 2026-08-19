@@ -137,6 +137,127 @@ public class RootFoldersConfigTests : IDisposable
     }
 
     [Fact]
+    public void DurableConfigPath_IsCandidate1()
+    {
+        Assert.Equal(RootFoldersConfig.DefaultCandidatePaths()[0], RootFoldersConfig.DurableConfigPath());
+        Assert.EndsWith(
+            Path.Combine(".claude", RootFoldersConfig.DurableFileName),
+            RootFoldersConfig.DurableConfigPath());
+    }
+
+    // --- Write-path resolution: writes must never target a possibly-unwritable legacy slot ---
+
+    [Fact]
+    public void ResolveWritePath_DurableMissing_LegacyExeDirFileExists_StillTargetsDurableHome()
+    {
+        // The exact fresh-default-install shape: the installer's {app}\folder.json exists (and
+        // {app} = C:\Program Files\Accel is unwritable for a standard user), the durable per-user
+        // file does not exist yet. The write target must be the durable home regardless.
+        string durable = MissingPath();
+        _tempFiles.Add(durable);
+        string exeDirFile = NewTempPath();
+        File.WriteAllText(exeDirFile, "[]");
+
+        string writePath = RootFoldersConfig.ResolveWritePath(new[] { durable, exeDirFile, MissingPath() });
+
+        Assert.Equal(durable, writePath);
+    }
+
+    [Fact]
+    public void ResolveWritePath_DurableExists_ReturnsIt_AndDoesNotRewriteIt()
+    {
+        string durable = NewTempPath();
+        File.WriteAllText(durable, "[\"C:/already-here\"]");
+        string exeDirFile = NewTempPath();
+        File.WriteAllText(exeDirFile, "[\"C:/legacy\"]");
+
+        string writePath = RootFoldersConfig.ResolveWritePath(new[] { durable, exeDirFile });
+
+        Assert.Equal(durable, writePath);
+
+        // Untouched: an existing durable file is authoritative, no migration runs over it.
+        Assert.Equal(new[] { "C:/already-here" }, RootFoldersConfig.Load(new[] { durable }));
+    }
+
+    [Fact]
+    public void ResolveWritePath_MigratesLegacyFolderJsonRootsIntoDurableHome_OnFirstRun()
+    {
+        string durable = MissingPath();
+        _tempFiles.Add(durable);
+        _tempFiles.Add(durable + Accel.Settings.SettingsFile.BackupSuffix);
+        string exeDirFile = NewTempPath();
+        File.WriteAllText(exeDirFile, "[\"C:/legacy-root\", \"C:/legacy-other\"]");
+
+        string writePath = RootFoldersConfig.ResolveWritePath(new[] { durable, exeDirFile, MissingPath() });
+
+        Assert.Equal(durable, writePath);
+        Assert.True(File.Exists(durable));
+
+        // Migrated verbatim, and upgraded to v2 on the way in.
+        var migrated = RootFoldersConfig.LoadFull(new[] { durable });
+        Assert.Equal(new[] { "C:/legacy-root", "C:/legacy-other" }, migrated.Roots);
+        Assert.Contains("\"version\": 2", File.ReadAllText(durable));
+
+        // The legacy file is left alone - migration copies, it never moves or deletes.
+        Assert.True(File.Exists(exeDirFile));
+    }
+
+    [Fact]
+    public void ResolveWritePath_MigratesLegacySessionOverridesToo()
+    {
+        string durable = MissingPath();
+        _tempFiles.Add(durable);
+        _tempFiles.Add(durable + Accel.Settings.SettingsFile.BackupSuffix);
+        string cwdFile = NewTempPath();
+        File.WriteAllText(
+            cwdFile,
+            "{\"version\":2,\"roots\":[\"C:/x\"],\"sessions\":{\"s1\":{\"displayName\":\"Kept\",\"pinned\":true,\"hidden\":false}}}");
+
+        RootFoldersConfig.ResolveWritePath(new[] { durable, MissingPath(), cwdFile });
+
+        var migrated = RootFoldersConfig.LoadFull(new[] { durable });
+        Assert.Equal(new[] { "C:/x" }, migrated.Roots);
+        var kept = Assert.Single(migrated.Sessions);
+        Assert.Equal("s1", kept.Key);
+        Assert.Equal("Kept", kept.Value.DisplayName);
+        Assert.True(kept.Value.Pinned);
+    }
+
+    [Fact]
+    public void ResolveWritePath_NothingExistsAnywhere_ReturnsDurableHome_AndCreatesNoFile()
+    {
+        string durable = MissingPath();
+
+        string writePath = RootFoldersConfig.ResolveWritePath(new[] { durable, MissingPath(), MissingPath() });
+
+        Assert.Equal(durable, writePath);
+
+        // Nothing worth migrating means nothing is written: the first real Save creates the file.
+        Assert.False(File.Exists(durable));
+    }
+
+    [Fact]
+    public void ResolveWritePath_EmptyLegacyFile_DoesNotMigrate()
+    {
+        string durable = MissingPath();
+        string exeDirFile = NewTempPath();
+        File.WriteAllText(exeDirFile, "[]");
+
+        RootFoldersConfig.ResolveWritePath(new[] { durable, exeDirFile });
+
+        Assert.False(File.Exists(durable));
+    }
+
+    [Fact]
+    public void ResolveWritePath_NoArgs_ReturnsDurableHome_NeverAnExeDirOrCwdPath()
+    {
+        string writePath = RootFoldersConfig.ResolveWritePath();
+
+        Assert.Equal(RootFoldersConfig.DurableConfigPath(), writePath);
+        Assert.EndsWith(RootFoldersConfig.DurableFileName, writePath);
+    }
+
+    [Fact]
     public void Load_NoArgs_NeverThrows()
     {
         // Exercises the real default candidate paths end-to-end (whatever the state of this

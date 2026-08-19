@@ -28,10 +28,22 @@
     term = new Terminal({
       convertEol: true,
 
-      // ConPTY is the backend on every target (locked-in decision 1), so xterm's own
-      // Windows-specific reflow heuristic for ConPTY line-wrapping quirks is the right choice
-      // here, not just "the P2-T5 rendering-only demo happened to work without it".
-      windowsMode: true,
+      // ConPTY is the backend on every target (locked-in decision 1). This was originally
+      // `windowsMode: true`, which forces xterm's LEGACY ConPTY workarounds on unconditionally: a
+      // line-feed heuristic that guesses which lines are wrapped, plus reflow disabled outright
+      // (xterm's Buffer._isReflowEnabled is `!windowsMode`). Those workarounds exist for the
+      // pre-21376 ConPTY that could not report wrapping, and applying them to a modern ConPTY makes
+      // a full-screen app's repaint interleave old and new glyphs (see this task's report for the
+      // reproduction). `windowsPty` is the option xterm added to replace `windowsMode` precisely so
+      // the host can state the backend and build number and let xterm decide - which is what
+      // TerminalView's injected accelConPtyBuildNumber supplies. The `windowsMode` fallback below
+      // keeps the old behaviour if the host ever fails to inject it, rather than silently dropping
+      // the workarounds on a machine that may genuinely need them (Accel supports Windows 10 1809+,
+      // i.e. builds well below 21376).
+      windowsPty: typeof window.accelConPtyBuildNumber === "number"
+        ? { backend: "conpty", buildNumber: window.accelConPtyBuildNumber }
+        : {},
+      windowsMode: typeof window.accelConPtyBuildNumber !== "number",
 
       // Integer cell metrics (plan risk register item 4, explicit callout): fontSize is a whole
       // number and lineHeight is the default 1 (a multiplier, not a pixel value). letterSpacing
@@ -368,6 +380,32 @@
     } catch (e) {
       return null;
     }
+  };
+
+  // Diagnostics for terminal-e2e-smoke-test's ConPTY-mode check: proves the host's injected build
+  // number actually reached the Terminal's options, i.e. that xterm decided for itself whether this
+  // machine's ConPTY needs the legacy wrapping workarounds, rather than being forced into them by
+  // `windowsMode: true`. reflowEnabled reads xterm 5.5.0's private Buffer._isReflowEnabled - the only
+  // place that decision is observable - so it is wrapped defensively like accelCellMetrics above.
+  window.accelConPtyOptions = function () {
+    if (!term) {
+      return null;
+    }
+
+    var reflowEnabled = null;
+    try {
+      reflowEnabled = term._core._bufferService.buffers.normal._isReflowEnabled;
+    } catch (e) {
+      // Left null - reported as unknown rather than throwing out of a diagnostic.
+    }
+
+    return {
+      injectedBuildNumber: typeof window.accelConPtyBuildNumber === "number" ? window.accelConPtyBuildNumber : null,
+      windowsMode: term.options.windowsMode,
+      windowsPtyBackend: term.options.windowsPty ? term.options.windowsPty.backend : null,
+      windowsPtyBuildNumber: term.options.windowsPty ? term.options.windowsPty.buildNumber : null,
+      reflowEnabled: reflowEnabled,
+    };
   };
 
   window.accelSocketState = function () {

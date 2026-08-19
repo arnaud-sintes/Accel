@@ -64,10 +64,14 @@ No other user-facing verbs are recognized (there is no separate `run`/`install`/
 
 5. **Querying:** The server's HTTP GET routes (below) can still be queried externally for scripting or monitoring purposes.
 
-6. **Root Folders Configuration:** Accel looks for a root-folders config file in this order (first one that *exists on disk* wins — even if it then fails to parse, later candidates are not tried):
-   - `%USERPROFILE%\.claude\accel-folders.json` (preferred/durable location, colocated with other Accel state)
-   - `<directory of the running executable>\folder.json` (for portable deployments)
-   - `<current working directory>\folder.json` (for development)
+6. **Root Folders Configuration:** Accel keeps a single root-folders config file at `%USERPROFILE%\.claude\accel-folders.json` (colocated with other Accel state). It is created on demand the first time you add a root folder — no manual setup, and no elevation, even when Accel itself is installed under `C:\Program Files`. **All writes always go there.**
+
+   For backward compatibility, *reads* still fall back to two legacy, read-only locations when that file doesn't exist yet (first one that *exists on disk* wins — even if it then fails to parse, later candidates are not tried):
+   - `%USERPROFILE%\.claude\accel-folders.json` (the durable, per-user config — the only write target)
+   - `<directory of the running executable>\folder.json` (legacy/portable, read-only)
+   - `<current working directory>\folder.json` (legacy/dev, read-only)
+
+   If a legacy `folder.json` is found while the durable file is still missing, its contents are migrated into `accel-folders.json` the first time a write path is resolved, so reads and writes never split across two files.
 
    Two on-disk shapes are supported:
    - **v1 (legacy)** — a flat JSON array of absolute folder paths:
