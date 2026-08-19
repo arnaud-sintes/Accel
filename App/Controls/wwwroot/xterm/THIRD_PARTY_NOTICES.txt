@@ -17,6 +17,13 @@ xterm-addon-fit
   License:  MIT
   Source:   https://www.npmjs.com/package/@xterm/addon-fit/v/0.11.0
 
+xterm-addon-webgl
+  Package:  @xterm/addon-webgl
+  Version:  0.18.0 (the release matching @xterm/xterm 5.5.0, and like it still a UMD bundle)
+  File:     addon-webgl.js (lib/addon-webgl.js - UMD bundle, exposes window.WebglAddon)
+  License:  MIT
+  Source:   https://www.npmjs.com/package/@xterm/addon-webgl/v/0.18.0
+
 Note on version choice: @xterm/xterm 6.0.0 (latest at the time of writing) dropped the classic
 lib/xterm.js UMD bundle from its published package (CJS/ESM module entry points only), which
 does not work as a plain <script> tag inside the offline-served WebView2 page below. 5.5.0 is

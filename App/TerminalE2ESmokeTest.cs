@@ -139,6 +139,7 @@ public static class TerminalE2ESmokeTest
             ok &= await CheckShiftEnterSendsExactlyOneEscCrAsync(output, terminal, server, port);
             ok &= await CheckIntegerCellMetricsAsync(output, terminal);
             ok &= await CheckConPtyModeAsync(output, terminal);
+            ok &= await CheckWebglRendererActiveAsync(output, terminal);
             return ok;
         }
         finally
@@ -436,6 +437,30 @@ public static class TerminalE2ESmokeTest
         output.WriteLine($"  [{(ok ? "PASS" : "FAIL")}] build {buildNumber} -> windowsMode={windowsMode}, " +
             $"windowsPty.backend={backend}, reflowEnabled={reflowEnabled} " +
             $"(expected legacy ConPTY workarounds {(legacyExpected ? "ON" : "OFF")} for this build)");
+        return ok;
+    }
+
+    /// <summary>
+    /// Reported bug (this check's reason to exist): scrolling Claude Code's transcript left stale glyph
+    /// pixels ("remanence", notably first-column bullets) over areas that should be blank — an artifact
+    /// class the DOM renderer is structurally exposed to, since it delegates erasing old glyphs to
+    /// Chromium's paint invalidation (defeated here by fractional letter-spacing and glyph-ink overflow;
+    /// see <c>terminal.js</c>'s <c>activateWebglRenderer</c> comment). The fix is the vendored WebGL
+    /// renderer addon, which clears and redraws the whole frame every render. This asserts the addon
+    /// actually engaged on this machine (context created, not silently degraded to DOM) — not
+    /// unit-testable, since it needs a real GPU-backed WebView2 page.
+    /// </summary>
+    private static async Task<bool> CheckWebglRendererActiveAsync(TextWriter output, TerminalView terminal)
+    {
+        output.WriteLine();
+        output.WriteLine("== check: WebGL renderer engaged (scroll-remanence fix), not the DOM fallback ==");
+
+        string outer = await terminal.Browser.CoreWebView2.ExecuteScriptAsync("window.accelRendererType()");
+        string? renderer = JsonSerializer.Deserialize<string>(outer);
+
+        bool ok = string.Equals(renderer, "webgl", StringComparison.Ordinal);
+        output.WriteLine($"  [{(ok ? "PASS" : "FAIL")}] window.accelRendererType() reports '{renderer}' " +
+            "(expected 'webgl'; 'dom' means addon-webgl.js failed to load or WebGL context creation failed)");
         return ok;
     }
 

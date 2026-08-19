@@ -18,6 +18,7 @@
   var fitAddon = null;
   var socket = null;
   var resizeObserver = null;
+  var webglActive = false;
 
   // Diagnostic accumulator, read back via CoreWebView2.ExecuteScriptAsync by
   // Program.cs's `terminal-e2e-smoke-test` verb to prove real bytes from a real child arrived
@@ -112,6 +113,12 @@
     fitAddon = new FitAddon.FitAddon();
     term.loadAddon(fitAddon);
     term.open(document.getElementById("term"));
+
+    // Must come after term.open() (the WebGL addon needs the element/renderer to exist) and
+    // before the first fit/snap below, so cell metrics are measured against the renderer that
+    // will actually paint.
+    activateWebglRenderer();
+
     fitAddon.fit();
 
     // Runtime correction, done once the renderer has actually measured the real font (it cannot
@@ -184,6 +191,45 @@
       sendResize();
     });
     resizeObserver.observe(document.getElementById("term"));
+  }
+
+  // Reported bug: scrolling Claude Code's transcript left a "remanence" of previous content -
+  // stale glyph pixels (notably the first-column `⏺`/`●` bullets) persisting over areas that
+  // should be blank/black after the scroll. Root cause class: with no renderer addon loaded,
+  // xterm falls back to its DOM renderer, where erasing old glyphs is delegated entirely to
+  // Chromium's paint invalidation - and two things here defeat it: the fractional letter-spacing
+  // snapCellWidthToIntegerPixels() deliberately sets (sub-pixel-positioned text on composited
+  // layers is a known Chromium invalidation weak spot), and glyphs whose ink overflows their
+  // layout box (those bullets, box drawing) leaving pixels outside the rect Chromium repaints
+  // when the row re-renders blank. The WebGL renderer clears and redraws the whole frame every
+  // render, so stale-pixel ghosting is structurally impossible (it is also what VS Code ships,
+  // and much faster for a heavy TUI). DOM renderer remains the automatic fallback: xterm itself
+  // reverts to it whenever the WebGL addon is disposed or fails to construct.
+  function activateWebglRenderer() {
+    // Guarded on the global existing at all so a missing/failed-to-load addon-webgl.js script
+    // degrades to the DOM renderer instead of throwing out of createTerminal().
+    if (typeof WebglAddon === "undefined") {
+      return;
+    }
+
+    try {
+      var webglAddon = new WebglAddon.WebglAddon();
+
+      // Per the addon's own README: the browser can revoke the WebGL context at any time (GPU
+      // reset, driver update, too many live contexts). Disposing the addon on that event is the
+      // documented recovery - xterm transparently falls back to the DOM renderer rather than
+      // freezing on the last WebGL frame.
+      webglAddon.onContextLoss(function () {
+        webglAddon.dispose();
+        webglActive = false;
+      });
+
+      term.loadAddon(webglAddon);
+      webglActive = true;
+    } catch (e) {
+      // WebGL context creation failed (e.g. GPU/driver blocklisted, remote session without GPU) -
+      // stay on the DOM renderer, which is functionally complete, just artifact-prone.
+    }
   }
 
   function snapCellWidthToIntegerPixels() {
@@ -410,6 +456,14 @@
 
   window.accelSocketState = function () {
     return socket ? socket.readyState : -1;
+  };
+
+  // Diagnostic: which renderer is actually painting - "webgl" only while the WebGL addon is
+  // loaded and its context alive (see activateWebglRenderer's onContextLoss fallback), "dom"
+  // otherwise. Lets a host/smoke test verify the ghosting fix's renderer actually engaged on
+  // this machine instead of silently degrading.
+  window.accelRendererType = function () {
+    return webglActive ? "webgl" : "dom";
   };
 
   // Exposed for terminal-e2e-smoke-test's resize-reaches-child check: the exact function the

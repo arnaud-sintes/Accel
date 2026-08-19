@@ -15,7 +15,7 @@ using Microsoft.Web.WebView2.Core;
 /// WebSocket route — see <c>wwwroot/xterm/terminal.js</c> for the actual attach/onData/resize glue
 /// and <c>Server/PtyRoutes.cs</c> for the binary-vs-text framing convention it matches.
 ///
-/// <para><b>Vendoring / serving choice:</b> xterm.js + the FitAddon are vendored on disk under
+/// <para><b>Vendoring / serving choice:</b> xterm.js + its addons (Fit, WebGL) are vendored on disk under
 /// <c>App/Controls/wwwroot/xterm/</c> (Content-copied to the build/publish output — see
 /// <c>Accel.csproj</c>'s explicit <c>ItemGroup</c>; exact versions/licenses recorded in that
 /// folder's <c>THIRD_PARTY_NOTICES.txt</c>) rather than compiled in as true assembly

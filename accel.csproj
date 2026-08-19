@@ -132,6 +132,11 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>
+    <Content Include="App\Controls\wwwroot\xterm\addon-webgl.js">
+      <Link>wwwroot\xterm\addon-webgl.js</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
     <Content Include="App\Controls\wwwroot\xterm\index.html">
       <Link>wwwroot\xterm\index.html</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
