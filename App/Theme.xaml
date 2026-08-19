@@ -147,6 +147,11 @@
 
     <SolidColorBrush x:Key="DangerBrush" Color="{StaticResource DangerColor}" />
     <SolidColorBrush x:Key="SuccessBrush" Color="{StaticResource SuccessColor}" />
+
+    <!-- Translucent per-line diff highlight for the side-by-side compare view (DiffOldText/DiffNewText) -
+         same hue as DangerBrush/SuccessBrush but low-alpha so syntax-highlighted text stays legible on top. -->
+    <SolidColorBrush x:Key="DiffRemovedLineBrush" Color="#33E98F8F" />
+    <SolidColorBrush x:Key="DiffAddedLineBrush" Color="#338FCB9B" />
     <SolidColorBrush x:Key="WarningTextBrush" Color="{StaticResource WarningColor}" />
     <SolidColorBrush x:Key="WarningBackgroundBrush" Color="#FF241B10" />
     <SolidColorBrush x:Key="WarningBorderBrush" Color="#FF5E4523" />
@@ -602,7 +607,13 @@
                             BorderBrush="{TemplateBinding BorderBrush}"
                             BorderThickness="{TemplateBinding BorderThickness}"
                             CornerRadius="6" SnapsToDevicePixels="True">
-                        <ScrollViewer x:Name="PART_ContentHost" Margin="{TemplateBinding Padding}"
+                        <!--
+                            No Margin="{TemplateBinding Padding}" here: TextBoxBase already forwards
+                            Padding onto PART_ContentHost, and the themed ScrollViewer template's
+                            presenter now honours it (see the ScrollViewer Style below) - binding it
+                            here too would apply the padding twice.
+                        -->
+                        <ScrollViewer x:Name="PART_ContentHost"
                                       VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
                                       Focusable="False" HorizontalScrollBarVisibility="Hidden"
                                       VerticalScrollBarVisibility="Hidden" />
@@ -1058,6 +1069,13 @@
         this theme, so it shows up as a bright square exactly where the two themed (dark, thin)
         scrollbars above meet. Overriding the whole ScrollViewer template just to make that one cell
         transparent (it never needs to be anything else - nothing is ever actually drawn there).
+
+        The presenter's Margin="{TemplateBinding Padding}" replicates the stock ScrollViewer
+        template: it is how a ScrollViewer's Padding reaches its content at all. TextBoxBase
+        (TextBox/RichTextBox) in particular forwards its own Padding onto its internal
+        PART_ContentHost ScrollViewer, so without this binding a RichTextBox's Padding is silently
+        swallowed - which showed up as the file/diff viewers' text sitting 16px (one text line)
+        above their line-number gutters.
     -->
     <Style TargetType="ScrollViewer">
         <Setter Property="Template">
@@ -1072,7 +1090,7 @@
                             <RowDefinition Height="*" />
                             <RowDefinition Height="Auto" />
                         </Grid.RowDefinitions>
-                        <ScrollContentPresenter Grid.Column="0" Grid.Row="0"
+                        <ScrollContentPresenter Grid.Column="0" Grid.Row="0" Margin="{TemplateBinding Padding}"
                                                  Content="{TemplateBinding Content}"
                                                  ContentTemplate="{TemplateBinding ContentTemplate}"
                                                  CanContentScroll="{TemplateBinding CanContentScroll}" />

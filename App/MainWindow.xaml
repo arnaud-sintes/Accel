@@ -962,7 +962,7 @@
                             <Border x:Name="FileViewerHost" Background="{StaticResource BackgroundBaseBrush}" Visibility="Collapsed">
                                 <Grid>
                                     <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="64" />
                                         <ColumnDefinition Width="*" />
                                     </Grid.ColumnDefinitions>
 
@@ -971,18 +971,30 @@
                                         position via the TranslateTransform below, updated in
                                         MainWindow.xaml.cs's FileViewerText_ScrollChanged - see that
                                         handler's remarks for why a transform offset (not a second
-                                        ScrollViewer) is used to sync it.
+                                        ScrollViewer) is used to sync it. The TextBlock is wrapped in a
+                                        Canvas (rather than sitting directly in this Border) so it is
+                                        measured with unconstrained height: a Border/Grid cell would
+                                        otherwise arrange - and WPF would then auto-clip - the TextBlock to
+                                        the (much shorter) viewport height, baking that clip into the
+                                        TextBlock's own visual before TranslateTransform is applied, so
+                                        scrolling would only ever slide that already-truncated first
+                                        "page" of numbers around instead of revealing the rest of the
+                                        file. The column's fixed width (rather than Auto) is required by
+                                        the same fix: an Auto column would size itself from the Canvas's
+                                        own (always-zero) desired size instead of the TextBlock's.
                                     -->
                                     <Border Grid.Column="0" ClipToBounds="True" Background="{StaticResource SurfaceElevatedBrush}"
                                             BorderBrush="{StaticResource StrokeSubtleBrush}" BorderThickness="0,0,1,0">
-                                        <TextBlock x:Name="FileViewerLineNumbers" FontFamily="Consolas"
-                                                   FontSize="{StaticResource FontSizeBody}" Padding="8,16,8,16"
-                                                   TextAlignment="Right" Foreground="{StaticResource TextMutedBrush}"
-                                                   IsHitTestVisible="False">
-                                            <TextBlock.RenderTransform>
-                                                <TranslateTransform x:Name="FileViewerLineNumbersTransform" />
-                                            </TextBlock.RenderTransform>
-                                        </TextBlock>
+                                        <Canvas>
+                                            <TextBlock x:Name="FileViewerLineNumbers" FontFamily="Consolas"
+                                                       FontSize="{StaticResource FontSizeBody}" Padding="8,16,8,16"
+                                                       TextAlignment="Right" Foreground="{StaticResource TextMutedBrush}"
+                                                       IsHitTestVisible="False" Width="64">
+                                                <TextBlock.RenderTransform>
+                                                    <TranslateTransform x:Name="FileViewerLineNumbersTransform" />
+                                                </TextBlock.RenderTransform>
+                                            </TextBlock>
+                                        </Canvas>
                                     </Border>
 
                                     <!--
@@ -1011,10 +1023,10 @@
                             <Border x:Name="DiffViewerHost" Background="{StaticResource BackgroundBaseBrush}" Visibility="Collapsed">
                                 <Grid>
                                     <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="64" />
                                         <ColumnDefinition Width="*" />
                                         <ColumnDefinition Width="4" />
-                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="64" />
                                         <ColumnDefinition Width="*" />
                                         <ColumnDefinition Width="8" />
                                     </Grid.ColumnDefinitions>
@@ -1035,14 +1047,16 @@
                                     <!-- "Before" side's line-number gutter - see FileViewerLineNumbers's comment for how it stays in sync. -->
                                     <Border Grid.Row="1" Grid.Column="0" ClipToBounds="True" Background="{StaticResource SurfaceElevatedBrush}"
                                             BorderBrush="{StaticResource StrokeSubtleBrush}" BorderThickness="0,0,1,0">
-                                        <TextBlock x:Name="DiffOldLineNumbers" FontFamily="Consolas"
-                                                   FontSize="{StaticResource FontSizeBody}" Padding="8,16,8,16"
-                                                   TextAlignment="Right" Foreground="{StaticResource TextMutedBrush}"
-                                                   IsHitTestVisible="False">
-                                            <TextBlock.RenderTransform>
-                                                <TranslateTransform x:Name="DiffOldLineNumbersTransform" />
-                                            </TextBlock.RenderTransform>
-                                        </TextBlock>
+                                        <Canvas>
+                                            <TextBlock x:Name="DiffOldLineNumbers" FontFamily="Consolas"
+                                                       FontSize="{StaticResource FontSizeBody}" Padding="8,16,8,16"
+                                                       TextAlignment="Right" Foreground="{StaticResource TextMutedBrush}"
+                                                       IsHitTestVisible="False" Width="64">
+                                                <TextBlock.RenderTransform>
+                                                    <TranslateTransform x:Name="DiffOldLineNumbersTransform" />
+                                                </TextBlock.RenderTransform>
+                                            </TextBlock>
+                                        </Canvas>
                                     </Border>
 
                                     <RichTextBox x:Name="DiffOldText" Grid.Row="1" Grid.Column="1"
@@ -1060,14 +1074,16 @@
                                     <!-- "After" side's line-number gutter. -->
                                     <Border Grid.Row="1" Grid.Column="3" ClipToBounds="True" Background="{StaticResource SurfaceElevatedBrush}"
                                             BorderBrush="{StaticResource StrokeSubtleBrush}" BorderThickness="0,0,1,0">
-                                        <TextBlock x:Name="DiffNewLineNumbers" FontFamily="Consolas"
-                                                   FontSize="{StaticResource FontSizeBody}" Padding="8,16,8,16"
-                                                   TextAlignment="Right" Foreground="{StaticResource TextMutedBrush}"
-                                                   IsHitTestVisible="False">
-                                            <TextBlock.RenderTransform>
-                                                <TranslateTransform x:Name="DiffNewLineNumbersTransform" />
-                                            </TextBlock.RenderTransform>
-                                        </TextBlock>
+                                        <Canvas>
+                                            <TextBlock x:Name="DiffNewLineNumbers" FontFamily="Consolas"
+                                                       FontSize="{StaticResource FontSizeBody}" Padding="8,16,8,16"
+                                                       TextAlignment="Right" Foreground="{StaticResource TextMutedBrush}"
+                                                       IsHitTestVisible="False" Width="64">
+                                                <TextBlock.RenderTransform>
+                                                    <TranslateTransform x:Name="DiffNewLineNumbersTransform" />
+                                                </TextBlock.RenderTransform>
+                                            </TextBlock>
+                                        </Canvas>
                                     </Border>
 
                                     <RichTextBox x:Name="DiffNewText" Grid.Row="1" Grid.Column="4"

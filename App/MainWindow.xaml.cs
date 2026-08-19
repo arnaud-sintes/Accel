@@ -1343,17 +1343,20 @@ public partial class MainWindow : Window
         oldContent = NormalizeLineEndings(oldContent);
         newContent = NormalizeLineEndings(newContent);
 
-        DiffOldText.Document = BuildHighlightedDocument(oldContent, language);
-        DiffNewText.Document = BuildHighlightedDocument(newContent, language);
-
         string[] oldLines = oldContent.Split('\n');
         string[] newLines = newContent.Split('\n');
+        _diffMarks = ComputeDiffMarks(oldLines, newLines, out var removedOldLines, out var addedNewLines);
+
+        var removedLineBrush = (Brush)FindResource("DiffRemovedLineBrush");
+        var addedLineBrush = (Brush)FindResource("DiffAddedLineBrush");
+        DiffOldText.Document = BuildHighlightedDocument(oldContent, language, i => removedOldLines.Contains(i) ? removedLineBrush : null);
+        DiffNewText.Document = BuildHighlightedDocument(newContent, language, i => addedNewLines.Contains(i) ? addedLineBrush : null);
+
         SetLineNumbers(DiffOldLineNumbers, oldLines.Length);
         SetLineNumbers(DiffNewLineNumbers, newLines.Length);
         ResetScroll(DiffOldText, DiffOldLineNumbersTransform);
         ResetScroll(DiffNewText, DiffNewLineNumbersTransform);
 
-        _diffMarks = ComputeDiffMarks(oldLines, newLines);
         _diffMarkTotalLines = newLines.Length;
         RenderDiffMarkStrip();
 
@@ -1570,8 +1573,11 @@ public partial class MainWindow : Window
     /// git-diffable text file is overwhelmingly source-sized, not data-dump-sized, so the cap should
     /// essentially never bite in practice.
     /// </summary>
-    private static List<DiffMark> ComputeDiffMarks(string[] oldLines, string[] newLines)
+    private static List<DiffMark> ComputeDiffMarks(string[] oldLines, string[] newLines, out HashSet<int> removedOldLines, out HashSet<int> addedNewLines)
     {
+        removedOldLines = new HashSet<int>();
+        addedNewLines = new HashSet<int>();
+
         int n = oldLines.Length;
         int m = newLines.Length;
         if ((long)n * m > 4_000_000)
@@ -1607,11 +1613,13 @@ public partial class MainWindow : Window
                     lastDeletedAtRow = b;
                 }
 
+                removedOldLines.Add(a);
                 a++;
             }
             else
             {
                 marks.Add(new DiffMark(b, IsAdded: true));
+                addedNewLines.Add(b);
                 b++;
             }
         }
@@ -1621,9 +1629,16 @@ public partial class MainWindow : Window
             marks.Add(new DiffMark(b, IsAdded: false));
         }
 
+        while (a < n)
+        {
+            removedOldLines.Add(a);
+            a++;
+        }
+
         while (b < m)
         {
             marks.Add(new DiffMark(b, IsAdded: true));
+            addedNewLines.Add(b);
             b++;
         }
 
@@ -1677,17 +1692,24 @@ public partial class MainWindow : Window
     /// it too - a stray <c>'\r'</c> left in either path would either break those anchors or paint as a
     /// visible stray glyph.
     /// </summary>
-    private FlowDocument BuildHighlightedDocument(string content, SourceLanguage language)
+    private FlowDocument BuildHighlightedDocument(string content, SourceLanguage language, Func<int, Brush?>? lineBackground = null)
     {
         content = content.Replace("\r\n", "\n").Replace("\r", "\n");
 
         var paragraph = new Paragraph { Margin = new Thickness(0) };
+        int lineIndex = 0;
         foreach (var token in SyntaxHighlighter.Tokenize(content, language))
         {
-            AppendToken(paragraph, token);
+            lineIndex = AppendToken(paragraph, token, lineIndex, lineBackground);
         }
 
-        return new FlowDocument(paragraph) { PageWidth = 4000 };
+        // PageWidth genuinely caps where a line wraps within the document (unlike the RichTextBox's
+        // own ActualWidth, which only governs the visible viewport/horizontal scrollbar) - 4000 was
+        // wide enough for ordinary source lines but not for a long, never-hard-wrapped markdown
+        // paragraph, which would silently wrap inside the FlowDocument while CountLines/SetLineNumbers
+        // still counted it as one line, permanently desyncing every line number below it. A line this
+        // long is essentially unreachable in practice, so there is no real downside to sizing for it.
+        return new FlowDocument(paragraph) { PageWidth = 1_000_000 };
     }
 
     /// <summary>
@@ -1697,7 +1719,7 @@ public partial class MainWindow : Window
     /// <see cref="LineBreak"/> per line, since WPF's text layout does not itself treat an embedded
     /// <c>'\n'</c> inside a <see cref="Run"/>'s text as a line break.
     /// </summary>
-    private void AppendToken(Paragraph paragraph, SyntaxToken token)
+    private int AppendToken(Paragraph paragraph, SyntaxToken token, int lineIndex, Func<int, Brush?>? lineBackground)
     {
         var brush = token.ColorHex is null ? null : GetSyntaxBrush(token.ColorHex);
         string[] lines = token.Text.Split('\n');
@@ -1712,14 +1734,23 @@ public partial class MainWindow : Window
                     run.Foreground = brush;
                 }
 
+                var background = lineBackground?.Invoke(lineIndex);
+                if (background is not null)
+                {
+                    run.Background = background;
+                }
+
                 paragraph.Inlines.Add(run);
             }
 
             if (i < lines.Length - 1)
             {
                 paragraph.Inlines.Add(new LineBreak());
+                lineIndex++;
             }
         }
+
+        return lineIndex;
     }
 
     private SolidColorBrush GetSyntaxBrush(string colorHex)
