@@ -52,7 +52,13 @@ public sealed record SessionSnapshot(
     DateTime ReceivedAtUtc,
     string Source = "statusLine",
     bool Ended = false,
-    string? SessionName = null);
+    string? SessionName = null,
+    // Set by MarkSessionWaiting (a Stop hook event: the main agent finished a turn and is
+    // waiting on the user) - updated to DateTime.UtcNow on every such event, never cleared
+    // server-side. The WPF shell tracks its own "last acknowledged" timestamp per session
+    // (RootsPanelViewModel) so a focus change can locally suppress the highlight/flash without
+    // this store needing a second, focus-aware mutation path.
+    DateTime? WaitingSinceUtc = null);
 
 /// <summary>
 /// A record for one subagent, keyed by <c>agent_id</c>. <see cref="Source"/> tags where the
@@ -257,6 +263,42 @@ public sealed class SessionState
                 ReceivedAtUtc: DateTime.UtcNow,
                 Ended: true),
             (_, existing) => existing with { Ended = true });
+        RaiseChanged();
+    }
+
+    /// <summary>
+    /// Records that a main session's turn just ended and it is waiting on the user (a
+    /// <c>Stop</c> hook event) - stamps <see cref="SessionSnapshot.WaitingSinceUtc"/> with the
+    /// current time, every time, so repeated Stop events (the session goes idle, the user comes
+    /// back, it goes idle again) are each individually observable rather than collapsing into one
+    /// permanent flag. If no snapshot exists yet for <paramref name="sessionId"/>, inserts a
+    /// minimal placeholder, mirroring <see cref="MarkSessionEnded"/>'s "never silently dropped"
+    /// behavior.
+    /// </summary>
+    public void MarkSessionWaiting(string sessionId)
+    {
+        if (string.IsNullOrEmpty(sessionId))
+        {
+            return;
+        }
+
+        DateTime now = DateTime.UtcNow;
+        _sessions.AddOrUpdate(
+            sessionId,
+            _ => new SessionSnapshot(
+                sessionId,
+                ModelId: null,
+                ModelDisplayName: null,
+                EffortLevel: null,
+                ContextWindowSize: null,
+                UsedTokens: null,
+                UsedPercentage: null,
+                RemainingPercentage: null,
+                CostUsd: null,
+                PayloadVersion: null,
+                ReceivedAtUtc: now,
+                WaitingSinceUtc: now),
+            (_, existing) => existing with { WaitingSinceUtc = now });
         RaiseChanged();
     }
 

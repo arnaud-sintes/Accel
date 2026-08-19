@@ -51,7 +51,9 @@ public sealed partial class RootsPanelNodeViewModel : ObservableObject
         bool isFocused = false,
         string projectDir = "",
         long? durationMs = null,
-        long? consumedTokens = null)
+        long? consumedTokens = null,
+        DateTime? waitingSinceUtc = null,
+        bool isWaiting = false)
     {
         Key = key ?? string.Empty;
         Text = text ?? string.Empty;
@@ -63,6 +65,8 @@ public sealed partial class RootsPanelNodeViewModel : ObservableObject
         ConsumedTokens = consumedTokens;
         _owner = owner;
         _isFocused = isFocused;
+        WaitingSinceUtc = waitingSinceUtc;
+        _isWaiting = isWaiting;
 
         _visualState = SessionVisualStateResolver.Resolve(IsRunning, IsFocused);
 
@@ -170,6 +174,27 @@ public sealed partial class RootsPanelNodeViewModel : ObservableObject
         VisualState = SessionVisualStateResolver.Resolve(IsRunning, value);
         AutomationDescription = BuildAutomationDescription();
     }
+
+    /// <summary>
+    /// The most recent <c>Stop</c>-hook timestamp for this session (only ever set for
+    /// <see cref="RootsPanelNodeViewModel.Kind"/> <see cref="RootsPanelNodeKind.Session"/>) - null
+    /// when the session has never gone through a Stop event, or when this row isn't a session row
+    /// at all. Purely a raw value carried through from <see cref="MonitorSessionNode.WaitingSinceUtc"/>
+    /// so <see cref="RootsPanelViewModel"/>'s acknowledgment tracking can compare it against the
+    /// last-focused timestamp without a second lookup back into the tree DTO.
+    /// </summary>
+    public DateTime? WaitingSinceUtc { get; }
+
+    /// <summary>
+    /// Set by <see cref="RootsPanelViewModel"/> at build time (unlike <see cref="IsFocused"/>, this is
+    /// not itself re-derived on a focus change - see <see cref="RootsPanelViewModel.ApplyFocus"/>,
+    /// which flips it straight to false the instant this row becomes focused, without waiting for the
+    /// next full rebuild): true while this session has a <see cref="WaitingSinceUtc"/> timestamp the
+    /// user has not yet acknowledged by focusing this row's tab - the TODO's "highlighted until the
+    /// user focuses the tab" behaviour. Drives <c>MainWindow.xaml</c>'s row-highlight trigger.
+    /// </summary>
+    [ObservableProperty]
+    private bool _isWaiting;
 
     /// <summary>Glyph/weight/colour/automation-name for this row's current IsRunning x IsFocused
     /// combination - see <see cref="SessionVisualStateResolver"/>. Re-derived when
@@ -310,6 +335,26 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
     /// <c>MonitorForm._everSeenKeys</c>, including its "only ever grows, one instance per window"
     /// lifetime.</summary>
     private readonly HashSet<string> _everSeenKeys = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Per-session id, the <see cref="MonitorSessionNode.WaitingSinceUtc"/> value that was already
+    /// "seen" by the user focusing that session's tab - the TODO's "highlighted until the user
+    /// focuses the tab" acknowledgment. Persisted across rebuilds (every <see cref="Rebuild"/>
+    /// creates brand-new node instances, so this cannot live on the node itself) the same way
+    /// <see cref="_everSeenKeys"/> is. A session absent from this dictionary, or whose current
+    /// <see cref="MonitorSessionNode.WaitingSinceUtc"/> is later than the recorded value, is still
+    /// "waiting" - see <see cref="ApplyFocus"/> (which writes into it) and <see cref="BuildSessionNode"/>
+    /// (which reads it).
+    /// </summary>
+    private readonly Dictionary<string, DateTime> _waitingAcknowledgedUtc = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Every session id currently rendered as <see cref="RootsPanelNodeViewModel.IsWaiting"/> as of
+    /// the last <see cref="Rebuild"/> - purely so that rebuild can edge-trigger
+    /// <see cref="SessionWaitingForAttention"/> only for a session that just started waiting, rather
+    /// than re-raising it every ~2s tick for as long as the session stays unacknowledged.
+    /// </summary>
+    private readonly HashSet<string> _lastKnownWaitingSessionIds = new(StringComparer.Ordinal);
 
     /// <summary>Set while <see cref="Rebuild"/> mutates the tree, so the node-driven selection
     /// tracking below doesn't mistake "the old node was thrown away" for "the user changed the
@@ -476,6 +521,15 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     private string _refreshedAtValueText = string.Empty;
 
+    /// <summary>
+    /// Raised from <see cref="Rebuild"/> whenever a session row transitions into
+    /// <see cref="RootsPanelNodeViewModel.IsWaiting"/> that wasn't already in that state on the
+    /// previous rebuild - <c>MainWindow</c>'s signal to flash the taskbar icon. Edge-triggered (see
+    /// <see cref="_lastKnownWaitingSessionIds"/>), so it fires once per Stop event rather than every
+    /// ~2s tick for as long as the row stays unacknowledged.
+    /// </summary>
+    public event Action? SessionWaitingForAttention;
+
     /// <summary>Starts the feed (idempotent) - separate from the constructor so a host can build the
     /// whole panel graph before any telemetry starts flowing.</summary>
     public void Start() => _feed.Start();
@@ -580,7 +634,52 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
     {
         foreach (var node in EnumerateAll(Roots))
         {
-            node.IsFocused = IsNodeFocused(node.Key);
+            bool isFocused = IsNodeFocused(node.Key);
+            node.IsFocused = isFocused;
+
+            // The TODO's acknowledgment: focusing a waiting session's tab clears its highlight
+            // immediately, without waiting for the next rebuild - see WaitingSinceUtc/IsWaiting's
+            // doc comments and _waitingAcknowledgedUtc's class remarks.
+            if (isFocused && node.Kind == RootsPanelNodeKind.Session && node.WaitingSinceUtc is { } waitingSinceUtc)
+            {
+                _waitingAcknowledgedUtc[node.Key] = waitingSinceUtc;
+                node.IsWaiting = false;
+                _lastKnownWaitingSessionIds.Remove(node.Key);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Compares this rebuild's set of <see cref="RootsPanelNodeViewModel.IsWaiting"/> session ids
+    /// against <see cref="_lastKnownWaitingSessionIds"/> and raises <see cref="SessionWaitingForAttention"/>
+    /// once if any session newly entered that state - see that event's doc comment for why this is
+    /// edge-triggered rather than firing on every tick a session stays unacknowledged.
+    /// </summary>
+    private void RaiseSessionWaitingForAttentionIfNewlyWaiting()
+    {
+        bool raise = false;
+        var currentlyWaiting = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var node in EnumerateAll(Roots))
+        {
+            if (node.Kind != RootsPanelNodeKind.Session || !node.IsWaiting)
+            {
+                continue;
+            }
+
+            currentlyWaiting.Add(node.Key);
+            if (!_lastKnownWaitingSessionIds.Contains(node.Key))
+            {
+                raise = true;
+            }
+        }
+
+        _lastKnownWaitingSessionIds.Clear();
+        _lastKnownWaitingSessionIds.UnionWith(currentlyWaiting);
+
+        if (raise)
+        {
+            SessionWaitingForAttention?.Invoke();
         }
     }
 
@@ -651,6 +750,8 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
                     SelectedKey = null;
                 }
             }
+
+            RaiseSessionWaitingForAttentionIfNewlyWaiting();
         }
         finally
         {
@@ -683,7 +784,7 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
         RefreshedAtText = $"Refreshed at {refreshedAt}";
         StatusText = string.Create(
             CultureInfo.InvariantCulture,
-            $"{RootCount} root(s), {SessionCount} session(s)\n{LiveSessionCount} running — {RefreshedAtText}\nSessions running before Accel startup are shown as historical");
+            $"{RootCount} root(s), {SessionCount} session(s)\n{LiveSessionCount} running — {RefreshedAtText}");
     }
 
     /// <summary>Called by a node whose <c>IsSelected</c> changed (the WPF <c>TreeViewItem</c> is
@@ -783,9 +884,13 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
 
     private RootsPanelNodeViewModel BuildSessionNode(MonitorSessionNode session)
     {
+        bool isWaiting = session.WaitingSinceUtc is { } waitingSinceUtc &&
+            (!_waitingAcknowledgedUtc.TryGetValue(session.SessionId, out var acknowledgedUtc) || waitingSinceUtc > acknowledgedUtc);
+
         var node = new RootsPanelNodeViewModel(
             session.SessionId, session.Text, RootsPanelNodeKind.Session, session.State, session.Columns, this,
-            projectDir: session.ProjectDir, durationMs: session.DurationMs, consumedTokens: session.ConsumedTokens);
+            projectDir: session.ProjectDir, durationMs: session.DurationMs, consumedTokens: session.ConsumedTokens,
+            waitingSinceUtc: session.WaitingSinceUtc, isWaiting: isWaiting);
 
         foreach (var agent in session.Agents)
         {

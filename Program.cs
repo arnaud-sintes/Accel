@@ -3,6 +3,17 @@ using Accel.Cli;
 using Accel.Server;
 using Microsoft.Extensions.DependencyInjection;
 
+// Must run before ANYTHING below ever touches Console (including the dev-verb smoke tests just past
+// this block) - Accel.csproj builds this as OutputType=WinExe specifically so a double-click/
+// shortcut/Start-menu launch never gets an OS-allocated console window in the first place (no
+// console to hide after the fact, unlike the previous ShowWindow-based approach - see
+// ConsoleWindow's remarks for why that one didn't reliably hide anything under Windows 11's
+// Windows-Terminal-as-default-terminal hosting). This call is what keeps a user typing `accel
+// doctor` (or any dev verb) directly into an already-open PowerShell/cmd window from silently
+// getting no output at all: it's a no-op, failing silently, for every other launch path (double-
+// click, or a piped/redirected launch - see the class doc for why those need no help here).
+Accel.Cli.ConsoleWindow.AttachToParentConsoleIfPresent();
+
 // P2-T2: hidden dev-only verb, same rationale and placement rules as the WPF shell's own
 // composition in RunCombinedAsync below -
 // ConPtySession's whole point is real OS resource lifecycle (a real pseudoconsole, a real child

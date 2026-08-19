@@ -99,6 +99,12 @@ public sealed class AccelHookSpec
         // with a short timeout, same rationale as SessionEnd above.
         list.Add(MakeEventHook("PostToolUse", "/events/post-tool-use", timeout: 5, async: true));
 
+        // Stop fires once the main agent finishes a turn and is waiting on the user - drives
+        // the "waiting for feedback" window-flash/row-highlight feature (SessionState.WaitingSinceUtc).
+        // Async with a short timeout: Accel only observes this event, it must never hold up
+        // Claude Code's own turn-completion.
+        list.Add(MakeEventHook("Stop", "/events/stop", timeout: 5, async: true));
+
         return list;
     }
 

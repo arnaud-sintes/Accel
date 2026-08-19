@@ -419,7 +419,8 @@ public sealed class RootsTreeBuilder
             ConsumedTokens: consumedTokens,
             ConsumedTokensIsContextOnly: true,
             McpUsage: mcpUsage,
-            SkillUsage: skillUsage);
+            SkillUsage: skillUsage,
+            WaitingSinceUtc: snapshot?.WaitingSinceUtc);
     }
 
     // Sorted by count descending, then name ascending, per project-ui.md's display convention
@@ -632,16 +633,29 @@ public sealed class RootsTreeBuilder
         return Math.Round((double)usedTokens.Value / windowSize.Value * 100.0, 1);
     }
 
-    // Stable by construction: StartedAtUtc is fixed for a session's whole lifetime (section 6.1/6.2),
-    // unlike LastActivityUtc, which nudges on every status-line tick and previously made the panel's
-    // running sessions constantly swap positions relative to each other. Sessions with no resolved
-    // start time (rare - see StartedAtUtc's own doc) sort last within their live/ended bucket, tied
-    // by the old LastActivityUtc-descending order.
-    private static SessionTreeDto[] SortSessions(IEnumerable<SessionTreeDto> sessions) => sessions
-        .OrderByDescending(s => s.IsLive)
-        .ThenBy(s => s.StartedAtUtc ?? DateTime.MaxValue)
-        .ThenByDescending(s => s.LastActivityUtc)
-        .ToArray();
+    // State bucket first (running sessions before not-running ones - the only two states a
+    // session actually carries, see MonitorTreeBuilder.BuildSessionNode). Within the running
+    // bucket, alphabetical by name (ordinal case-insensitive, matching every other alphabetical
+    // sort in this codebase, e.g. MonitorTreeBuilder.Build's own root-path ordering), with
+    // StartedAtUtc/LastActivityUtc as tiebreaks for two live sessions that happen to share a
+    // name. Within the not-running bucket, most-recently-accessed first (LastActivityUtc
+    // descending) so a stale session doesn't linger above one just closed - name is only a
+    // tiebreak for two sessions that share the exact same last-activity timestamp.
+    private static SessionTreeDto[] SortSessions(IEnumerable<SessionTreeDto> sessions)
+    {
+        var all = sessions as SessionTreeDto[] ?? sessions.ToArray();
+
+        var live = all.Where(s => s.IsLive)
+            .OrderBy(s => s.Name, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(s => s.StartedAtUtc ?? DateTime.MaxValue)
+            .ThenByDescending(s => s.LastActivityUtc);
+
+        var notLive = all.Where(s => !s.IsLive)
+            .OrderByDescending(s => s.LastActivityUtc)
+            .ThenBy(s => s.Name, StringComparer.OrdinalIgnoreCase);
+
+        return live.Concat(notLive).ToArray();
+    }
 
     private static string? MatchRoot(string? cwd, (string Original, string Normalized)[] roots)
     {
@@ -778,7 +792,8 @@ public sealed record SessionTreeDto(
     [property: JsonPropertyName("consumed_tokens")] long? ConsumedTokens = null,
     [property: JsonPropertyName("consumed_tokens_is_context_only")] bool ConsumedTokensIsContextOnly = false,
     [property: JsonPropertyName("mcp_usage")] ToolHitCountDto[]? McpUsage = null,
-    [property: JsonPropertyName("skill_usage")] ToolHitCountDto[]? SkillUsage = null);
+    [property: JsonPropertyName("skill_usage")] ToolHitCountDto[]? SkillUsage = null,
+    [property: JsonPropertyName("waiting_since_utc")] DateTime? WaitingSinceUtc = null);
 
 /// <summary>One MCP tool or Skill's hit count for a live session - see
 /// <see cref="SessionState.GetToolUsage"/>.</summary>

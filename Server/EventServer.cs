@@ -148,6 +148,7 @@ public class EventServer
         app.MapPost("/events/subagent-start", ctx => HandleEventAsync(ctx, "SubagentStart", capture, state, verbose));
         app.MapPost("/events/subagent-stop", ctx => HandleEventAsync(ctx, "SubagentStop", capture, state, verbose));
         app.MapPost("/events/post-tool-use", ctx => HandleEventAsync(ctx, "PostToolUse", capture, state, verbose));
+        app.MapPost("/events/stop", ctx => HandleEventAsync(ctx, "Stop", capture, state, verbose));
         app.MapPost("/events/status-line", ctx => HandleStatusLineAsync(ctx, capture, state));
         app.MapPost("/events/subagent-status-line", ctx => HandleSubagentStatusLineAsync(ctx, capture, state));
 
@@ -200,6 +201,12 @@ public class EventServer
             // the SubagentStop handling above.
             SafePrint(() => MetricsPipeline.HandlePostToolUse(body, state));
         }
+        else if (eventName == "Stop")
+        {
+            // "Waiting for feedback" tracking (window-flash/row-highlight): observation-only,
+            // same best-effort contract as the SubagentStop handling above.
+            SafePrint(() => MarkSessionWaitingFromPayload(body, state));
+        }
 
         ctx.Response.StatusCode = StatusCodes.Status204NoContent;
     }
@@ -223,6 +230,28 @@ public class EventServer
             if (!string.IsNullOrEmpty(sessionId))
             {
                 state.MarkSessionEnded(sessionId);
+            }
+        }
+    }
+
+    // Extracts session_id from a Stop payload and marks it "waiting for feedback" in
+    // SessionState. Same tolerant contract as MarkSessionEndedFromPayload above.
+    private static void MarkSessionWaitingFromPayload(string rawBody, SessionState state)
+    {
+        using var doc = System.Text.Json.JsonDocument.Parse(rawBody);
+        var root = doc.RootElement;
+        if (root.ValueKind != System.Text.Json.JsonValueKind.Object)
+        {
+            return;
+        }
+
+        if (root.TryGetProperty("session_id", out var sessionIdProp)
+            && sessionIdProp.ValueKind == System.Text.Json.JsonValueKind.String)
+        {
+            string? sessionId = sessionIdProp.GetString();
+            if (!string.IsNullOrEmpty(sessionId))
+            {
+                state.MarkSessionWaiting(sessionId);
             }
         }
     }

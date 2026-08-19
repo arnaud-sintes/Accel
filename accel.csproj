@@ -1,7 +1,22 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
 
   <PropertyGroup>
-    <OutputType>Exe</OutputType>
+    <!--
+      WinExe, not the Sdk.Web-implied Exe: an Exe (console-subsystem) build gets a real OS console
+      window auto-allocated and shown any time there is no console to inherit (double-click,
+      shortcut, Start menu) - and, once Windows Terminal is the machine's registered default
+      terminal app (Windows 11's default), that window cannot be reliably hidden after the fact
+      (GetConsoleWindow()/ShowWindow only reach the invisible conhost pseudo-console behind it, not
+      the actually-visible wt.exe window - see Cli/ConsoleWindow.cs's remarks for the full story).
+      WinExe never allocates a console in the first place, so there is nothing to hide. Every other
+      launch path Accel supports still gets working Console output regardless: a piped/redirected
+      stdout (how Claude Code invokes `accel statusline`/`notify` as hook child processes) is set on
+      the inherited standard handles at CreateProcess time independent of subsystem, and
+      Program.cs's very first statement (ConsoleWindow.AttachToParentConsoleIfPresent) reattaches to
+      an already-open interactive console for the one remaining case (typing a dev verb directly
+      into an existing PowerShell/cmd window).
+    -->
+    <OutputType>WinExe</OutputType>
     <!--
       Single source of truth for Accel's own version - read at runtime by
       App/Controls/AppVersionInfo.cs (shown next to the title in CustomTitleBar) via

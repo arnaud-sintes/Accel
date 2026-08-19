@@ -139,7 +139,7 @@ public class SettingsMergerTests
         var detected = SettingsMerger.Detect(root, Spec());
         Assert.Equal(InstallState.Installed, detected.State);
         Assert.Equal(
-            new[] { "SessionStart", "SessionEnd", "SubagentStart", "SubagentStop", "PostToolUse" }.OrderBy(x => x),
+            new[] { "SessionStart", "SessionEnd", "SubagentStart", "SubagentStop", "PostToolUse", "Stop" }.OrderBy(x => x),
             detected.FoundEvents.Keys.OrderBy(x => x));
         Assert.Equal(StatusLineOwnership.Accel, detected.StatusLine);
         Assert.Equal(StatusLineOwnership.Accel, detected.SubagentStatusLine);
@@ -353,8 +353,8 @@ public class SettingsMergerTests
         SettingsMerger.Install(root, Spec(), store);
 
         var accel = SettingsMerger.EnumerateAccelEntries(root).ToList();
-        Assert.Equal(5, accel.Count);
-        Assert.Equal(5, accel.Select(g => g.EventName).Distinct().Count());
+        Assert.Equal(6, accel.Count);
+        Assert.Equal(6, accel.Select(g => g.EventName).Distinct().Count());
     }
 
     // ---- port drift ------------------------------------------------------------------

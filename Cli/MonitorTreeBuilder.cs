@@ -47,7 +47,11 @@ public sealed record MonitorAgentNode(string AgentId, string Text, MonitorNodeSt
 /// <see cref="MonitorAgentNode"/>'s raw-value fields.</summary>
 public sealed record MonitorSessionNode(string SessionId, string Text, MonitorNodeState State, MonitorAgentNode[] Agents,
     MonitorRowColumns Columns, string ProjectDir = "",
-    long? DurationMs = null, long? ConsumedTokens = null);
+    long? DurationMs = null, long? ConsumedTokens = null,
+    // "Waiting for feedback" (a Stop hook event) - see RootsPanelViewModel's acknowledgment
+    // tracking for how this becomes the panel-A row highlight/window-flash, cleared once the
+    // user focuses this session's tab rather than when this timestamp itself changes.
+    DateTime? WaitingSinceUtc = null);
 
 /// <summary>One rendered root-folder node. <see cref="OrphanAgents"/> is only ever non-empty for
 /// the synthetic "(unattributed)" root - a normal configured root's agents are always nested
@@ -141,7 +145,7 @@ public static class MonitorTreeBuilder
 
         return new MonitorSessionNode(
             session.SessionId ?? string.Empty, text, state, agents, columns, session.ProjectDir ?? string.Empty,
-            session.DurationMs, session.ConsumedTokens);
+            session.DurationMs, session.ConsumedTokens, session.WaitingSinceUtc);
     }
 
     private static MonitorAgentNode BuildAgentNode(AgentTreeDto agent)

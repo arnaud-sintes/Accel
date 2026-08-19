@@ -61,7 +61,8 @@ public static class StateQueryRoutes
         Source: snapshot.Source,
         AsOf: snapshot.ReceivedAtUtc,
         Status: snapshot.Ended ? "ended" : "live",
-        SessionName: snapshot.SessionName);
+        SessionName: snapshot.SessionName,
+        WaitingSinceUtc: snapshot.WaitingSinceUtc);
 
     private static AgentDto ToDto(AgentRecord record) => new(
         AgentId: record.AgentId,
@@ -102,7 +103,8 @@ public static class StateQueryRoutes
         [property: JsonPropertyName("source")] string Source,
         [property: JsonPropertyName("as_of")] DateTime AsOf,
         [property: JsonPropertyName("status")] string Status,
-        [property: JsonPropertyName("session_name")] string? SessionName = null);
+        [property: JsonPropertyName("session_name")] string? SessionName = null,
+        [property: JsonPropertyName("waiting_since_utc")] DateTime? WaitingSinceUtc = null);
 
     /// <summary>One row of <c>GET /agents</c>.</summary>
     public sealed record AgentDto(

@@ -136,6 +136,7 @@ public static class TerminalE2ESmokeTest
             var ok = true;
             ok &= await CheckMarkerEchoAndResizeAsync(output, terminal, server, port);
             ok &= await CheckRawCtrlCArrivesAsBinaryFrameAsync(output, terminal, server, port);
+            ok &= await CheckShiftEnterSendsExactlyOneEscCrAsync(output, terminal, server, port);
             ok &= await CheckIntegerCellMetricsAsync(output, terminal);
             return ok;
         }
@@ -282,6 +283,75 @@ public static class TerminalE2ESmokeTest
 
         server.PtySessions.Unregister(tabId);
         return socketOpen && ok;
+    }
+
+    /// <summary>Check (d): a real synthetic Shift+Enter <c>KeyboardEvent</c>, dispatched on xterm.js's
+    /// own hidden textarea exactly as a real physical keypress would land, must produce exactly one
+    /// ESC-CR (0x1B 0x0D) write and nothing else - never a second write from the browser's native
+    /// default action (newline insertion / xterm's own untouched keypress handling) sneaking through
+    /// alongside terminal.js's explicit <c>handleTerminalData("\x1b\r")</c> call. Verified against a
+    /// recording <see cref="IPtyEndpoint"/> double, same seam as check (c), because this is exactly
+    /// the kind of "did it fire twice" bug a fake/unit test cannot see - it needs the real DOM event
+    /// dispatch, xterm's real <c>attachCustomKeyEventHandler</c> wiring, and a real WebSocket frame
+    /// count.</summary>
+    private static async Task<bool> CheckShiftEnterSendsExactlyOneEscCrAsync(
+        TextWriter output, TerminalView terminal, EventServer server, int port)
+    {
+        output.WriteLine();
+        output.WriteLine("== check (d): synthetic Shift+Enter KeyboardEvent -> exactly one ESC-CR write, no duplicate ==");
+
+        var recorder = new RecordingPtyEndpoint();
+        var tabId = Guid.NewGuid().ToString("N");
+        server.PtySessions.Register(tabId, recorder);
+
+        await terminal.AttachPtyAsync(tabId, port);
+        var socketOpen = await WaitForAsync(async () => await ReadSocketStateAsync(terminal) == 1, TimeSpan.FromSeconds(5));
+        output.WriteLine($"  [{(socketOpen ? "PASS" : "FAIL")}] WebSocket reattached to the recording endpoint and reached OPEN");
+
+        // Dispatched on the real hidden textarea xterm.js's own keydown/keypress listeners are bound
+        // to (see xterm.css's .xterm-helper-textarea) - not window.accelSimulateInput, which bypasses
+        // attachCustomKeyEventHandler entirely and so cannot see this bug.
+        const string dispatchScript = """
+            (function () {
+              var ta = document.querySelector('.xterm-helper-textarea');
+              var evt = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', shiftKey: true, bubbles: true, cancelable: true });
+              ta.dispatchEvent(evt);
+            })();
+            """;
+        await terminal.Browser.CoreWebView2.ExecuteScriptAsync(dispatchScript);
+
+        byte[]? firstWrite = null;
+        try
+        {
+            firstWrite = await recorder.NextWriteAsync(TimeSpan.FromSeconds(5));
+        }
+        catch (OperationCanceledException)
+        {
+            // firstWrite stays null - reported as a failure below.
+        }
+
+        var expected = new byte[] { 0x1B, 0x0D };
+        var firstOk = firstWrite is not null && firstWrite.SequenceEqual(expected);
+        output.WriteLine($"  [{(firstOk ? "PASS" : "FAIL")}] server received exactly ESC-CR (0x1B 0x0D) as a single BINARY frame (received: {FormatBytes(firstWrite)})");
+
+        // No second write should ever follow - a fixed window, not a race: any stray native-default
+        // write (a bare "\r", a literal newline, or a duplicate ESC-CR) would arrive within
+        // milliseconds of the first, well inside this margin.
+        byte[]? secondWrite = null;
+        try
+        {
+            secondWrite = await recorder.NextWriteAsync(TimeSpan.FromMilliseconds(500));
+        }
+        catch (OperationCanceledException)
+        {
+            // Expected: no second write.
+        }
+
+        var noDuplicate = secondWrite is null;
+        output.WriteLine($"  [{(noDuplicate ? "PASS" : "FAIL")}] no second write followed (received: {FormatBytes(secondWrite)})");
+
+        server.PtySessions.Unregister(tabId);
+        return socketOpen && firstOk && noDuplicate;
     }
 
     private static async Task<bool> CheckIntegerCellMetricsAsync(TextWriter output, TerminalView terminal)
