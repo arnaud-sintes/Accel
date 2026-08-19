@@ -1290,6 +1290,12 @@ public partial class MainWindow : Window
             return;
         }
 
+        if (tab.IsMarkdown && tab.IsPreviewMode)
+        {
+            await ShowMarkdownPreviewAsync(tab).ConfigureAwait(true);
+            return;
+        }
+
         string content;
         SourceLanguage language = SourceLanguage.PlainText;
         try
@@ -1307,6 +1313,39 @@ public partial class MainWindow : Window
         SetLineNumbers(FileViewerLineNumbers, CountLines(content));
         ResetScroll(FileViewerText, FileViewerLineNumbersTransform);
         ShowFileViewerPane();
+    }
+
+    /// <summary>
+    /// Renders a markdown <see cref="TabKind.File"/>/<see cref="TabKind.GitChange"/> tab (never a
+    /// diff - <see cref="TabViewModel.IsMarkdown"/> is already false for one) as rendered HTML in
+    /// <see cref="MarkdownPreviewHost"/>, instead of <see cref="ShowFileTabAsync"/>'s usual
+    /// highlighted-text path - branched to from there when
+    /// <see cref="TabViewModel.IsPreviewMode"/> is set. Reuses <see cref="ReadTabContentAsync"/>
+    /// (same disk-read/git-show-fallback rules, same content both views would show) and reports a
+    /// failed read as rendered text in place of content, same posture as
+    /// <see cref="ShowFileTabAsync"/>'s own try/catch.
+    /// </summary>
+    private async Task ShowMarkdownPreviewAsync(TabViewModel tab)
+    {
+        // Must run BEFORE MarkdownPreview.RenderAsync's first-ever call (which awaits
+        // MarkdownPreviewView.Initialization) - see that property's remarks: WebView2 needs this
+        // pane to already be un-Collapsed/laid-out for EnsureCoreWebView2Async to complete at all.
+        // No extra flicker from reordering this ahead of content being ready: the pane was always
+        // going to end up shown here regardless.
+        ShowMarkdownPreviewPane();
+
+        string content;
+        try
+        {
+            content = await ReadTabContentAsync(tab).ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            content = $"Could not read file:\n{tab.TabId}\n\n{ex.Message}";
+        }
+
+        string bodyHtml = Markdig.Markdown.ToHtml(content);
+        await MarkdownPreview.RenderAsync(bodyHtml).ConfigureAwait(true);
     }
 
     /// <summary>
@@ -1364,24 +1403,28 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Panel D has exactly three mutually-exclusive "panes": the terminal, the single-pane file
-    /// viewer, and the side-by-side diff viewer - these three helpers are the only place any of them
-    /// is shown/hidden, so exactly one is ever visible at a time.
+    /// Panel D has exactly four mutually-exclusive "panes": the terminal, the single-pane file
+    /// viewer, the side-by-side diff viewer, and the rendered-HTML markdown preview - these four
+    /// helpers are the only place any of them is shown/hidden, so exactly one is ever visible at a
+    /// time.
     ///
-    /// <para><b>Why <see cref="Terminal"/> itself must be collapsed, not just covered.</b>
-    /// <c>WebView2</c> (like any HWND-backed/"airspace" control hosted in WPF) is composited by the OS
-    /// above the WPF render surface, not through WPF's own visual z-order - a WPF sibling declared
-    /// after it in XAML (<see cref="FileViewerHost"/>/<see cref="DiffViewerHost"/>) does not actually
-    /// paint over it just because it comes later in the tree or has <c>Visibility="Visible"</c> while
-    /// the WebView2 stays visible too. Confirmed as the root cause of a reported bug: opening a FILES/
-    /// GIT read-only tab created the tab correctly, but panel D kept showing whatever the terminal was
-    /// last displaying (or a blank one) - collapsing <see cref="Terminal"/> itself (not merely
-    /// overlaying it) is the only thing that actually hides a WebView2's native window.</para>
+    /// <para><b>Why <see cref="Terminal"/> and <see cref="MarkdownPreview"/> must be collapsed, not
+    /// just covered.</b> <c>WebView2</c> (like any HWND-backed/"airspace" control hosted in WPF) is
+    /// composited by the OS above the WPF render surface, not through WPF's own visual z-order - a
+    /// WPF sibling declared after it in XAML (<see cref="FileViewerHost"/>/<see cref="DiffViewerHost"/>)
+    /// does not actually paint over it just because it comes later in the tree or has
+    /// <c>Visibility="Visible"</c> while the WebView2 stays visible too. Confirmed as the root cause
+    /// of a reported bug: opening a FILES/GIT read-only tab created the tab correctly, but panel D
+    /// kept showing whatever the terminal was last displaying (or a blank one) - collapsing
+    /// <see cref="Terminal"/> itself (not merely overlaying it) is the only thing that actually hides
+    /// a WebView2's native window. <see cref="MarkdownPreviewHost"/>'s own <see cref="MarkdownPreview"/>
+    /// is a second, independent WebView2 control, so the exact same rule applies to it.</para>
     /// </summary>
     private void ShowTerminalPane()
     {
         FileViewerHost.Visibility = Visibility.Collapsed;
         DiffViewerHost.Visibility = Visibility.Collapsed;
+        MarkdownPreviewHost.Visibility = Visibility.Collapsed;
         Terminal.Visibility = Visibility.Visible;
     }
 
@@ -1390,6 +1433,7 @@ public partial class MainWindow : Window
     {
         Terminal.Visibility = Visibility.Collapsed;
         DiffViewerHost.Visibility = Visibility.Collapsed;
+        MarkdownPreviewHost.Visibility = Visibility.Collapsed;
         FileViewerHost.Visibility = Visibility.Visible;
     }
 
@@ -1398,7 +1442,17 @@ public partial class MainWindow : Window
     {
         Terminal.Visibility = Visibility.Collapsed;
         FileViewerHost.Visibility = Visibility.Collapsed;
+        MarkdownPreviewHost.Visibility = Visibility.Collapsed;
         DiffViewerHost.Visibility = Visibility.Visible;
+    }
+
+    /// <summary>See <see cref="ShowTerminalPane"/>'s remarks.</summary>
+    private void ShowMarkdownPreviewPane()
+    {
+        Terminal.Visibility = Visibility.Collapsed;
+        FileViewerHost.Visibility = Visibility.Collapsed;
+        DiffViewerHost.Visibility = Visibility.Collapsed;
+        MarkdownPreviewHost.Visibility = Visibility.Visible;
     }
 
     /// <summary>

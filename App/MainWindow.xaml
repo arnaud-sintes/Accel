@@ -920,6 +920,37 @@
                                                        FontSize="{StaticResource FontSizeCaption}"
                                                        Foreground="{StaticResource TextMutedBrush}" VerticalAlignment="Center" />
                                             <!--
+                                                Markdown content/HTML preview toggle - only visible for
+                                                a single-pane FILE/GIT markdown tab (see
+                                                TabViewModel.IsMarkdown's remarks for why a diff tab
+                                                never gets one). Glyph/tooltip/automation name all flip
+                                                together on IsPreviewMode so the state is never
+                                                colour-only (same accessibility rule as the rest of this
+                                                template). Routes through TabsViewModel.
+                                                ToggleMarkdownPreviewCommand rather than a plain
+                                                two-way binding on IsPreviewMode, since flipping it must
+                                                also re-render panel D when this is the selected tab.
+                                            -->
+                                            <Button Margin="8,0,0,0" FontFamily="Segoe MDL2 Assets"
+                                                    Visibility="{Binding IsMarkdown, Converter={StaticResource BoolToVis}}"
+                                                    Command="{Binding DataContext.ToggleMarkdownPreviewCommand, RelativeSource={RelativeSource AncestorType=ListBox}}"
+                                                    CommandParameter="{Binding}">
+                                                <Button.Style>
+                                                    <Style TargetType="Button" BasedOn="{StaticResource TabCloseButtonStyle}">
+                                                        <Setter Property="Content" Value="&#xE890;" />
+                                                        <Setter Property="ToolTip" Value="Show HTML preview" />
+                                                        <Setter Property="AutomationProperties.Name" Value="Show HTML preview" />
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding IsPreviewMode}" Value="True">
+                                                                <Setter Property="Content" Value="&#xE8A5;" />
+                                                                <Setter Property="ToolTip" Value="Show file text" />
+                                                                <Setter Property="AutomationProperties.Name" Value="Show file text" />
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </Button.Style>
+                                            </Button>
+                                            <!--
                                                 Close goes through TabsViewModel.CloseTabCommand, which
                                                 branches on Kind: a session tab closes through
                                                 PtyRegistry.CloseAsync (nothing in the ViewModel layer
@@ -1106,6 +1137,22 @@
                                     <Canvas x:Name="DiffMarkStrip" Grid.Row="1" Grid.Column="5" Background="{StaticResource SurfaceElevatedBrush}"
                                             IsHitTestVisible="False" ClipToBounds="True" SizeChanged="DiffMarkStrip_SizeChanged" />
                                 </Grid>
+                            </Border>
+
+                            <!--
+                                Rendered-HTML markdown preview - the FILE/GIT panel markdown tab's
+                                toggle button (see the tab header DataTemplate above and
+                                TabViewModel.IsMarkdown/IsPreviewMode). Same overlay convention as
+                                FileViewerHost/DiffViewerHost (declared last so it paints on top
+                                while Visible; all four panes are mutually exclusive -
+                                MainWindow.xaml.cs's ShowTerminalPane/ShowFileViewerPane/
+                                ShowDiffViewerPane/ShowMarkdownPreviewPane toggle exactly one on and
+                                the other three off). A second WebView2 control, so it must be
+                                Collapsed - not merely covered - exactly like Terminal itself (see
+                                ShowTerminalPane's remarks on WebView2's "airspace" compositing).
+                            -->
+                            <Border x:Name="MarkdownPreviewHost" Background="{StaticResource BackgroundBaseBrush}" Visibility="Collapsed">
+                                <controls:MarkdownPreviewView x:Name="MarkdownPreview" />
                             </Border>
                         </Grid>
                     </Border>

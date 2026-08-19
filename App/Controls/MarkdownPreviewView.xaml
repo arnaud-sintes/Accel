@@ -1,0 +1,33 @@
+<UserControl x:Class="Accel.App.Controls.MarkdownPreviewView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf">
+    <!--
+        WebView2-hosted, read-only markdown-as-rendered-HTML preview for the FILE/GIT panel
+        markdown toggle - see MarkdownPreviewView.xaml.cs for CoreWebView2 initialization and
+        RenderAsync(html). Unlike TerminalView, there is no PTY, no vendored JS, and no
+        SetVirtualHostNameToFolderMapping: the HTML rendered here is generated in full (Markdig
+        output plus an inline &lt;style&gt; shell) by MainWindow.ShowMarkdownPreviewAsync and pushed
+        straight in via NavigateToString.
+    -->
+    <!--
+        Theme is merged in here too, same reason as TerminalView.xaml's own doc comment: this
+        control can be constructed with no Application.Current (dev verbs / tests).
+    -->
+    <UserControl.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="../Theme.xaml" />
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
+    </UserControl.Resources>
+    <!--
+        Same reasoning as TerminalView.xaml's background: this is what shows through before
+        WebView2 paints, so it must match the inline HTML shell's own body background
+        (MarkdownPreviewView.xaml.cs's BuildHtmlDocument) or the pane flashes a lighter panel on
+        every render.
+    -->
+    <Grid Background="{StaticResource BackgroundBaseBrush}">
+        <wv2:WebView2 x:Name="Browser" />
+    </Grid>
+</UserControl>

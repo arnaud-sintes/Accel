@@ -267,6 +267,11 @@ static async Task<int> RunCombinedAsync(int port, string? dumpRawDir, bool verbo
             // `await server.StopAsync()` below, after uiThread.Join() - this window does not own the
             // Kestrel host's lifecycle (it was already running before the window opened).
             mainWindow!.Terminal.Dispose();
+
+            // MarkdownPreview is a second, independent WebView2 control (own CoreWebView2Environment/
+            // user-data folder - see MarkdownPreviewView's class doc) - disposed the same way, for the
+            // same reason.
+            mainWindow!.MarkdownPreview.Dispose();
         };
 
         wpfApp.Run(mainWindow);

@@ -672,4 +672,104 @@ public class TabsViewModelTests
 
         Assert.True(tabs.Tabs.Single(t => t.TabId == "shell-a").HasEnded);
     }
+
+    // ---------------------------------------------------------------------------------------------
+    // TabViewModel.IsMarkdown / IsPreviewMode and TabsViewModel.ToggleMarkdownPreviewCommand - the
+    // FILE/GIT panel markdown content/HTML preview toggle. Diff tabs are explicitly out of scope
+    // (per the feature's own scoping decision) - IsMarkdown must stay false for one even though its
+    // extension resolves to Markdown.
+    // ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void IsMarkdown_TrueForAMarkdownFileTab_FalseForOtherExtensionsAndKinds()
+    {
+        var markdownFile = TabViewModel.ForFile(@"C:\project\README.md");
+        var markdownGitChange = TabViewModel.ForGitChange(@"C:\project\NOTES.markdown", "NOTES.markdown", @"C:\project", "NOTES.markdown");
+        var csharpFile = TabViewModel.ForFile(@"C:\project\file.cs");
+        var session = new TabViewModel("tab-a", "a");
+
+        Assert.True(markdownFile.IsMarkdown);
+        Assert.True(markdownGitChange.IsMarkdown);
+        Assert.False(csharpFile.IsMarkdown);
+        Assert.False(session.IsMarkdown);
+    }
+
+    [Fact]
+    public void IsMarkdown_FalseForAMarkdownDiffTab_EvenThoughTheExtensionResolvesToMarkdown()
+    {
+        var markdownDiff = TabViewModel.ForGitDiff(
+            @"C:\project\README.md", "README.md", @"C:\project", "README.md", GitDiffSide.Head, GitDiffSide.WorkingTree);
+
+        Assert.True(markdownDiff.IsGitDiffTab);
+        Assert.False(markdownDiff.IsMarkdown);
+    }
+
+    [Fact]
+    public void IsPreviewMode_DefaultsFalse()
+    {
+        var markdownFile = TabViewModel.ForFile(@"C:\project\README.md");
+
+        Assert.False(markdownFile.IsPreviewMode);
+    }
+
+    [Fact]
+    public void ToggleMarkdownPreviewCommand_FlipsIsPreviewMode()
+    {
+        var (tabs, _, _, _) = Build();
+        var tab = tabs.AddFileTab(@"C:\project\README.md");
+
+        tabs.ToggleMarkdownPreviewCommand.Execute(tab);
+        Assert.True(tab.IsPreviewMode);
+
+        tabs.ToggleMarkdownPreviewCommand.Execute(tab);
+        Assert.False(tab.IsPreviewMode);
+    }
+
+    [Fact]
+    public void ToggleMarkdownPreviewCommand_OnANullTab_IsANoOp()
+    {
+        var (tabs, _, _, _) = Build();
+
+        tabs.ToggleMarkdownPreviewCommand.Execute(null);
+    }
+
+    [Fact]
+    public async Task ToggleMarkdownPreviewCommand_OnTheSelectedTab_RerendersThroughShowFileAsync()
+    {
+        var (tabs, _, _, _) = Build();
+        var tab = tabs.AddFileTab(@"C:\project\README.md");
+
+        var renderedTabs = new List<TabViewModel>();
+        tabs.ShowFileAsync = t =>
+        {
+            renderedTabs.Add(t);
+            return Task.CompletedTask;
+        };
+
+        tabs.ToggleMarkdownPreviewCommand.Execute(tab);
+        await tabs.LastAttach!;
+
+        Assert.Same(tab, Assert.Single(renderedTabs));
+    }
+
+    [Fact]
+    public void ToggleMarkdownPreviewCommand_OnATabThatIsNotSelected_DoesNotRerender()
+    {
+        var (tabs, _, _, _) = Build();
+        var selected = tabs.AddFileTab(@"C:\project\README.md");
+        var other = tabs.AddFileTab(@"C:\project\OTHER.md");
+        tabs.SelectedTab = selected;
+
+        var renderCount = 0;
+        tabs.ShowFileAsync = _ =>
+        {
+            renderCount++;
+            return Task.CompletedTask;
+        };
+
+        tabs.ToggleMarkdownPreviewCommand.Execute(other);
+
+        Assert.True(other.IsPreviewMode);
+        Assert.Equal(0, renderCount);
+    }
 }

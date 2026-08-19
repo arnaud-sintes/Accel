@@ -90,6 +90,14 @@
       loader interacts with PublishSingleFile.
     -->
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4129.50" />
+
+    <!--
+      Markdown -> HTML rendering for the FILE/GIT panel markdown preview toggle (see
+      App/Controls/MarkdownPreviewView.xaml.cs). Pure managed, no native/JS vendoring needed -
+      pinned to the exact latest stable version on nuget.org at the time of writing, same posture
+      as Microsoft.Web.WebView2 above.
+    -->
+    <PackageReference Include="Markdig" Version="0.37.0" />
   </ItemGroup>
 
   <!--

@@ -177,6 +177,28 @@ public sealed partial class TabViewModel : ObservableObject
     public bool IsShellTab => Kind == TabKind.Shell;
 
     /// <summary>
+    /// Whether this tab's markdown-preview toggle button should show at all - a single-pane file
+    /// or git-change tab (never a diff, see <see cref="IsGitDiffTab"/> - out of scope per the
+    /// feature's own scoping decision) whose extension resolves to
+    /// <see cref="SourceLanguage.Markdown"/>. <see cref="TabId"/> doubles as the file path for both
+    /// <see cref="IsFileTab"/> and <see cref="IsGitChangeTab"/> kinds (see <see cref="ForFile"/>/
+    /// <see cref="ForGitChange"/>), so it is resolvable the same way <c>MainWindow.ShowFileTabAsync</c>
+    /// resolves the syntax-highlighting language.
+    /// </summary>
+    public bool IsMarkdown =>
+        (IsFileTab || IsGitChangeTab) && !IsGitDiffTab
+        && SourceLanguageResolver.Resolve(TabId) == SourceLanguage.Markdown;
+
+    /// <summary>
+    /// Whether panel D should render this tab as a rendered-HTML preview (<see cref="MarkdownPreviewView"/>)
+    /// instead of the highlighted-text view - toggled by <see cref="TabsViewModel.ToggleMarkdownPreviewCommand"/>,
+    /// consumed by <c>MainWindow.ShowFileTabAsync</c>. Meaningless (never read) unless
+    /// <see cref="IsMarkdown"/> is true. Defaults false: opening a file always shows text first.
+    /// </summary>
+    [ObservableProperty]
+    private bool _isPreviewMode;
+
+    /// <summary>
     /// Whether a real <c>PtySession</c> sits behind this tab (<see cref="TabKind.Session"/> and
     /// <see cref="TabKind.Shell"/> both do - the only difference between them is which child process
     /// was launched; <see cref="TabKind.File"/>/<see cref="TabKind.GitChange"/> never do). This is the
@@ -656,6 +678,31 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
             // Nothing was actually closed, so no SessionEnded notification will ever arrive to consume
             // this flag - leaving it would leak it forever (harmlessly, but pointlessly).
             _stopping.Remove(tab.TabId);
+        }
+    }
+
+    /// <summary>
+    /// Flips <paramref name="tab"/>'s <see cref="TabViewModel.IsPreviewMode"/> - the FILE/GIT tab
+    /// header's markdown-preview toggle button (only visible when
+    /// <see cref="TabViewModel.IsMarkdown"/>). If <paramref name="tab"/> is the currently selected
+    /// tab, re-renders it immediately through the same <see cref="ShowFileAsync"/> hook/error-swallowing
+    /// posture <see cref="OnSelectedTabChanged"/> already uses for a file/git-change tab, rather than
+    /// duplicating that logic here - a tab that is not currently selected just has its flag flipped for
+    /// whenever it is next shown.
+    /// </summary>
+    [RelayCommand]
+    public void ToggleMarkdownPreview(TabViewModel? tab)
+    {
+        if (tab is null)
+        {
+            return;
+        }
+
+        tab.IsPreviewMode = !tab.IsPreviewMode;
+
+        if (ReferenceEquals(SelectedTab, tab))
+        {
+            LastAttach = ShowFileSafelyAsync(tab);
         }
     }
 
