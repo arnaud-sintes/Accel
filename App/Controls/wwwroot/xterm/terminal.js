@@ -98,10 +98,39 @@
     // ("\x1b\r") sequence to tell a soft newline apart from a submit, so intercept Shift+Enter here
     // and send that instead, before xterm's own default handling emits a plain "\r" for it too.
     term.attachCustomKeyEventHandler(function (event) {
+      // Returning false only tells xterm's OWN keydown handler to skip its default terminal-sequence
+      // processing for this key - it does NOT call event.preventDefault(), so without doing that
+      // ourselves the browser's native default action (e.g. inserting a real newline / firing its
+      // own native paste on xterm's hidden textarea) still runs too, on top of whatever we send
+      // below - the terminal ends up processing the key twice. Found empirically: Shift+Enter was
+      // sending "\x1b\r" here AND a plain "\r" from the untouched native default, and Ctrl+V was
+      // pasting via the clipboard read below AND via xterm's own native textarea paste listener -
+      // both looked like the terminal "doing it twice".
       if (event.type === "keydown" && event.key === "Enter" && event.shiftKey) {
+        event.preventDefault();
         handleTerminalData("\x1b\r");
         return false;
       }
+
+      // Ctrl+C is the terminal's own SIGINT byte (0x03) by default, which pre-empts the usual
+      // browser "copy selection" convention every other app follows - so only steal it for copy
+      // when there is actually a selection to copy, and fall through to the normal SIGINT send
+      // (return true, no handling here) otherwise. Matches Windows Terminal/most modern terminal
+      // emulators' own Ctrl+C convention.
+      if (event.type === "keydown" && event.ctrlKey && !event.shiftKey && !event.altKey && event.key === "c" && term.hasSelection()) {
+        event.preventDefault();
+        copySelection();
+        return false;
+      }
+
+      // Ctrl+V has no terminal meaning of its own (real terminals have no "paste" control byte),
+      // so unlike Ctrl+C above this is always safe to intercept unconditionally.
+      if (event.type === "keydown" && event.ctrlKey && !event.shiftKey && !event.altKey && event.key === "v") {
+        event.preventDefault();
+        pasteFromClipboard();
+        return false;
+      }
+
       return true;
     });
 
@@ -145,6 +174,31 @@
     }
   }
 
+  // navigator.clipboard.writeText() is allowed for a same-page, user-gesture-triggered call with
+  // no permission prompt (unlike readText() below) - see TerminalView.InitializeAsync's
+  // PermissionRequested handler for the read side.
+  function copySelection() {
+    var text = term.getSelection();
+    if (text) {
+      navigator.clipboard.writeText(text).catch(function () {
+        // Best-effort - nothing actionable client-side if the OS clipboard write itself fails.
+      });
+    }
+  }
+
+  function pasteFromClipboard() {
+    navigator.clipboard.readText().then(function (text) {
+      if (text) {
+        // term.paste() (not handleTerminalData directly) so xterm applies its own bracketed-paste
+        // wrapping when the child has requested it, exactly as its built-in textarea paste path
+        // does - handleTerminalData is still what actually reaches the socket underneath.
+        term.paste(text);
+      }
+    }, function () {
+      // Best-effort - e.g. an empty/non-text clipboard, or the permission grant not yet applied.
+    });
+  }
+
   function handleTerminalData(data) {
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       return;
@@ -173,6 +227,12 @@
     if (!term) {
       createTerminal();
     }
+
+    // Without this, a freshly created (or reattached-to) session leaves keyboard focus wherever
+    // it last was in the host WPF app (e.g. panel A's tree, or nowhere) instead of xterm's own
+    // hidden input textarea - the terminal renders and the session is live, but the user's first
+    // keystrokes go nowhere until they click into panel D themselves.
+    term.focus();
 
     if (socket) {
       try {

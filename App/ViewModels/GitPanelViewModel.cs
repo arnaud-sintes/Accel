@@ -15,11 +15,26 @@ using Accel.Metrics;
 /// above it.</summary>
 public sealed class GitPanelEntryViewModel
 {
-    public GitPanelEntryViewModel(GitChangeEntry entry)
+    public GitPanelEntryViewModel(GitChangeEntry entry, string repoRootPath)
     {
         Path = entry.Path;
         StatusLetter = char.ToUpperInvariant(entry.StatusCode).ToString();
         StatusDescription = entry.StatusDescription;
+        RepoRootPath = repoRootPath;
+
+        // git status always prints '/'-separated paths regardless of OS - Combine tolerates a '/'
+        // on Windows fine at the API level, but normalizing keeps FullPath consistent with every
+        // other path in this app (all built via Path.Combine/DirectorySeparatorChar).
+        FullPath = System.IO.Path.Combine(repoRootPath, entry.Path.Replace('/', System.IO.Path.DirectorySeparatorChar));
+
+        // This row's own double-click gesture (MainWindow.GitChangeRow_MouseLeftButtonDown) is
+        // deliberately narrower than every status this list can show: Added/Untracked/Deleted open a
+        // single read-only view (MainWindow.ShowFileTabAsync), Modified opens a side-by-side diff
+        // (MainWindow.ShowGitDiffTabAsync) - Renamed/Copied/Conflict have no well-defined "before" or
+        // "after" this Phase's viewer can show cleanly yet.
+        IsOpenable = entry.StatusCode is 'A' or '?' or 'D' or 'M';
+        IsModified = entry.StatusCode == 'M';
+        IsStaged = entry.IsStaged;
     }
 
     /// <summary>Repo-relative path, exactly as `git status` reported it - this row's full text and
@@ -32,6 +47,29 @@ public sealed class GitPanelEntryViewModel
     public string StatusLetter { get; }
 
     public string StatusDescription { get; }
+
+    /// <summary>The repository root this entry's <see cref="Path"/> is relative to - passed through
+    /// to <see cref="TabsViewModel.AddGitChangeTab"/> so a Deleted entry's read-only tab can fall back
+    /// to <c>git show HEAD:&lt;Path&gt;</c> when <see cref="FullPath"/> no longer exists on disk.</summary>
+    public string RepoRootPath { get; }
+
+    /// <summary>The absolute on-disk path - present (working-tree copy) for every status except a
+    /// pure Deleted entry, where it names a path that no longer exists.</summary>
+    public string FullPath { get; }
+
+    /// <summary>Whether double-clicking this row opens a read-only tab - see this constructor's
+    /// remarks for which statuses qualify.</summary>
+    public bool IsOpenable { get; }
+
+    /// <summary>Whether this is a Modified ('M') row - determines whether
+    /// <c>MainWindow.GitChangeRow_MouseLeftButtonDown</c> opens a single read-only view or a
+    /// side-by-side diff.</summary>
+    public bool IsModified { get; }
+
+    /// <summary>Staged (index vs. HEAD) or unstaged (working tree vs. index) - which side of a
+    /// Modified row's comparison is the working-tree file vs. a git revision. See
+    /// <c>MainWindow.GitChangeRow_MouseLeftButtonDown</c> for how this picks the diff's two sides.</summary>
+    public bool IsStaged { get; }
 
     public string AutomationDescription => $"{StatusDescription}: {Path}.";
 }
@@ -245,7 +283,7 @@ public sealed partial class GitPanelViewModel : ObservableObject, IDisposable
 
         foreach (var entry in entries.OrderBy(e => e.Path, StringComparer.OrdinalIgnoreCase))
         {
-            var row = new GitPanelEntryViewModel(entry);
+            var row = new GitPanelEntryViewModel(entry, effectivePath!);
             (entry.IsStaged ? StagedChanges : Changes).Add(row);
         }
 

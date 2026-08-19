@@ -1,15 +1,20 @@
 namespace Accel.App;
 
 using System;
+using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Documents;
 using System.Windows.Interop;
+using System.Windows.Media;
 using System.Windows.Threading;
 using Accel.App.Services;
 using Accel.App.ViewModels;
+using Accel.Cli;
 using Accel.Orchestration;
 using Accel.Server;
 
@@ -200,6 +205,18 @@ public partial class MainWindow : Window
             // panel D kept rendering the closed session's last frame forever (TabsViewModel's
             // DetachTerminalAsync remarks).
             tabs.DetachTerminalAsync = () => Terminal.DetachPtyAsync();
+
+            // Panel D's file-viewer hooks (a read-only tab's TabId is the file's own full path - see
+            // TabViewModel.ForFile/ForGitChange/ForGitDiff). The pty stays attached underneath rather
+            // than being detached and reattached on every flip between a file/git tab and a session
+            // tab - only FileViewerHost's/DiffViewerHost's Visibility toggles (see PanelD's own XAML
+            // comment for why).
+            tabs.ShowFileAsync = ShowFileTabAsync;
+            tabs.HideFileViewer = () =>
+            {
+                FileViewerHost.Visibility = Visibility.Collapsed;
+                DiffViewerHost.Visibility = Visibility.Collapsed;
+            };
         }
 
         if (filesPanel is not null)
@@ -241,6 +258,15 @@ public partial class MainWindow : Window
             PanelE.DataContext = agentGraph;
         }
 
+        if (rootsPanel is not null)
+        {
+            // TODO (window-flash-on-waiting): flash the taskbar icon whenever a session goes
+            // "waiting for feedback" (a Stop hook event) while this window doesn't have focus -
+            // the row highlight itself (IsWaiting) is panel A's own concern; this is the
+            // out-of-band signal for when the user isn't even looking at Accel.
+            rootsPanel.SessionWaitingForAttention += OnSessionWaitingForAttention;
+        }
+
         Closed += (_, _) =>
         {
             // No session teardown here any more: PtyRegistry is the single owner of PtySession.Dispose
@@ -249,6 +275,10 @@ public partial class MainWindow : Window
             // is disposed by Program.cs's composition root (mirrors how rootsPanel is never disposed here).
             Tabs?.Dispose();
             _panelBStub?.Dispose();
+            if (rootsPanel is not null)
+            {
+                rootsPanel.SessionWaitingForAttention -= OnSessionWaitingForAttention;
+            }
         };
 
         // Custom-chrome maximize fix. Two earlier revisions of this fix were both wrong in the
@@ -289,6 +319,40 @@ public partial class MainWindow : Window
     }
 
     private IntPtr _windowHandle;
+
+    /// <summary>
+    /// <see cref="RootsPanelViewModel.SessionWaitingForAttention"/>'s handler: flashes the taskbar
+    /// icon (see <see cref="FlashTaskbarIcon"/>) unless this window is already the foreground
+    /// window - flashing a window the user is already looking at would just be noise. Raised on
+    /// the UI thread already (the ViewModel's own snapshot handling is dispatcher-marshalled), so
+    /// this can touch <see cref="IntPtr"/>/native state directly.
+    /// </summary>
+    private void OnSessionWaitingForAttention() => FlashTaskbarIcon();
+
+    /// <summary>
+    /// Flashes this window's taskbar button until the user activates it (<c>FLASHW_TIMERNOFG</c>),
+    /// per the TODO's "make Accel app window flash" requirement. No-ops before the native <c>HWND</c>
+    /// exists (<see cref="_windowHandle"/> unset) or while the window already has focus - Windows
+    /// itself is the authority on when to stop flashing once the user does switch to it.
+    /// </summary>
+    private void FlashTaskbarIcon()
+    {
+        if (_windowHandle == IntPtr.Zero || IsActive)
+        {
+            return;
+        }
+
+        var info = new NativeMethods.FLASHWINFO
+        {
+            cbSize = (uint)Marshal.SizeOf<NativeMethods.FLASHWINFO>(),
+            hwnd = _windowHandle,
+            dwFlags = NativeMethods.FLASHW_TRAY | NativeMethods.FLASHW_TIMERNOFG,
+            uCount = uint.MaxValue,
+            dwTimeout = 0,
+        };
+
+        NativeMethods.FlashWindowEx(ref info);
+    }
 
     /// <summary>Synchronously repaints the entire window (RDW_UPDATENOW), including its full frame
     /// (RDW_FRAME) and every child (RDW_ALLCHILDREN) - a hard guarantee against any stale/leftover
@@ -575,6 +639,25 @@ public partial class MainWindow : Window
             public int dwFlags;
         }
 
+        [StructLayout(LayoutKind.Sequential)]
+        public struct FLASHWINFO
+        {
+            public uint cbSize;
+            public IntPtr hwnd;
+            public uint dwFlags;
+            public uint uCount;
+            public uint dwTimeout;
+        }
+
+        /// <summary>Flash the taskbar button only (not the window's own caption/frame - this
+        /// window is borderless/custom-chrome, so <c>FLASHW_CAPTION</c> would have nothing to
+        /// flash).</summary>
+        public const uint FLASHW_TRAY = 0x00000002;
+
+        /// <summary>Keep flashing until the window is brought to the foreground, rather than a
+        /// fixed <c>uCount</c> of flashes.</summary>
+        public const uint FLASHW_TIMERNOFG = 0x0000000C;
+
         public const int MONITOR_DEFAULTTONEAREST = 0x00000002;
 
         [DllImport("user32.dll")]
@@ -593,6 +676,10 @@ public partial class MainWindow : Window
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool RedrawWindow(IntPtr hWnd, IntPtr lprcUpdate, IntPtr hrgnUpdate, uint flags);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool FlashWindowEx(ref FLASHWINFO pwfi);
     }
 
     private readonly FocusedSessionStubViewModel? _panelBStub;
@@ -978,7 +1065,7 @@ public partial class MainWindow : Window
     /// </summary>
     private void TabItem_MouseDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
-        if ((sender as ListBoxItem)?.DataContext is not TabViewModel tab || tab.HasEnded)
+        if ((sender as ListBoxItem)?.DataContext is not TabViewModel tab || tab.HasEnded || tab.Kind != TabKind.Session)
         {
             return;
         }
@@ -995,6 +1082,262 @@ public partial class MainWindow : Window
         }
 
         Tabs?.StopTabCommand.Execute(tab);
+    }
+
+    /// <summary>
+    /// Panel B's FILES tree double-click gesture: opens (or selects, if already open -
+    /// <see cref="TabsViewModel.AddFileTab"/> is idempotent per path) a read-only tab for the
+    /// double-clicked file. A no-op for a directory row (its own double-click is the TreeView's
+    /// built-in expand/collapse) or the lazy-load <see cref="FilesPanelNodeViewModel"/> placeholder
+    /// (empty <see cref="FilesPanelNodeViewModel.Key"/>).
+    /// </summary>
+    private void FilesTreeViewItem_MouseDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if ((sender as TreeViewItem)?.DataContext is not FilesPanelNodeViewModel node
+            || node.IsDirectory
+            || string.IsNullOrEmpty(node.Key))
+        {
+            return;
+        }
+
+        Tabs?.AddFileTab(node.Key);
+    }
+
+    /// <summary>
+    /// Panel B's GIT section double-click gesture: opens (or selects, if already open) a read-only
+    /// tab for the double-clicked row - a single-pane view for Added/Untracked/Deleted, a
+    /// side-by-side diff for Modified (see <see cref="GitPanelEntryViewModel.IsOpenable"/> for exactly
+    /// which statuses qualify at all). <see cref="GitChangeRowTemplate"/>'s root <c>Grid</c> is not a
+    /// <c>Control</c>, so it has no <c>MouseDoubleClick</c> routed event to hook (unlike panel A/C's
+    /// <c>TreeViewItem</c>/<c>ListBoxItem</c> rows) - double-click is detected here via
+    /// <see cref="System.Windows.Input.MouseButtonEventArgs.ClickCount"/> instead.
+    ///
+    /// <para><b>Which side is which, for a Modified row's diff.</b> A staged modification
+    /// (<see cref="GitPanelEntryViewModel.IsStaged"/>) compares the index against HEAD - this row
+    /// represents that staged change, so "before" is HEAD and "after" is the index blob (not
+    /// necessarily the current disk file, which may have drifted further since staging). An unstaged
+    /// modification compares the working tree against the index - "before" is the index blob and
+    /// "after" is the current disk file.</para>
+    /// </summary>
+    private void GitChangeRow_MouseLeftButtonDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (e.ClickCount != 2
+            || (sender as FrameworkElement)?.DataContext is not GitPanelEntryViewModel entry
+            || !entry.IsOpenable)
+        {
+            return;
+        }
+
+        string title = Path.GetFileName(entry.Path);
+
+        if (entry.IsModified)
+        {
+            var (oldSide, newSide) = entry.IsStaged
+                ? (GitDiffSide.Head, GitDiffSide.Index)
+                : (GitDiffSide.Index, GitDiffSide.WorkingTree);
+
+            Tabs?.AddGitDiffTab(entry.FullPath, title, entry.RepoRootPath, entry.Path, oldSide, newSide);
+            return;
+        }
+
+        Tabs?.AddGitChangeTab(entry.FullPath, title, entry.RepoRootPath, entry.Path);
+    }
+
+    /// <summary>Frozen <see cref="SolidColorBrush"/> cache for <see cref="SyntaxToken.ColorHex"/> -
+    /// <see cref="SyntaxHighlighter"/>'s palette is a small fixed set, so this never grows unbounded
+    /// and avoids reparsing the same hex string for every token of every file.</summary>
+    private readonly Dictionary<string, SolidColorBrush> _syntaxBrushCache = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Reads <paramref name="tab"/>'s content and renders it read-only, coloured per
+    /// <see cref="SyntaxHighlighter.Tokenize"/> (resolved from the file's extension - see
+    /// <see cref="SourceLanguageResolver"/>), in panel D's file viewer - wired as
+    /// <see cref="TabsViewModel.ShowFileAsync"/>. Shared by both <see cref="TabKind.File"/> (panel B's
+    /// FILES tree) and <see cref="TabKind.GitChange"/> (panel B's GIT section) tabs: the only
+    /// difference is <see cref="ReadTabContentAsync"/>'s git-show fallback for a Deleted entry whose
+    /// working-tree copy is gone. A failed read (deleted file, permission denied, a binary file that
+    /// isn't valid text, `git show` failing) shows the error message in place of content rather than
+    /// throwing - <see cref="TabsViewModel"/>'s own safe-call wrapper would swallow an exception here
+    /// silently, which would leave the previous tab's content on screen with no explanation.
+    /// </summary>
+    private async Task ShowFileTabAsync(TabViewModel tab)
+    {
+        if (tab.IsGitDiffTab)
+        {
+            await ShowGitDiffTabAsync(tab).ConfigureAwait(true);
+            return;
+        }
+
+        string content;
+        SourceLanguage language = SourceLanguage.PlainText;
+        try
+        {
+            content = await ReadTabContentAsync(tab).ConfigureAwait(true);
+            language = SourceLanguageResolver.Resolve(tab.TabId);
+        }
+        catch (Exception ex)
+        {
+            content = $"Could not read file:\n{tab.TabId}\n\n{ex.Message}";
+        }
+
+        FileViewerText.Document = BuildHighlightedDocument(content, language);
+        DiffViewerHost.Visibility = Visibility.Collapsed;
+        FileViewerHost.Visibility = Visibility.Visible;
+    }
+
+    /// <summary>
+    /// Renders a Modified git-change tab's two sides side-by-side (see
+    /// <see cref="TabViewModel.GitDiffOldSide"/>/<see cref="TabViewModel.GitDiffNewSide"/> and
+    /// <c>MainWindow.GitChangeRow_MouseLeftButtonDown</c>'s remarks for which side is which). Each
+    /// side is read and rendered independently - a failure reading one side (e.g. the file was never
+    /// committed, so <see cref="GitDiffSide.Head"/> has nothing to show) does not blank out the other.
+    /// </summary>
+    private async Task ShowGitDiffTabAsync(TabViewModel tab)
+    {
+        SourceLanguage language = SourceLanguageResolver.Resolve(tab.TabId);
+
+        string oldContent;
+        try
+        {
+            oldContent = await ReadGitDiffSideAsync(tab, tab.GitDiffOldSide!.Value).ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            oldContent = $"Could not read \"before\" content:\n{ex.Message}";
+        }
+
+        string newContent;
+        try
+        {
+            newContent = await ReadGitDiffSideAsync(tab, tab.GitDiffNewSide!.Value).ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            newContent = $"Could not read \"after\" content:\n{ex.Message}";
+        }
+
+        DiffOldText.Document = BuildHighlightedDocument(oldContent, language);
+        DiffNewText.Document = BuildHighlightedDocument(newContent, language);
+
+        FileViewerHost.Visibility = Visibility.Collapsed;
+        DiffViewerHost.Visibility = Visibility.Visible;
+    }
+
+    /// <summary>
+    /// A plain disk read for a <see cref="TabKind.File"/> tab, or for a <see cref="TabKind.GitChange"/>
+    /// tab whose working-tree copy is still there (Added/Untracked). Falls back to
+    /// <see cref="GitStatusBuilder.ReadCommittedContent"/> (off the UI thread - it shells out to
+    /// `git`) only when the tab carries git coordinates (<see cref="TabViewModel.GitRepoRootPath"/>/
+    /// <see cref="TabViewModel.GitRelativePath"/>) <b>and</b> the disk path is actually missing - a
+    /// Deleted entry's whole reason for needing this fallback at all.
+    /// </summary>
+    private static Task<string> ReadTabContentAsync(TabViewModel tab)
+    {
+        if (!File.Exists(tab.TabId) && tab.GitRepoRootPath is { } repoRootPath && tab.GitRelativePath is { } relativePath)
+        {
+            return ReadGitObjectAsync(repoRootPath, $"HEAD:{relativePath}");
+        }
+
+        return File.ReadAllTextAsync(tab.TabId);
+    }
+
+    /// <summary>Reads one side of a <see cref="TabKind.GitChange"/> diff tab's comparison - see
+    /// <see cref="GitDiffSide"/> for what each value means.</summary>
+    private static Task<string> ReadGitDiffSideAsync(TabViewModel tab, GitDiffSide side)
+    {
+        if (side == GitDiffSide.WorkingTree)
+        {
+            return File.ReadAllTextAsync(tab.TabId);
+        }
+
+        string repoRootPath = tab.GitRepoRootPath ?? throw new InvalidOperationException("A git diff tab must carry a repo root.");
+        string relativePath = tab.GitRelativePath ?? throw new InvalidOperationException("A git diff tab must carry a relative path.");
+        string gitObjectSpec = side == GitDiffSide.Index ? $":{relativePath}" : $"HEAD:{relativePath}";
+
+        return ReadGitObjectAsync(repoRootPath, gitObjectSpec);
+    }
+
+    /// <summary>Runs <see cref="GitStatusBuilder.ReadGitObject"/> off the UI thread (it shells out to
+    /// `git`), throwing with a descriptive message on failure rather than returning
+    /// <see langword="null"/> - both <see cref="ReadTabContentAsync"/> and
+    /// <see cref="ReadGitDiffSideAsync"/> already run inside a try/catch that turns any exception into
+    /// on-screen text instead of crashing the UI thread.</summary>
+    private static Task<string> ReadGitObjectAsync(string repoRootPath, string gitObjectSpec) => Task.Run(() =>
+    {
+        string? content = GitStatusBuilder.ReadGitObject(repoRootPath, gitObjectSpec);
+        if (content is null)
+        {
+            throw new InvalidOperationException($"git show {gitObjectSpec} failed - the object may not exist at that revision.");
+        }
+
+        return content;
+    });
+
+    /// <summary>
+    /// Tokenizes and colours <paramref name="content"/> (see <see cref="SyntaxHighlighter.Tokenize"/>)
+    /// into a <see cref="FlowDocument"/> ready to assign to a <see cref="RichTextBox.Document"/> -
+    /// shared by the single-pane file viewer and both panes of the side-by-side diff viewer.
+    /// Line endings are normalized to <c>'\n'</c> first: <see cref="SyntaxHighlighter"/>'s multiline
+    /// patterns anchor on it alone (<c>(?m:^...$)</c>), and <see cref="AppendToken"/> splits tokens on
+    /// it too - a stray <c>'\r'</c> left in either path would either break those anchors or paint as a
+    /// visible stray glyph.
+    /// </summary>
+    private FlowDocument BuildHighlightedDocument(string content, SourceLanguage language)
+    {
+        content = content.Replace("\r\n", "\n").Replace("\r", "\n");
+
+        var paragraph = new Paragraph { Margin = new Thickness(0) };
+        foreach (var token in SyntaxHighlighter.Tokenize(content, language))
+        {
+            AppendToken(paragraph, token);
+        }
+
+        return new FlowDocument(paragraph) { PageWidth = 4000 };
+    }
+
+    /// <summary>
+    /// Appends one <see cref="SyntaxToken"/> to <paramref name="paragraph"/> as a coloured
+    /// <see cref="Run"/> (or the viewer's default foreground, for a <see langword="null"/>
+    /// <see cref="SyntaxToken.ColorHex"/>) - split on <c>'\n'</c> into an explicit
+    /// <see cref="LineBreak"/> per line, since WPF's text layout does not itself treat an embedded
+    /// <c>'\n'</c> inside a <see cref="Run"/>'s text as a line break.
+    /// </summary>
+    private void AppendToken(Paragraph paragraph, SyntaxToken token)
+    {
+        var brush = token.ColorHex is null ? null : GetSyntaxBrush(token.ColorHex);
+        string[] lines = token.Text.Split('\n');
+
+        for (int i = 0; i < lines.Length; i++)
+        {
+            if (lines[i].Length > 0)
+            {
+                var run = new Run(lines[i]);
+                if (brush is not null)
+                {
+                    run.Foreground = brush;
+                }
+
+                paragraph.Inlines.Add(run);
+            }
+
+            if (i < lines.Length - 1)
+            {
+                paragraph.Inlines.Add(new LineBreak());
+            }
+        }
+    }
+
+    private SolidColorBrush GetSyntaxBrush(string colorHex)
+    {
+        if (_syntaxBrushCache.TryGetValue(colorHex, out var cached))
+        {
+            return cached;
+        }
+
+        var brush = new SolidColorBrush((Color)ColorConverter.ConvertFromString(colorHex));
+        brush.Freeze();
+        _syntaxBrushCache[colorHex] = brush;
+        return brush;
     }
 
     /// <summary>

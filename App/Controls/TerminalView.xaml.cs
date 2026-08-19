@@ -81,8 +81,54 @@ public partial class TerminalView : UserControl, IDisposable
         var userDataFolder = WebView2UserDataFolder();
         Directory.CreateDirectory(userDataFolder);
 
-        var environment = await CoreWebView2Environment.CreateAsync(userDataFolder: userDataFolder);
+        // WebView2's own default fill (opaque white) is what the compositor paints into any area
+        // of the control its surface hasn't caught up to yet - normally invisible, but during a
+        // live window/panel resize (dragging the window border, or panel D's own splitters) the
+        // WPF control's bounds update a frame or more ahead of the browser process's own resized
+        // paint, so that gap - briefly - shows this default instead of whatever was already
+        // rendered. Against xterm's near-black theme (#0a0a0a, matching index.html's body and
+        // this control's own Grid background above) that reads as a jarring white flash exactly
+        // while resizing, i.e. "the terminal doesn't resize well" - not a rendering bug in the
+        // page itself, just the wrong fallback color for the gap. Must be set before
+        // EnsureCoreWebView2Async - DefaultBackgroundColor only takes effect at controller
+        // creation, not on an already-initialized one.
+        Browser.DefaultBackgroundColor = System.Drawing.Color.FromArgb(0xFF, 0x0A, 0x0A, 0x0A);
+
+        // Disables Chromium's overlay scrollbars (the auto-hiding, native-drawn Fluent style
+        // Windows 11 ships by default) for this WebView2 instance only. Confirmed empirically
+        // (screenshots of a live terminal with far more scrollback than fits the viewport): with
+        // overlay scrollbars on, index.html's `.xterm-viewport::-webkit-scrollbar*` rules are
+        // silently ignored by Chromium - not just unstyled, genuinely never painted, even while
+        // actively scrolling - because an overlay-mode scrollbar is a native compositor overlay,
+        // not part of the page's own paint/CSS box model the way a classic scrollbar is. Classic
+        // scrollbars (this flag's effect) are the one scrollbar mode `::-webkit-scrollbar-*`
+        // pseudo-elements actually apply to, which is what index.html was already written
+        // assuming. See MicrosoftEdge/WebView2Feedback#2796 for the flag names.
+        var environmentOptions = new CoreWebView2EnvironmentOptions
+        {
+            AdditionalBrowserArguments =
+                "--disable-features=OverlayScrollbar,OverlayScrollbarWinStyle,OverlayScrollbarWinStyleAnimation",
+        };
+        var environment = await CoreWebView2Environment.CreateAsync(
+            userDataFolder: userDataFolder,
+            options: environmentOptions);
         await Browser.EnsureCoreWebView2Async(environment);
+
+        // Paste (Ctrl+V, terminal.js's handlePaste) reads the clipboard via
+        // navigator.clipboard.readText(), which Chromium/WebView2 gates behind an explicit
+        // permission grant (CoreWebView2PermissionKind.ClipboardRead) - unlike writeText() (used
+        // for copy), which is allowed for a user-gesture-triggered call with no prompt. Without
+        // this handler, WebView2's default is to silently deny the request, so readText() rejects
+        // and paste does nothing with no visible error. Auto-allow unconditionally: this is
+        // Accel's own vendored page (accel-terminal), never third-party/remote content, so there
+        // is no cross-origin clipboard-snooping risk to gate behind a user prompt.
+        Browser.CoreWebView2.PermissionRequested += (_, e) =>
+        {
+            if (e.PermissionKind == CoreWebView2PermissionKind.ClipboardRead)
+            {
+                e.State = CoreWebView2PermissionState.Allow;
+            }
+        };
 
         var assetsRoot = XtermAssetsFolder();
         Browser.CoreWebView2.SetVirtualHostNameToFolderMapping(
@@ -145,6 +191,13 @@ public partial class TerminalView : UserControl, IDisposable
         ArgumentException.ThrowIfNullOrEmpty(tabId);
         await Initialization;
         await Browser.CoreWebView2.ExecuteScriptAsync(BuildAttachScript(tabId, webSocketPort));
+
+        // terminal.js's own accelAttachPty already calls term.focus(), but that only moves focus
+        // within the page - inert unless the WebView2 control itself holds actual Win32/WPF
+        // keyboard focus. Without this, a freshly created session left focus wherever it last was
+        // in the host window (e.g. panel A's tree), so the user's first keystrokes went nowhere
+        // until they clicked into panel D themselves.
+        Browser.Focus();
     }
 
     /// <summary>

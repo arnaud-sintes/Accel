@@ -102,6 +102,62 @@ public static class GitStatusBuilder
         return new GitRepoSummary(repoName, branch, remoteBranch, aheadCount);
     }
 
+    /// <summary>
+    /// Runs `git show HEAD:&lt;relativePath&gt;` in <paramref name="repoRootPath"/> to retrieve a
+    /// path's last-committed content - used for panel D's read-only git-change tab
+    /// (<c>MainWindow.ShowFileTabAsync</c>) when the working-tree copy no longer exists (a Deleted
+    /// entry). Thin convenience wrapper over <see cref="ReadGitObject"/> for the one revision spec
+    /// that call site needs.
+    /// </summary>
+    public static string? ReadCommittedContent(string repoRootPath, string relativePath) =>
+        ReadGitObject(repoRootPath, $"HEAD:{relativePath}");
+
+    /// <summary>
+    /// Runs `git show &lt;gitObjectSpec&gt;` (e.g. <c>"HEAD:src/foo.cs"</c> for the last commit, or
+    /// <c>":src/foo.cs"</c> for the index/staged blob) in <paramref name="repoRootPath"/> - the
+    /// general form <see cref="ReadCommittedContent"/> wraps, and what panel D's side-by-side git
+    /// diff tab (<c>MainWindow.ShowGitDiffTabAsync</c>) uses for whichever side of the comparison
+    /// isn't the plain working-tree file. Never throws: any failure (not a repo, the object doesn't
+    /// exist at that revision, git not installed) returns <see langword="null"/>, matching this
+    /// class's other "never propagate" convention. <paramref name="gitObjectSpec"/> is passed via
+    /// <see cref="ProcessStartInfo.ArgumentList"/> (never string-concatenated into a single arguments
+    /// string) so a path containing spaces or shell-special characters cannot be misparsed or escape
+    /// the intended argument.
+    /// </summary>
+    public static string? ReadGitObject(string repoRootPath, string gitObjectSpec)
+    {
+        if (string.IsNullOrWhiteSpace(repoRootPath) || string.IsNullOrWhiteSpace(gitObjectSpec))
+        {
+            return null;
+        }
+
+        try
+        {
+            var startInfo = new ProcessStartInfo("git")
+            {
+                WorkingDirectory = repoRootPath,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            startInfo.ArgumentList.Add("show");
+            startInfo.ArgumentList.Add(gitObjectSpec);
+
+            using var process = new Process { StartInfo = startInfo };
+            process.Start();
+            string output = process.StandardOutput.ReadToEnd();
+            process.StandardError.ReadToEnd();
+            process.WaitForExit(5000);
+
+            return process.ExitCode == 0 ? output : null;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
     private static string? RunGitCommand(string workingDirectory, string arguments)
     {
         try

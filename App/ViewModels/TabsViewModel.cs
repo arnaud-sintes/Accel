@@ -10,22 +10,148 @@ using CommunityToolkit.Mvvm.Input;
 using Accel.App.Services;
 using Accel.Orchestration;
 
+/// <summary>What a tab in panel C actually represents - see <see cref="TabViewModel.Kind"/>.</summary>
+public enum TabKind
+{
+    /// <summary>A projection of one live <c>PtyRegistry</c> registration (the original, and still
+    /// overwhelmingly common, kind of tab).</summary>
+    Session,
+
+    /// <summary>A read-only view of a file's contents - panel B's FILES tree double-click gesture
+    /// (see <see cref="TabsViewModel.AddFileTab"/>). Has no <c>PtySession</c> behind it at all.</summary>
+    File,
+
+    /// <summary>A read-only view of a new/removed file from panel B's GIT section (see
+    /// <see cref="TabsViewModel.AddGitChangeTab"/>) - visually distinct from <see cref="File"/> so
+    /// the two entry points never look the same, even though both end up showing the same file
+    /// viewer in panel D. Has no <c>PtySession</c> behind it either.</summary>
+    GitChange,
+}
+
 /// <summary>
-/// One tab in panel C - a projection of one <c>PtyRegistry</c> registration, never a second copy of its
-/// state. Holds no <see cref="PtySession"/> reference at all (see <see cref="IPtySessionHost"/> for why),
-/// so nothing here can dispose a session.
+/// One side of a <see cref="TabKind.GitChange"/> diff tab's comparison (see
+/// <see cref="TabViewModel.ForGitDiff"/>) - which git object <c>MainWindow.ShowGitDiffTabAsync</c>
+/// reads content from for that side.
+/// </summary>
+public enum GitDiffSide
+{
+    /// <summary>The last commit's blob - <c>git show HEAD:&lt;path&gt;</c>.</summary>
+    Head,
+
+    /// <summary>The index/staged blob - <c>git show :&lt;path&gt;</c>.</summary>
+    Index,
+
+    /// <summary>The current working-tree file, read straight off disk.</summary>
+    WorkingTree,
+}
+
+/// <summary>
+/// One tab in panel C. A <see cref="TabKind.Session"/> tab is a projection of one <c>PtyRegistry</c>
+/// registration, never a second copy of its state, and holds no <see cref="PtySession"/> reference at
+/// all (see <see cref="IPtySessionHost"/> for why), so nothing here can dispose a session. A
+/// <see cref="TabKind.File"/> tab has no session behind it whatsoever - see <see cref="ForFile"/>.
 /// </summary>
 public sealed partial class TabViewModel : ObservableObject
 {
     public TabViewModel(string tabId, string title)
+        : this(tabId, title, TabKind.Session)
+    {
+    }
+
+    private TabViewModel(string tabId, string title, TabKind kind)
     {
         ArgumentException.ThrowIfNullOrEmpty(tabId);
         TabId = tabId;
+        Kind = kind;
         _title = string.IsNullOrWhiteSpace(title) ? ShortId(tabId) : title;
     }
 
+    /// <summary>
+    /// A read-only file tab - panel B's FILES tree double-click gesture (see
+    /// <see cref="TabsViewModel.AddFileTab"/>). <see cref="TabId"/> is the file's own full path: files
+    /// have no registry registration to key identity on, and re-opening the same path must resolve to
+    /// the same tab rather than duplicating it.
+    /// </summary>
+    public static TabViewModel ForFile(string filePath)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(filePath);
+        return new TabViewModel(filePath, System.IO.Path.GetFileName(filePath), TabKind.File);
+    }
+
+    /// <summary>
+    /// A read-only tab for a new/removed file from panel B's GIT section (see
+    /// <see cref="TabsViewModel.AddGitChangeTab"/>). <paramref name="filePath"/> is the on-disk path
+    /// (may not exist - a Deleted entry's working-tree copy is gone); <paramref name="gitRepoRootPath"/>/
+    /// <paramref name="gitRelativePath"/> are the repo root and the entry's repo-relative path, kept
+    /// around purely so <c>MainWindow.ShowFileTabAsync</c> can fall back to
+    /// <c>GitStatusBuilder.ReadCommittedContent</c> when a plain disk read finds nothing there.
+    /// </summary>
+    public static TabViewModel ForGitChange(string filePath, string title, string gitRepoRootPath, string gitRelativePath)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(filePath);
+        var tab = new TabViewModel(filePath, title, TabKind.GitChange)
+        {
+            GitRepoRootPath = gitRepoRootPath,
+            GitRelativePath = gitRelativePath,
+        };
+        return tab;
+    }
+
+    /// <summary>
+    /// A read-only side-by-side diff tab for a Modified file from panel B's GIT section (see
+    /// <see cref="TabsViewModel.AddGitDiffTab"/>) - still <see cref="TabKind.GitChange"/> (same look
+    /// as <see cref="ForGitChange"/>'s single-pane tab), just with <paramref name="oldSide"/>/
+    /// <paramref name="newSide"/> set so <c>MainWindow.ShowFileTabAsync</c> knows to render two panes
+    /// instead of one.
+    /// </summary>
+    public static TabViewModel ForGitDiff(
+        string filePath, string title, string gitRepoRootPath, string gitRelativePath, GitDiffSide oldSide, GitDiffSide newSide)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(filePath);
+        var tab = new TabViewModel(filePath, title, TabKind.GitChange)
+        {
+            GitRepoRootPath = gitRepoRootPath,
+            GitRelativePath = gitRelativePath,
+            GitDiffOldSide = oldSide,
+            GitDiffNewSide = newSide,
+        };
+        return tab;
+    }
+
+    /// <summary>Session vs. file vs. git-change - see <see cref="TabKind"/>. Drives panel C's
+    /// "different look" per kind (icon/colour, no close-session semantics) and panel D's choice of
+    /// terminal vs. file viewer.</summary>
+    public TabKind Kind { get; }
+
+    /// <summary>Only set for <see cref="TabKind.GitChange"/> - see <see cref="ForGitChange"/>.</summary>
+    public string? GitRepoRootPath { get; private init; }
+
+    /// <summary>Only set for <see cref="TabKind.GitChange"/> - see <see cref="ForGitChange"/>.</summary>
+    public string? GitRelativePath { get; private init; }
+
+    /// <summary>Only set for a diff tab - see <see cref="ForGitDiff"/>. <see langword="null"/> means
+    /// this <see cref="TabKind.GitChange"/> tab is a single-pane view (<see cref="ForGitChange"/>),
+    /// not a diff.</summary>
+    public GitDiffSide? GitDiffOldSide { get; private init; }
+
+    /// <summary>See <see cref="GitDiffOldSide"/>.</summary>
+    public GitDiffSide? GitDiffNewSide { get; private init; }
+
+    /// <summary>Binding-friendly form of <see cref="Kind"/> for XAML's <c>BoolToVis</c>/style triggers,
+    /// which have no enum-comparison converter in this codebase.</summary>
+    public bool IsFileTab => Kind == TabKind.File;
+
+    /// <summary>See <see cref="IsFileTab"/>'s remarks.</summary>
+    public bool IsGitChangeTab => Kind == TabKind.GitChange;
+
+    /// <summary>Whether this <see cref="TabKind.GitChange"/> tab is a side-by-side diff
+    /// (<see cref="ForGitDiff"/>) rather than a single-pane view (<see cref="ForGitChange"/>) - what
+    /// <c>MainWindow.ShowFileTabAsync</c> branches on.</summary>
+    public bool IsGitDiffTab => GitDiffOldSide is not null;
+
     /// <summary>The registry tabId, which is also the <c>--session-id</c> GUID and therefore the id panel
-    /// A keys its session rows on - see <c>MainWindow.CreateSession_Click</c>.</summary>
+    /// A keys its session rows on - see <c>MainWindow.CreateSession_Click</c>. For a <see cref="TabKind.File"/>
+    /// tab, this is the file's full path instead (see <see cref="ForFile"/>).</summary>
     public string TabId { get; }
 
     /// <summary>First 8 characters of the tabId, as a fallback label / a stable short identifier.</summary>
@@ -55,8 +181,12 @@ public sealed partial class TabViewModel : ObservableObject
     public string StatusSuffix => HasEnded ? (ExitCode is { } code ? $"(exited {code})" : "(ended)") : string.Empty;
 
     /// <summary>Accessible description of the whole tab, for <c>AutomationProperties.Name</c>.</summary>
-    public string AutomationDescription =>
-        HasEnded ? $"Session tab: {Title}. Ended {StatusSuffix}." : $"Session tab: {Title}. Running.";
+    public string AutomationDescription => Kind switch
+    {
+        TabKind.File => $"File tab: {Title}. Read-only.",
+        TabKind.GitChange => $"Git change tab: {Title}. Read-only.",
+        _ => HasEnded ? $"Session tab: {Title}. Ended {StatusSuffix}." : $"Session tab: {Title}. Running.",
+    };
 
     partial void OnHasEndedChanged(bool value)
     {
@@ -189,6 +319,21 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
     /// </summary>
     public Func<Task>? DetachTerminalAsync { get; set; }
 
+    /// <summary>
+    /// Panel D's file-viewer show hook: renders the selected <see cref="TabKind.File"/>/
+    /// <see cref="TabKind.GitChange"/> tab's content read-only and swaps panel D over to it, set
+    /// alongside <see cref="AttachTerminalAsync"/> by the same window. Left null in tests and the
+    /// pure-scaffolding construction path, same as <see cref="AttachTerminalAsync"/>.
+    /// </summary>
+    public Func<TabViewModel, Task>? ShowFileAsync { get; set; }
+
+    /// <summary>
+    /// Panel D's file-viewer hide hook: swaps panel D back to the terminal - called before attaching a
+    /// selected <see cref="TabKind.Session"/> tab, so a file tab's read-only view never lingers on top of
+    /// the terminal it is about to reattach.
+    /// </summary>
+    public Action? HideFileViewer { get; set; }
+
     /// <summary>Awaitable form of the most recent attach, for the smoke-test/verification paths that need
     /// to know when panel D has finished reattaching. Null before the first selection.</summary>
     public Task? LastAttach { get; private set; }
@@ -209,11 +354,12 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
     {
         OnPropertyChanged(nameof(SelectedTabId));
 
-        // The single write path for the whole app.
-        _selection.SetFocused(value?.TabId);
-
         if (value is null)
         {
+            // The single write path for the whole app.
+            _selection.SetFocused(null);
+            HideFileViewer?.Invoke();
+
             if (DetachTerminalAsync is not null)
             {
                 LastAttach = DetachSafelyAsync();
@@ -221,6 +367,20 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
 
             return;
         }
+
+        if (value.Kind != TabKind.Session)
+        {
+            // Deliberately does NOT call _selection.SetFocused: neither a File nor a GitChange tab
+            // has a session behind it, and TabId here is a filesystem path, not a session id -
+            // broadcasting it would corrupt every other panel's resolution (files/git/agent graph,
+            // panel A's highlight), which all key off FocusedSessionId. Whatever session was last
+            // focused stays focused.
+            LastAttach = ShowFileSafelyAsync(value);
+            return;
+        }
+
+        _selection.SetFocused(value.TabId);
+        HideFileViewer?.Invoke();
 
         if (AttachTerminalAsync is null)
         {
@@ -247,6 +407,52 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
         }
 
         var tab = new TabViewModel(tabId, title ?? string.Empty);
+        Tabs.Add(tab);
+        OnPropertyChanged(nameof(IsEmpty));
+        SelectedTab = tab;
+        return tab;
+    }
+
+    /// <summary>
+    /// Opens (or, if already open, selects) a read-only tab for a file - panel B's FILES tree
+    /// double-click gesture (see <c>MainWindow.FilesTreeViewItem_MouseDoubleClick</c>). Idempotent for a
+    /// path that already has a tab, exactly like <see cref="AddTab"/> is for a tabId - re-opening the
+    /// same file selects its existing tab instead of duplicating it.
+    /// </summary>
+    public TabViewModel AddFileTab(string filePath) =>
+        AddOrSelectReadOnlyTab(filePath, () => TabViewModel.ForFile(filePath));
+
+    /// <summary>
+    /// Opens (or, if already open, selects) a read-only tab for a new/removed file from panel B's GIT
+    /// section - see <c>MainWindow.GitChangeRow_MouseLeftButtonDown</c>. Keyed on
+    /// <paramref name="filePath"/>, the same tabId space <see cref="AddFileTab"/> uses: opening the
+    /// same path from either entry point resolves to one tab, not two.
+    /// </summary>
+    public TabViewModel AddGitChangeTab(string filePath, string title, string gitRepoRootPath, string gitRelativePath) =>
+        AddOrSelectReadOnlyTab(filePath, () => TabViewModel.ForGitChange(filePath, title, gitRepoRootPath, gitRelativePath));
+
+    /// <summary>
+    /// Opens (or, if already open, selects) a side-by-side read-only diff tab for a Modified file from
+    /// panel B's GIT section - see <c>MainWindow.GitChangeRow_MouseLeftButtonDown</c>. Keyed on
+    /// <paramref name="filePath"/>, the same tabId space <see cref="AddFileTab"/>/
+    /// <see cref="AddGitChangeTab"/> use.
+    /// </summary>
+    public TabViewModel AddGitDiffTab(
+        string filePath, string title, string gitRepoRootPath, string gitRelativePath, GitDiffSide oldSide, GitDiffSide newSide) =>
+        AddOrSelectReadOnlyTab(filePath, () => TabViewModel.ForGitDiff(filePath, title, gitRepoRootPath, gitRelativePath, oldSide, newSide));
+
+    private TabViewModel AddOrSelectReadOnlyTab(string tabId, Func<TabViewModel> factory)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(tabId);
+
+        var existing = Find(tabId);
+        if (existing is not null)
+        {
+            SelectedTab = existing;
+            return existing;
+        }
+
+        var tab = factory();
         Tabs.Add(tab);
         OnPropertyChanged(nameof(IsEmpty));
         SelectedTab = tab;
@@ -285,6 +491,15 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
         }
 
         RemoveTab(tab);
+
+        // A File/GitChange tab has no PtySession/registry registration behind it at all - nothing
+        // for the host to close, and panel A's refresh (TabClosed) has no row keyed on a filesystem
+        // path anyway.
+        if (tab.Kind != TabKind.Session)
+        {
+            return;
+        }
+
         TabClosed?.Invoke(this, tab.TabId);
 
         // CloseAsync never throws and reports failures as data (PtyCloseResult); there is nothing
@@ -320,7 +535,7 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
     [RelayCommand]
     public async Task StopTabAsync(TabViewModel? tab)
     {
-        if (tab is null || tab.HasEnded)
+        if (tab is null || tab.HasEnded || tab.Kind != TabKind.Session)
         {
             return;
         }
@@ -351,7 +566,10 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
             Tabs.Add(tab);
         }
 
-        foreach (var tab in Tabs.Where(t => !t.HasEnded && !live.Contains(t.TabId)).ToArray())
+        // File tabs are never in the registry's own live set (they have no session behind them at
+        // all - see TabKind.File) - without this guard, every open file tab would be marked "ended"
+        // on the very next reconciliation.
+        foreach (var tab in Tabs.Where(t => t.Kind == TabKind.Session && !t.HasEnded && !live.Contains(t.TabId)).ToArray())
         {
             MarkEnded(tab, null);
         }
@@ -388,7 +606,7 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
         }
 
         var tab = SelectedTab;
-        if (tab is null || tab.HasEnded)
+        if (tab is null || tab.HasEnded || tab.Kind != TabKind.Session)
         {
             return;
         }
@@ -434,6 +652,24 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
             // Same posture as P2-T5b's original attach call site: a failed attach (WebView2 not ready,
             // the route gone) must not corrupt selection state or crash the UI thread. The session stays
             // registered and the user can reselect the tab to retry.
+        }
+    }
+
+    private async Task ShowFileSafelyAsync(TabViewModel tab)
+    {
+        try
+        {
+            var show = ShowFileAsync;
+            if (show is not null)
+            {
+                await show(tab).ConfigureAwait(true);
+            }
+        }
+        catch
+        {
+            // Same posture as AttachSafelyAsync/DetachSafelyAsync: a failed read/render (file deleted,
+            // permission denied) must not corrupt selection state or crash the UI thread. The tab stays
+            // open and the user can reselect it to retry.
         }
     }
 

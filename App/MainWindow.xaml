@@ -40,7 +40,15 @@
             AutomationDescription/ToolTip both stand on their own without the color.
         -->
         <DataTemplate x:Key="GitChangeRowTemplate">
-            <Grid Margin="8,3" ToolTip="{Binding Path}" AutomationProperties.Name="{Binding AutomationDescription}">
+            <!--
+                Double-click opens a read-only tab for a new/removed entry (see
+                GitPanelEntryViewModel.IsOpenable and MainWindow.GitChangeRow_MouseLeftButtonDown,
+                which no-ops for a non-openable status, e.g. Modified/Renamed). This Grid is not a
+                Control, so it has no MouseDoubleClick routed event - ClickCount is checked manually
+                instead.
+            -->
+            <Grid Margin="8,3" ToolTip="{Binding Path}" AutomationProperties.Name="{Binding AutomationDescription}"
+                  MouseLeftButtonDown="GitChangeRow_MouseLeftButtonDown">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />
@@ -108,6 +116,15 @@
         <SolidColorBrush x:Key="RunningBrush" Color="#FF66BB6A" />
         <SolidColorBrush x:Key="IdleFocusedBrush" Color="#FF9FA8DA" />
         <SolidColorBrush x:Key="IdleBrush" Color="#FF9E9E9E" />
+
+        <!--
+            "Waiting for feedback" row highlight (RootsPanelNodeViewModel.IsWaiting) - amber, distinct
+            from every IsRunning x IsFocused combination above, so a session that just finished its
+            turn stands out regardless of its running/focused state. Cleared the instant the user
+            focuses that row's tab (RootsPanelViewModel.ApplyFocus), not on a timer.
+        -->
+        <SolidColorBrush x:Key="WaitingRowBackgroundBrush" Color="#33FFB300" />
+        <SolidColorBrush x:Key="WaitingRowBorderBrush" Color="#FFFFB300" />
 
         <!--
             Never color-only (hard accessibility requirement): FontWeight carries IsFocused
@@ -278,19 +295,24 @@
                                        Text="{Binding StatusText}"
                                        Visibility="{Binding NoSnapshot, Converter={StaticResource BoolToVis}}" />
                             <StackPanel Visibility="{Binding HasSnapshot, Converter={StaticResource BoolToVis}}">
-                                <TextBlock Margin="0,0,0,0" Style="{StaticResource SecondaryTextStyle}"
-                                           Foreground="{StaticResource TealBrush}">
-                                    <Run Text="{Binding RootCount, Mode=OneWay}" Foreground="{StaticResource TextPrimaryBrush}" FontWeight="Bold" /><Run Text=" root(s), " />
-                                    <Run Text="{Binding SessionCount, Mode=OneWay}" Foreground="{StaticResource TextPrimaryBrush}" FontWeight="Bold" /><Run Text=" session(s)" />
-                                </TextBlock>
-                                <TextBlock Margin="0,2,0,0" Style="{StaticResource SecondaryTextStyle}"
-                                           Foreground="{StaticResource TealBrush}">
-                                    <Run Text="{Binding LiveSessionCount, Mode=OneWay}" Foreground="{StaticResource TextPrimaryBrush}" FontWeight="Bold" /><Run Text=" running — Refreshed at " />
-                                    <Run Text="{Binding RefreshedAtValueText}" Foreground="{StaticResource TextPrimaryBrush}" FontWeight="Bold" />
-                                </TextBlock>
-                                <TextBlock Text="Sessions running before Accel startup are shown as historical"
-                                           TextWrapping="Wrap" Margin="0,4,0,0"
-                                           Style="{StaticResource SecondaryTextStyle}" Foreground="{StaticResource TealBrush}" />
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Text="&#xE838;" FontFamily="Segoe MDL2 Assets" FontSize="12"
+                                               VerticalAlignment="Center" Foreground="{StaticResource TealBrush}" />
+                                    <TextBlock Margin="4,0,0,0" Style="{StaticResource SecondaryTextStyle}"
+                                               Foreground="{StaticResource TealBrush}">
+                                        <Run Text="{Binding RootCount, Mode=OneWay}" Foreground="{StaticResource TextPrimaryBrush}" FontWeight="Bold" /><Run Text=" root(s), " />
+                                        <Run Text="{Binding SessionCount, Mode=OneWay}" Foreground="{StaticResource TextPrimaryBrush}" FontWeight="Bold" /><Run Text=" session(s)" />
+                                    </TextBlock>
+                                </StackPanel>
+                                <StackPanel Orientation="Horizontal" Margin="0,2,0,0">
+                                    <TextBlock Text="&#xE72C;" FontFamily="Segoe MDL2 Assets" FontSize="12"
+                                               VerticalAlignment="Center" Foreground="{StaticResource TealBrush}" />
+                                    <TextBlock Margin="4,0,0,0" Style="{StaticResource SecondaryTextStyle}"
+                                               Foreground="{StaticResource TealBrush}">
+                                        <Run Text="{Binding LiveSessionCount, Mode=OneWay}" Foreground="{StaticResource TextPrimaryBrush}" FontWeight="Bold" /><Run Text=" running — Refreshed at " />
+                                        <Run Text="{Binding RefreshedAtValueText}" Foreground="{StaticResource TextPrimaryBrush}" FontWeight="Bold" />
+                                    </TextBlock>
+                                </StackPanel>
                             </StackPanel>
                         </StackPanel>
                     </Border>
@@ -565,6 +587,18 @@
                                         </ContextMenu>
                                     </Setter.Value>
                                 </Setter>
+                                <Style.Triggers>
+                                    <!--
+                                        "Waiting for feedback" (RootsPanelNodeViewModel.IsWaiting) - see
+                                        WaitingRowBackgroundBrush/WaitingRowBorderBrush's doc comment above.
+                                        Only ever true for a Session row.
+                                    -->
+                                    <DataTrigger Binding="{Binding IsWaiting}" Value="True">
+                                        <Setter Property="Background" Value="{StaticResource WaitingRowBackgroundBrush}" />
+                                        <Setter Property="BorderBrush" Value="{StaticResource WaitingRowBorderBrush}" />
+                                        <Setter Property="BorderThickness" Value="1" />
+                                    </DataTrigger>
+                                </Style.Triggers>
                             </Style>
                         </TreeView.ItemContainerStyle>
                         <TreeView.ItemTemplate>
@@ -790,6 +824,30 @@
                                 <ListBox.ItemTemplate>
                                     <DataTemplate>
                                         <StackPanel Orientation="Horizontal">
+                                            <!--
+                                                File tabs (panel B's FILES tree double-click - see
+                                                MainWindow.FilesTreeViewItem_MouseDoubleClick) get a
+                                                document glyph a session tab never shows, so the two
+                                                kinds read as visually distinct at a glance without
+                                                relying on colour alone (Title's own foreground below
+                                                also differs).
+                                            -->
+                                            <TextBlock Text="&#xE7C3;" FontFamily="Segoe MDL2 Assets" FontSize="11"
+                                                       Margin="0,0,6,0" VerticalAlignment="Center"
+                                                       Foreground="{StaticResource TealBrush}"
+                                                       Visibility="{Binding IsFileTab, Converter={StaticResource BoolToVis}}" />
+                                            <!--
+                                                Git-change tabs (panel B's GIT section double-click -
+                                                see MainWindow.GitChangeRow_MouseLeftButtonDown) get
+                                                their own glyph/colour (DangerBrush, matching the 'D'
+                                                status badge's own colour in GitChangeRowTemplate)
+                                                rather than reusing IsFileTab's teal - the two entry
+                                                points must never look the same.
+                                            -->
+                                            <TextBlock Text="&#xE7B8;" FontFamily="Segoe MDL2 Assets" FontSize="11"
+                                                       Margin="0,0,6,0" VerticalAlignment="Center"
+                                                       Foreground="{StaticResource DangerBrush}"
+                                                       Visibility="{Binding IsGitChangeTab, Converter={StaticResource BoolToVis}}" />
                                             <TextBlock Text="{Binding Title}" MaxWidth="180"
                                                        TextTrimming="CharacterEllipsis" VerticalAlignment="Center">
                                                 <TextBlock.Style>
@@ -801,6 +859,15 @@
                                                                 <Setter Property="Foreground" Value="{StaticResource TextMutedBrush}" />
                                                                 <Setter Property="FontStyle" Value="Italic" />
                                                             </DataTrigger>
+                                                            <!-- A file/git-change tab's own "different look" - the leading
+                                                                 glyph above already carries the same distinction as text/
+                                                                 AutomationDescription. -->
+                                                            <DataTrigger Binding="{Binding IsFileTab}" Value="True">
+                                                                <Setter Property="Foreground" Value="{StaticResource TealBrush}" />
+                                                            </DataTrigger>
+                                                            <DataTrigger Binding="{Binding IsGitChangeTab}" Value="True">
+                                                                <Setter Property="Foreground" Value="{StaticResource DangerBrush}" />
+                                                            </DataTrigger>
                                                         </Style.Triggers>
                                                     </Style>
                                                 </TextBlock.Style>
@@ -809,14 +876,16 @@
                                                        FontSize="{StaticResource FontSizeCaption}"
                                                        Foreground="{StaticResource TextMutedBrush}" VerticalAlignment="Center" />
                                             <!--
-                                                Close goes through TabsViewModel.CloseTabCommand ->
-                                                PtyRegistry.CloseAsync. Nothing in the ViewModel layer
-                                                can dispose a PtySession (it never holds one).
+                                                Close goes through TabsViewModel.CloseTabCommand, which
+                                                branches on Kind: a session tab closes through
+                                                PtyRegistry.CloseAsync (nothing in the ViewModel layer
+                                                can dispose a PtySession - it never holds one), a file
+                                                tab is just removed (it never had one to begin with).
                                             -->
                                             <Button Content="✕" Margin="10,0,0,0"
                                                     Style="{StaticResource TabCloseButtonStyle}"
-                                                    ToolTip="Close this session"
-                                                    AutomationProperties.Name="Close session tab"
+                                                    ToolTip="Close this tab"
+                                                    AutomationProperties.Name="Close tab"
                                                     Command="{Binding DataContext.CloseTabCommand, RelativeSource={RelativeSource AncestorType=ListBox}}"
                                                     CommandParameter="{Binding}" />
                                         </StackPanel>
@@ -835,7 +904,83 @@
                         actually loaded.
                     -->
                     <Border x:Name="PanelD" Grid.Row="1" Background="{StaticResource BackgroundBaseBrush}">
-                        <controls:TerminalView x:Name="Terminal" />
+                        <Grid>
+                            <controls:TerminalView x:Name="Terminal" />
+
+                            <!--
+                                Read-only file viewer (panel B's FILES tree double-click gesture - see
+                                MainWindow.FilesTreeViewItem_MouseDoubleClick / TabsViewModel.ShowFileAsync).
+                                Declared after Terminal so it paints on top, fully covering it, while
+                                Collapsed; toggled Visible instead of swapping Terminal out, since the
+                                underlying pty stays attached (just hidden) rather than being torn down
+                                and reattached on every flip between a file tab and a session tab.
+                            -->
+                            <Border x:Name="FileViewerHost" Background="{StaticResource BackgroundBaseBrush}" Visibility="Collapsed">
+                                <!--
+                                    RichTextBox (not a plain TextBox) so MainWindow.ShowFileTabAsync can
+                                    colour tokens per SyntaxHighlighter.Tokenize - a TextBox has no way
+                                    to colour part of its own text. Its own scrollbars are used directly
+                                    (no wrapping ScrollViewer) since RichTextBox already provides both.
+                                -->
+                                <RichTextBox x:Name="FileViewerText" IsReadOnly="True" IsReadOnlyCaretVisible="True"
+                                             VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
+                                             FontFamily="Consolas" FontSize="{StaticResource FontSizeBody}"
+                                             Padding="16" Background="Transparent" BorderThickness="0"
+                                             Foreground="{StaticResource TextPrimaryBrush}"
+                                             AutomationProperties.Name="File content (read-only)" />
+                            </Border>
+
+                            <!--
+                                Side-by-side read-only diff viewer for a Modified git-change tab (panel
+                                B's GIT section double-click - see MainWindow.GitChangeRow_MouseLeftButtonDown
+                                / TabsViewModel.ShowGitDiffTabAsync). Same overlay convention as
+                                FileViewerHost above (declared after it so it paints on top while
+                                Visible; the two are mutually exclusive - MainWindow.ShowFileTabAsync/
+                                ShowGitDiffTabAsync toggle one and collapse the other).
+                            -->
+                            <Border x:Name="DiffViewerHost" Background="{StaticResource BackgroundBaseBrush}" Visibility="Collapsed">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="4" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="*" />
+                                    </Grid.RowDefinitions>
+
+                                    <Border Grid.Row="0" Grid.Column="0" Background="{StaticResource SurfaceElevatedBrush}"
+                                            BorderBrush="{StaticResource StrokeSubtleBrush}" BorderThickness="0,0,0,1" Padding="16,8">
+                                        <TextBlock Text="Before" Style="{StaticResource SecondaryTextStyle}" FontWeight="Bold" />
+                                    </Border>
+                                    <Border Grid.Row="0" Grid.Column="2" Background="{StaticResource SurfaceElevatedBrush}"
+                                            BorderBrush="{StaticResource StrokeSubtleBrush}" BorderThickness="0,0,0,1" Padding="16,8">
+                                        <TextBlock Text="After" Style="{StaticResource SecondaryTextStyle}" FontWeight="Bold" />
+                                    </Border>
+
+                                    <RichTextBox x:Name="DiffOldText" Grid.Row="1" Grid.Column="0"
+                                                 IsReadOnly="True" IsReadOnlyCaretVisible="True"
+                                                 VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
+                                                 FontFamily="Consolas" FontSize="{StaticResource FontSizeBody}"
+                                                 Padding="16" Background="Transparent" BorderThickness="0"
+                                                 Foreground="{StaticResource TextPrimaryBrush}"
+                                                 AutomationProperties.Name="Before (read-only)" />
+
+                                    <GridSplitter Grid.Row="1" Grid.Column="1" Width="4" HorizontalAlignment="Stretch"
+                                                  VerticalAlignment="Stretch" Background="{StaticResource SplitterBrush}"
+                                                  ResizeBehavior="PreviousAndNext" />
+
+                                    <RichTextBox x:Name="DiffNewText" Grid.Row="1" Grid.Column="2"
+                                                 IsReadOnly="True" IsReadOnlyCaretVisible="True"
+                                                 VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
+                                                 FontFamily="Consolas" FontSize="{StaticResource FontSizeBody}"
+                                                 Padding="16" Background="Transparent" BorderThickness="0"
+                                                 Foreground="{StaticResource TextPrimaryBrush}"
+                                                 AutomationProperties.Name="After (read-only)" />
+                                </Grid>
+                            </Border>
+                        </Grid>
                     </Border>
                 </Grid>
 
@@ -909,6 +1054,15 @@
                                     <Setter Property="HorizontalContentAlignment" Value="Stretch" />
                                     <Setter Property="AutomationProperties.Name" Value="{Binding AutomationDescription}" />
                                     <Setter Property="ToolTip" Value="{Binding Key}" />
+                                    <!--
+                                        Double-clicking a file row opens (or selects) its read-only tab
+                                        in panel C/D - see MainWindow.FilesTreeViewItem_MouseDoubleClick,
+                                        which guards on IsDirectory so a folder row's double-click still
+                                        only expands/collapses it (this event bubbles through every
+                                        ancestor TreeViewItem, same tolerant pattern as panel A's
+                                        SessionRow_MouseDoubleClick).
+                                    -->
+                                    <EventSetter Event="MouseDoubleClick" Handler="FilesTreeViewItem_MouseDoubleClick" />
                                 </Style>
                             </TreeView.ItemContainerStyle>
                             <TreeView.ItemTemplate>
