@@ -56,15 +56,31 @@
       fontFamily: "Cascadia Mono, Consolas, monospace",
 
       // Reported bug: ordinary (non-bold, non-SGR-1) terminal output rendered visibly bold
-      // throughout the whole session, not just the text `claude`/other CLIs actually mark bold via
-      // SGR 1. Root cause: xterm.js's fontWeight/fontWeightBold options accept the CSS aliases
-      // "normal"/"bold" as well as numeric weights, but were left unset here - and Cascadia Mono is
-      // a variable font, whose "normal" alias does not reliably resolve to its Regular (400)
-      // instance on every Chromium/WebView2 build the way an explicit numeric weight does. Setting
-      // both explicitly as numbers pins ordinary text to Regular (400) and only a real SGR-1 escape
-      // to Bold (700), instead of leaving the "normal" case ambiguous.
-      fontWeight: "400",
-      fontWeightBold: "700",
+      // throughout the whole session. It is NOT an attribute/CSS-plumbing bug, and it is NOT the
+      // CLI marking everything bold - both were ruled out by measurement against a live instance:
+      //   - xterm 5.5.0's DOM renderer's injected style block was read back off the live page and
+      //     was already correct ("span:not(.xterm-bold) { font-weight: 400 }" /
+      //     "span.xterm-bold { font-weight: 700 }"), and getComputedStyle on real rendered rows
+      //     confirmed ordinary output really did compute to 400 - so pinning fontWeight to 400
+      //     (which is exactly what xterm's own "normal" default already resolves to) was a no-op,
+      //     which is why it produced no visible change at all;
+      //   - a real `claude` child captured through a real ConPTY emitted SGR 1 for only ~6% of its
+      //     visible glyphs, so "the CLI bolds everything" was wrong too - the plain, attribute-free
+      //     output of even `cmd.exe` looked equally heavy.
+      // The actual cause is the pinned FONT, not the weight option: measured on a live page by
+      // rasterizing the same string to a canvas per weight and summing alpha coverage ("ink"),
+      // Cascadia Mono's Regular (400) instance renders HEAVIER in Chromium/WebView2 than Consolas
+      // *Bold* does at the same 14px (ink 196803 vs 194596), and ~21% heavier than Consolas Regular
+      // (162136). So weight-400 output is legitimately bold-looking; nothing about the bold
+      // attribute path was ever broken. Cascadia Mono is a variable font whose wght axis Chromium
+      // does honour here (measured ink rises monotonically 200 -> 700), so the fix is to render
+      // ordinary output at its genuine Light instance, 300 (ink 155123 - i.e. the same ink density
+      // as Consolas Regular, the conventional Windows console look), and to keep SGR-1 bold clearly
+      // heavier at 600 (ink 225080, a 1.45x jump). Cell metrics are unaffected: the measured advance
+      // width is identical (237.89px for the same probe string) at every weight on this axis, so
+      // snapCellWidthToIntegerPixels() below still lands on the same integer cell.
+      fontWeight: "300",
+      fontWeightBold: "600",
 
       // Matches App/Theme.xaml's dark palette exactly - base black #0A0A0A (BackgroundBaseColor),
       // near-white #F2F2F2 (TextPrimaryColor), pastel-orange caret #F0A868 (AccentColor) and a

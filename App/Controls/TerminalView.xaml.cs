@@ -136,6 +136,18 @@ public partial class TerminalView : UserControl, IDisposable
             assetsRoot,
             CoreWebView2HostResourceAccessKind.DenyCors);
 
+        // Reported bug: an edit to terminal.js (or index.html/xterm.css) did not take effect after a
+        // rebuild and app relaunch. Root cause: WebView2UserDataFolder() is a PERSISTENT profile
+        // (deliberately, so the clipboard permission grant above survives restarts) - not a fresh
+        // temp folder per run - and SetVirtualHostNameToFolderMapping serves these local files with a
+        // real Last-Modified header, which is enough for Chromium's HTTP disk cache to keep serving a
+        // stale copy of index.html/terminal.js/xterm.css across app restarts, indefinitely, even after
+        // the on-disk file changes. A manual cache-busting query string on one script tag (index.html's
+        // own history) only ever fixes that one file for one edit; wiping the disk cache here, once
+        // per launch, fixes every file in this mapping for every future edit instead. Scoped to only
+        // this profile/user-data-folder's cache (Accel's own vendored page), never a stray path.
+        await Browser.CoreWebView2.Profile.ClearBrowsingDataAsync(CoreWebView2BrowsingDataKinds.DiskCache);
+
         // Navigate() only starts the navigation - it returns long before index.html's own
         // <script> has run, let alone set document.title. Wait for NavigationCompleted so
         // Initialization (and thus any caller's verification query of document.title) only
