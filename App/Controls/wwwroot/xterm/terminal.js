@@ -55,6 +55,17 @@
       // browser-default font.
       fontFamily: "Cascadia Mono, Consolas, monospace",
 
+      // Reported bug: ordinary (non-bold, non-SGR-1) terminal output rendered visibly bold
+      // throughout the whole session, not just the text `claude`/other CLIs actually mark bold via
+      // SGR 1. Root cause: xterm.js's fontWeight/fontWeightBold options accept the CSS aliases
+      // "normal"/"bold" as well as numeric weights, but were left unset here - and Cascadia Mono is
+      // a variable font, whose "normal" alias does not reliably resolve to its Regular (400)
+      // instance on every Chromium/WebView2 build the way an explicit numeric weight does. Setting
+      // both explicitly as numbers pins ordinary text to Regular (400) and only a real SGR-1 escape
+      // to Bold (700), instead of leaving the "normal" case ambiguous.
+      fontWeight: "400",
+      fontWeightBold: "700",
+
       // Matches App/Theme.xaml's dark palette exactly - base black #0A0A0A (BackgroundBaseColor),
       // near-white #F2F2F2 (TextPrimaryColor), pastel-orange caret #F0A868 (AccentColor) and a
       // 25%-alpha teal-blue selection #6EC1D6 (TealTintStrongColor) - so the terminal is the same

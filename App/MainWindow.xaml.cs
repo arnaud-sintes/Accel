@@ -213,11 +213,7 @@ public partial class MainWindow : Window
             // tab - only FileViewerHost's/DiffViewerHost's Visibility toggles (see PanelD's own XAML
             // comment for why).
             tabs.ShowFileAsync = ShowFileTabAsync;
-            tabs.HideFileViewer = () =>
-            {
-                FileViewerHost.Visibility = Visibility.Collapsed;
-                DiffViewerHost.Visibility = Visibility.Collapsed;
-            };
+            tabs.HideFileViewer = ShowTerminalPane;
         }
 
         if (filesPanel is not null)
@@ -1289,8 +1285,7 @@ public partial class MainWindow : Window
         }
 
         FileViewerText.Document = BuildHighlightedDocument(content, language);
-        DiffViewerHost.Visibility = Visibility.Collapsed;
-        FileViewerHost.Visibility = Visibility.Visible;
+        ShowFileViewerPane();
     }
 
     /// <summary>
@@ -1327,6 +1322,43 @@ public partial class MainWindow : Window
         DiffOldText.Document = BuildHighlightedDocument(oldContent, language);
         DiffNewText.Document = BuildHighlightedDocument(newContent, language);
 
+        ShowDiffViewerPane();
+    }
+
+    /// <summary>
+    /// Panel D has exactly three mutually-exclusive "panes": the terminal, the single-pane file
+    /// viewer, and the side-by-side diff viewer - these three helpers are the only place any of them
+    /// is shown/hidden, so exactly one is ever visible at a time.
+    ///
+    /// <para><b>Why <see cref="Terminal"/> itself must be collapsed, not just covered.</b>
+    /// <c>WebView2</c> (like any HWND-backed/"airspace" control hosted in WPF) is composited by the OS
+    /// above the WPF render surface, not through WPF's own visual z-order - a WPF sibling declared
+    /// after it in XAML (<see cref="FileViewerHost"/>/<see cref="DiffViewerHost"/>) does not actually
+    /// paint over it just because it comes later in the tree or has <c>Visibility="Visible"</c> while
+    /// the WebView2 stays visible too. Confirmed as the root cause of a reported bug: opening a FILES/
+    /// GIT read-only tab created the tab correctly, but panel D kept showing whatever the terminal was
+    /// last displaying (or a blank one) - collapsing <see cref="Terminal"/> itself (not merely
+    /// overlaying it) is the only thing that actually hides a WebView2's native window.</para>
+    /// </summary>
+    private void ShowTerminalPane()
+    {
+        FileViewerHost.Visibility = Visibility.Collapsed;
+        DiffViewerHost.Visibility = Visibility.Collapsed;
+        Terminal.Visibility = Visibility.Visible;
+    }
+
+    /// <summary>See <see cref="ShowTerminalPane"/>'s remarks.</summary>
+    private void ShowFileViewerPane()
+    {
+        Terminal.Visibility = Visibility.Collapsed;
+        DiffViewerHost.Visibility = Visibility.Collapsed;
+        FileViewerHost.Visibility = Visibility.Visible;
+    }
+
+    /// <summary>See <see cref="ShowTerminalPane"/>'s remarks.</summary>
+    private void ShowDiffViewerPane()
+    {
+        Terminal.Visibility = Visibility.Collapsed;
         FileViewerHost.Visibility = Visibility.Collapsed;
         DiffViewerHost.Visibility = Visibility.Visible;
     }
