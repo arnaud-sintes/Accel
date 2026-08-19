@@ -740,6 +740,48 @@ public class PtySessionTests
         Assert.Contains("not found on PATH", exception.Message, StringComparison.Ordinal);
     }
 
+    // ---------------------------------------------------------------------------------------------
+    // CreateShellSpec: panel A's root-folder "Open terminal here" context menu item
+    // (MainWindow.OpenTerminalAtRoot_Click) - a plain, unmanaged shell rather than `claude`. No
+    // ClaudeCliLocator resolution seam here (cmd.exe is a stable in-box component, not something that
+    // self-updates or resolves to a shim) - comSpecOverride is the equivalent test seam instead.
+    // ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void CreateShellSpecUsesTheResolvedShellAsArgvZero_WithNoArguments()
+    {
+        var spec = PtySession.CreateShellSpec(workingDirectory: @"C:\work", comSpecOverride: @"C:\Windows\System32\cmd.exe");
+
+        Assert.Equal(@"C:\Windows\System32\cmd.exe", spec.ExecutablePath);
+        Assert.Equal(@"C:\work", spec.WorkingDirectory);
+        Assert.Empty(spec.Arguments);
+        Assert.Equal(@"C:\Windows\System32\cmd.exe", spec.BuildCommandLine());
+    }
+
+    [Fact]
+    public void CreateShellSpec_FallsBackToTheWindowsDefaultShell_WhenComSpecOverrideIsNotGiven()
+    {
+        // Production callers leave comSpecOverride null so the real ComSpec environment variable is
+        // read - this only pins down that SOME usable executable path comes out either way (the real
+        // environment variable on a Windows CI/dev box, or the hardcoded fallback if it were somehow
+        // unset), not which one, since that depends on the machine's own environment.
+        var spec = PtySession.CreateShellSpec(workingDirectory: @"C:\work");
+
+        Assert.False(string.IsNullOrWhiteSpace(spec.ExecutablePath));
+        Assert.EndsWith("cmd.exe", spec.ExecutablePath, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void CreateShellSpec_HasNoEnvironmentOverrides_UnlikeCreateClaudeSpec()
+    {
+        // A plain shell is not a Claude Code session at all, so none of CreateClaudeSpec's
+        // child-session-marker-stripping rationale applies - it inherits Accel's environment
+        // verbatim, exactly like opening any other terminal would.
+        var spec = PtySession.CreateShellSpec(comSpecOverride: @"C:\Windows\System32\cmd.exe");
+
+        Assert.Null(spec.EnvironmentOverrides);
+    }
+
     [Fact]
     public void SessionOptionsDefaultToAnEightyByTwentyFiveTerminalWithABoundedOutputChannel()
     {

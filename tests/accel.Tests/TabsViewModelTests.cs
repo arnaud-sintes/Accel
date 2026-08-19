@@ -573,4 +573,103 @@ public class TabsViewModelTests
         System.Reflection.MethodInfo method => method.ReturnType,
         _ => null,
     };
+
+    // ---------------------------------------------------------------------------------------------
+    // Panel C's per-kind tab icon (IconGlyph/IconColorHex) - pins down that all four kinds a tab can
+    // be (Session, File, single-pane GitChange, GitChange diff) get their own distinct glyph, and that
+    // none of them collide with each other.
+    // ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void IconGlyph_IsDistinctAcrossAllFiveTabKinds()
+    {
+        var session = new TabViewModel("tab-a", "a");
+        var shell = TabViewModel.ForShell("tab-b", "b");
+        var file = TabViewModel.ForFile(@"C:\project\file.cs");
+        var gitFile = TabViewModel.ForGitChange(@"C:\project\new.cs", "new.cs", @"C:\project", "new.cs");
+        var gitDiff = TabViewModel.ForGitDiff(
+            @"C:\project\changed.cs", "changed.cs", @"C:\project", "changed.cs", GitDiffSide.Index, GitDiffSide.WorkingTree);
+
+        var glyphs = new[] { session.IconGlyph, shell.IconGlyph, file.IconGlyph, gitFile.IconGlyph, gitDiff.IconGlyph };
+
+        Assert.All(glyphs, g => Assert.False(string.IsNullOrEmpty(g)));
+        Assert.Equal(glyphs.Length, glyphs.Distinct().Count());
+    }
+
+    [Fact]
+    public void IconColorHex_SharesTheDangerColorAcrossBothGitChangeKinds_ButDiffersFromSessionShellAndFile()
+    {
+        var session = new TabViewModel("tab-a", "a");
+        var shell = TabViewModel.ForShell("tab-b", "b");
+        var file = TabViewModel.ForFile(@"C:\project\file.cs");
+        var gitFile = TabViewModel.ForGitChange(@"C:\project\new.cs", "new.cs", @"C:\project", "new.cs");
+        var gitDiff = TabViewModel.ForGitDiff(
+            @"C:\project\changed.cs", "changed.cs", @"C:\project", "changed.cs", GitDiffSide.Index, GitDiffSide.WorkingTree);
+
+        Assert.Equal(gitFile.IconColorHex, gitDiff.IconColorHex);
+        Assert.NotEqual(session.IconColorHex, shell.IconColorHex);
+        Assert.NotEqual(session.IconColorHex, file.IconColorHex);
+        Assert.NotEqual(session.IconColorHex, gitFile.IconColorHex);
+        Assert.NotEqual(shell.IconColorHex, file.IconColorHex);
+        Assert.NotEqual(shell.IconColorHex, gitFile.IconColorHex);
+        Assert.NotEqual(file.IconColorHex, gitFile.IconColorHex);
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Shell tabs (TabKind.Shell) - panel A's root-folder "Open terminal here" context menu item.
+    // Mechanically identical to a Session tab wherever HasPtySession is the deciding factor: attach/
+    // detach the terminal, close through the host, and reconcile against SyncFromHost.
+    // ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void AddShellTab_AddsAndSelects_AndBehavesLikeASessionTabForAttach()
+    {
+        var (tabs, _, selection, _) = Build();
+
+        tabs.AddShellTab("shell-a", "Terminal - project");
+
+        var tab = Assert.Single(tabs.Tabs);
+        Assert.Equal(TabKind.Shell, tab.Kind);
+        Assert.True(tab.HasPtySession);
+        Assert.Equal("shell-a", selection.FocusedSessionId);
+        Assert.Same(tab, tabs.SelectedTab);
+    }
+
+    [Fact]
+    public void AddShellTab_ReopeningTheSameTabId_SelectsRatherThanDuplicates()
+    {
+        var (tabs, _, _, _) = Build();
+        tabs.AddShellTab("shell-a");
+        tabs.AddTab("session-a");
+
+        var reopened = tabs.AddShellTab("shell-a");
+
+        Assert.Equal(2, tabs.Tabs.Count);
+        Assert.Same(reopened, tabs.SelectedTab);
+    }
+
+    [Fact]
+    public async Task CloseTabAsync_OnAShellTab_RoutesThroughTheHost_LikeASessionTab()
+    {
+        var (tabs, host, _, _) = Build();
+        tabs.AddShellTab("shell-a");
+
+        await tabs.CloseTabAsync("shell-a");
+
+        Assert.Contains("shell-a", host.Closed);
+        Assert.Empty(tabs.Tabs);
+    }
+
+    [Fact]
+    public void SyncFromHost_ReconcilesAShellTab_ExactlyLikeASessionTab()
+    {
+        var (tabs, host, _, _) = Build();
+        tabs.AddShellTab("shell-a");
+        host.Add("shell-a");
+
+        host.RaiseChildExitedSilently("shell-a");
+        tabs.SyncFromHost();
+
+        Assert.True(tabs.Tabs.Single(t => t.TabId == "shell-a").HasEnded);
+    }
 }

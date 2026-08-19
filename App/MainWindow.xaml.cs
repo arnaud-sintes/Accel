@@ -831,6 +831,73 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
+    /// Panel A's root-folder "Open terminal here" context menu item (right-click a folder in panel A) -
+    /// see MainWindow.xaml's comment on that menu item, right beside "Create session…". <c>Tag</c>
+    /// carries the row's <see cref="RootsPanelNodeViewModel"/> (same convention as
+    /// <see cref="CreateSessionAtRoot_Click"/>); anything other than a root row is a silent no-op. Opens
+    /// a plain, unmanaged shell rooted at the right-clicked folder - entirely unrelated to Claude Code
+    /// (no <c>--session-id</c>, no transcript, never a panel A row of its own).
+    /// </summary>
+    private void OpenTerminalAtRoot_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as MenuItem)?.Tag is not RootsPanelNodeViewModel node || node.Kind != RootsPanelNodeKind.Root)
+        {
+            return;
+        }
+
+        CreateShellSessionCore(node.Key);
+    }
+
+    /// <summary>
+    /// The <see cref="TabKind.Shell"/> counterpart to <see cref="CreateSessionCore"/>: launches a plain
+    /// shell (<see cref="PtySession.CreateShellSpec"/>) at <paramref name="workingDirectory"/> and gives
+    /// it a tab. No dialog first - unlike "Create session", there is nothing to configure (no
+    /// <c>--session-id</c>, no display name, no extra CLI args) - and no `claude`-specific launch-failure
+    /// surfaces apply (<see cref="Accel.Orchestration.ClaudeCliLocator"/> resolution, the shim guard,
+    /// etc. are all about `claude`, not <c>cmd.exe</c>). A launch failure (vanishingly unlikely for an
+    /// in-box shell, but not impossible - a locked-down machine, a corrupted <c>ComSpec</c>) shows a
+    /// message dialog rather than crashing the UI thread; everything past that point mirrors
+    /// <see cref="CreateSessionCore"/>'s registration/tab steps exactly.
+    /// </summary>
+    private void CreateShellSessionCore(string workingDirectory)
+    {
+        PtySession session;
+        try
+        {
+            session = PtySession.Start(PtySession.CreateShellSpec(workingDirectory));
+        }
+        catch (PtySessionLaunchException ex)
+        {
+            AccelMessageDialog.ShowMessage(
+                this,
+                $"Could not open a terminal here:\n{ex.Message}",
+                "Open terminal",
+                AccelDialogIcon.Warning);
+            return;
+        }
+
+        string tabId = Guid.NewGuid().ToString();
+
+        try
+        {
+            _sessionRegistry?.Register(tabId, session);
+        }
+        catch (Exception)
+        {
+            // Same posture as CreateSessionCore: Register only throws for a duplicate tabId (impossible
+            // for a fresh GUID) or a disposed registry (the app is shutting down). Either way there is
+            // nothing useful to add to the UI here, and the session must not be disposed from this file.
+            return;
+        }
+
+        _ptyRouteRegistry?.RegisterSession(tabId, session);
+
+        // Selecting the new tab is what attaches panel D, exactly like CreateSessionCore's own AddTab
+        // call - Shell and Session tabs go through the identical attach path (TabViewModel.HasPtySession).
+        Tabs?.AddShellTab(tabId, $"Terminal - {Path.GetFileName(workingDirectory.TrimEnd('\\', '/'))}");
+    }
+
+    /// <summary>
     /// P4-T2: renames a live session via <see cref="SlashCommandDriver"/> - the first real consumer of
     /// P4-T1's generic mechanism. <c>Tag</c> on the clicked <see cref="MenuItem"/> carries the row's
     /// <see cref="RootsPanelNodeViewModel"/> (see MainWindow.xaml's context-menu comment); anything other
@@ -1065,7 +1132,7 @@ public partial class MainWindow : Window
     /// </summary>
     private void TabItem_MouseDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
-        if ((sender as ListBoxItem)?.DataContext is not TabViewModel tab || tab.HasEnded || tab.Kind != TabKind.Session)
+        if ((sender as ListBoxItem)?.DataContext is not TabViewModel tab || tab.HasEnded || !tab.HasPtySession)
         {
             return;
         }

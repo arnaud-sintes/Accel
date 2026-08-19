@@ -13,8 +13,8 @@ using Accel.Orchestration;
 /// <summary>What a tab in panel C actually represents - see <see cref="TabViewModel.Kind"/>.</summary>
 public enum TabKind
 {
-    /// <summary>A projection of one live <c>PtyRegistry</c> registration (the original, and still
-    /// overwhelmingly common, kind of tab).</summary>
+    /// <summary>A projection of one live <c>PtyRegistry</c> registration running `claude` (the
+    /// original, and still overwhelmingly common, kind of tab).</summary>
     Session,
 
     /// <summary>A read-only view of a file's contents - panel B's FILES tree double-click gesture
@@ -26,6 +26,18 @@ public enum TabKind
     /// the two entry points never look the same, even though both end up showing the same file
     /// viewer in panel D. Has no <c>PtySession</c> behind it either.</summary>
     GitChange,
+
+    /// <summary>
+    /// A projection of one live <c>PtyRegistry</c> registration too - same as <see cref="Session"/>
+    /// mechanically (a real <c>PtySession</c>, attached/detached/closed exactly the same way) - but
+    /// running a plain interactive shell (<c>cmd.exe</c>, via <see cref="PtySession.CreateShellSpec"/>)
+    /// instead of `claude`. Panel A's root-folder "Open terminal here" context menu item (see
+    /// <c>MainWindow.OpenTerminalAtRoot_Click</c>) is the only way to get one. Never has a
+    /// <c>--session-id</c>, never shows up as a panel A row (there is no transcript to scan for), and
+    /// its own leading glyph/colour is deliberately distinct from <see cref="Session"/>'s so the two
+    /// never look the same at a glance.
+    /// </summary>
+    Shell,
 }
 
 /// <summary>
@@ -56,6 +68,18 @@ public sealed partial class TabViewModel : ObservableObject
     public TabViewModel(string tabId, string title)
         : this(tabId, title, TabKind.Session)
     {
+    }
+
+    /// <summary>
+    /// A plain-shell tab - panel A's root-folder "Open terminal here" context menu item (see
+    /// <see cref="TabsViewModel.AddShellTab"/>). Mechanically identical to a <see cref="TabKind.Session"/>
+    /// tab (a real <c>PtySession</c>, registered the same way, attached/closed the same way) - only the
+    /// child process (a plain shell instead of `claude`) and the leading glyph/colour differ.
+    /// </summary>
+    public static TabViewModel ForShell(string tabId, string title)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(tabId);
+        return new TabViewModel(tabId, title, TabKind.Shell);
     }
 
     private TabViewModel(string tabId, string title, TabKind kind)
@@ -149,6 +173,58 @@ public sealed partial class TabViewModel : ObservableObject
     /// <c>MainWindow.ShowFileTabAsync</c> branches on.</summary>
     public bool IsGitDiffTab => GitDiffOldSide is not null;
 
+    /// <summary>See <see cref="IsFileTab"/>'s remarks.</summary>
+    public bool IsShellTab => Kind == TabKind.Shell;
+
+    /// <summary>
+    /// Whether a real <c>PtySession</c> sits behind this tab (<see cref="TabKind.Session"/> and
+    /// <see cref="TabKind.Shell"/> both do - the only difference between them is which child process
+    /// was launched; <see cref="TabKind.File"/>/<see cref="TabKind.GitChange"/> never do). This is the
+    /// single predicate <see cref="TabsViewModel"/> branches every host-registry interaction on
+    /// (attach/detach the terminal, route a close through <c>IPtySessionHost</c>, reconcile against
+    /// <c>IPtySessionHost.TabIds</c>) - they are mechanically identical there, and only differ in panel
+    /// C's presentation (<see cref="IconGlyph"/>/<see cref="IconColorHex"/>) and in what got launched.
+    /// </summary>
+    public bool HasPtySession => Kind is TabKind.Session or TabKind.Shell;
+
+    /// <summary>
+    /// Panel C's leading per-tab glyph (Segoe MDL2 Assets codepoint, except the git-diff case - see
+    /// below): a distinct icon for each of the five kinds a tab can be - a Claude Code Session, a
+    /// plain Shell, a FILES-tree file, a single-pane GIT-section entry, and a side-by-side GIT-section
+    /// diff - so all five read as visually distinct at a glance, never colour-only (paired with
+    /// <see cref="IconColorHex"/>, and each kind's <c>Title</c> foreground already differs too - see
+    /// <c>MainWindow.xaml</c>'s tab template). Kept as a plain string, not a WPF glyph/Brush object,
+    /// same "stay WPF-free" rule <see cref="Accel.App.ViewModels.FileTypeIconResolver"/>'s own icon
+    /// table follows.
+    ///
+    /// <para>The git-diff glyph (<c>U+21C4</c>, a plain compare-arrows character) is deliberately not
+    /// a Segoe MDL2 Assets PUA codepoint like the other four - WPF/DirectWrite's per-glyph font
+    /// fallback renders it from another installed font even though the <c>TextBlock</c> requests
+    /// Segoe MDL2 Assets, so there was no need to find (and risk mis-citing) an MDL2 "compare" icon
+    /// for a concept that font's classic PUA range does not clearly cover.</para>
+    /// </summary>
+    public string IconGlyph => Kind switch
+    {
+        TabKind.Shell => "", // CommandPrompt - literally what this tab is
+        TabKind.Session => "", // People
+        TabKind.File => "", // Page
+        TabKind.GitChange => IsGitDiffTab ? "⇄" : "", // compare-arrows, or OpenFile
+        _ => string.Empty,
+    };
+
+    /// <summary>Hex colour paired with <see cref="IconGlyph"/> - Session gets a neutral grey (matching
+    /// the tab strip's own default, unselected text colour), File gets Teal, and both GIT-section
+    /// kinds (single-pane and diff) share the same Danger red, since they are the same "family" of
+    /// tab and only need to differ by glyph shape, not colour.</summary>
+    public string IconColorHex => Kind switch
+    {
+        TabKind.Session => "#FFA9A9A9",
+        TabKind.Shell => "#FFE8C07D",
+        TabKind.File => "#FF6EC1D6",
+        TabKind.GitChange => "#FFE98F8F",
+        _ => "#FFA9A9A9",
+    };
+
     /// <summary>The registry tabId, which is also the <c>--session-id</c> GUID and therefore the id panel
     /// A keys its session rows on - see <c>MainWindow.CreateSession_Click</c>. For a <see cref="TabKind.File"/>
     /// tab, this is the file's full path instead (see <see cref="ForFile"/>).</summary>
@@ -185,6 +261,7 @@ public sealed partial class TabViewModel : ObservableObject
     {
         TabKind.File => $"File tab: {Title}. Read-only.",
         TabKind.GitChange => $"Git change tab: {Title}. Read-only.",
+        TabKind.Shell => HasEnded ? $"Terminal tab: {Title}. Ended {StatusSuffix}." : $"Terminal tab: {Title}. Running.",
         _ => HasEnded ? $"Session tab: {Title}. Ended {StatusSuffix}." : $"Session tab: {Title}. Running.",
     };
 
@@ -368,7 +445,7 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
             return;
         }
 
-        if (value.Kind != TabKind.Session)
+        if (!value.HasPtySession)
         {
             // Deliberately does NOT call _selection.SetFocused: neither a File nor a GitChange tab
             // has a session behind it, and TabId here is a filesystem path, not a session id -
@@ -379,6 +456,11 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
             return;
         }
 
+        // A Shell tab's tabId is a fresh GUID with no matching transcript, so this "focuses" a
+        // session id that FocusedRootResolver will not find in the telemetry snapshot - which is
+        // fine: that resolver already falls back to panel A's own tree selection when the id does
+        // not match anything, exactly the same graceful degradation an unmatched Session tabId
+        // would hit if its transcript had not been scanned yet.
         _selection.SetFocused(value.TabId);
         HideFileViewer?.Invoke();
 
@@ -407,6 +489,32 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
         }
 
         var tab = new TabViewModel(tabId, title ?? string.Empty);
+        Tabs.Add(tab);
+        OnPropertyChanged(nameof(IsEmpty));
+        SelectedTab = tab;
+        return tab;
+    }
+
+    /// <summary>
+    /// Adds a tab for a plain-shell <c>PtySession</c> that has just been registered under
+    /// <paramref name="tabId"/> in the registry, and selects it - panel A's root-folder "Open terminal
+    /// here" context menu item (see <c>MainWindow.OpenTerminalAtRoot_Click</c>). Mechanically identical
+    /// to <see cref="AddTab"/> (same idempotent-per-tabId behaviour, same registry projection) - the
+    /// only difference is the tab this constructs is <see cref="TabKind.Shell"/>, not
+    /// <see cref="TabKind.Session"/>, so panel C renders it with its own distinct glyph/colour.
+    /// </summary>
+    public TabViewModel AddShellTab(string tabId, string? title = null)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(tabId);
+
+        var existing = Find(tabId);
+        if (existing is not null)
+        {
+            SelectedTab = existing;
+            return existing;
+        }
+
+        var tab = TabViewModel.ForShell(tabId, title ?? string.Empty);
         Tabs.Add(tab);
         OnPropertyChanged(nameof(IsEmpty));
         SelectedTab = tab;
@@ -494,8 +602,9 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
 
         // A File/GitChange tab has no PtySession/registry registration behind it at all - nothing
         // for the host to close, and panel A's refresh (TabClosed) has no row keyed on a filesystem
-        // path anyway.
-        if (tab.Kind != TabKind.Session)
+        // path anyway. A Shell tab DOES have one (see TabViewModel.HasPtySession) and closes through
+        // the host exactly like a Session tab - the only difference is which child process dies.
+        if (!tab.HasPtySession)
         {
             return;
         }
@@ -535,7 +644,7 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
     [RelayCommand]
     public async Task StopTabAsync(TabViewModel? tab)
     {
-        if (tab is null || tab.HasEnded || tab.Kind != TabKind.Session)
+        if (tab is null || tab.HasEnded || !tab.HasPtySession)
         {
             return;
         }
@@ -566,10 +675,11 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
             Tabs.Add(tab);
         }
 
-        // File tabs are never in the registry's own live set (they have no session behind them at
-        // all - see TabKind.File) - without this guard, every open file tab would be marked "ended"
-        // on the very next reconciliation.
-        foreach (var tab in Tabs.Where(t => t.Kind == TabKind.Session && !t.HasEnded && !live.Contains(t.TabId)).ToArray())
+        // File/GitChange tabs are never in the registry's own live set (they have no PtySession
+        // behind them at all - see TabViewModel.HasPtySession) - without this guard, every open one
+        // would be marked "ended" on the very next reconciliation. Shell tabs DO have one and are
+        // reconciled exactly like Session tabs.
+        foreach (var tab in Tabs.Where(t => t.HasPtySession && !t.HasEnded && !live.Contains(t.TabId)).ToArray())
         {
             MarkEnded(tab, null);
         }
@@ -606,7 +716,7 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
         }
 
         var tab = SelectedTab;
-        if (tab is null || tab.HasEnded || tab.Kind != TabKind.Session)
+        if (tab is null || tab.HasEnded || !tab.HasPtySession)
         {
             return;
         }

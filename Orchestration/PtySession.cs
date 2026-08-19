@@ -473,6 +473,48 @@ public sealed class PtySession : IDisposable
     }
 
     /// <summary>
+    /// The Windows default shell, when no <c>ComSpec</c> environment variable is set (unusual, but not
+    /// impossible for a launch environment) - the same fallback <c>cmd.exe</c>'s own child processes
+    /// use.
+    /// </summary>
+    private const string DefaultShellPath = @"C:\Windows\System32\cmd.exe";
+
+    /// <summary>
+    /// Builds a launch spec for a plain, unmanaged shell (panel A's root-folder "Open terminal here"
+    /// context menu item - <c>MainWindow.OpenTerminalAtRoot_Click</c>) rather than `claude` - a real
+    /// interactive <c>cmd.exe</c> the user can run arbitrary commands in, with no relationship to any
+    /// Claude Code session, transcript, or <c>--session-id</c>.
+    ///
+    /// <para><b>Resolution, and why it differs from <see cref="CreateClaudeSpec"/>.</b> <c>cmd.exe</c>
+    /// is a stable, in-box Windows component - there is no self-update-in-place concern the way
+    /// <see cref="ClaudeCliLocator"/> exists for `claude`, and no shim path to guard against (`cmd.exe`
+    /// is always a native image). <c>ComSpec</c> is what Windows itself sets to the current shell's
+    /// full path (normally <c>C:\Windows\System32\cmd.exe</c>) precisely so other programs never need
+    /// to hardcode or PATH-search for it; <paramref name="comSpecOverride"/> exists purely as a test
+    /// seam, the same role <paramref name="resolution"/> plays for <see cref="CreateClaudeSpec"/>.</para>
+    ///
+    /// <para>No environment overrides: unlike a `claude` launch, a plain shell has no child-session
+    /// markers to strip - it is not a Claude Code session at all, so nothing about
+    /// <see cref="MergeWithChildSessionMarkersStripped"/>'s rationale applies here. It simply inherits
+    /// Accel's environment verbatim, exactly like opening any other terminal would.</para>
+    /// </summary>
+    /// <param name="workingDirectory">The folder to start the shell in (the right-clicked root's own
+    /// path).</param>
+    /// <param name="comSpecOverride">Test seam: a pre-resolved shell path. Production callers leave
+    /// this null so the real <c>ComSpec</c> environment variable is read now, at launch time.</param>
+    public static PtyLaunchSpec CreateShellSpec(string? workingDirectory = null, string? comSpecOverride = null)
+    {
+        var spec = new PtyLaunchSpec
+        {
+            ExecutablePath = comSpecOverride ?? Environment.GetEnvironmentVariable("ComSpec") ?? DefaultShellPath,
+            WorkingDirectory = workingDirectory,
+        };
+
+        spec.Validate();
+        return spec;
+    }
+
+    /// <summary>
     /// Reported bug: a session created through Accel's "Create session" dialog never appeared in
     /// panel A. Root-caused via a real launch: `claude` printed
     /// "Transcript saving is off — inherited CLAUDE_CODE_CHILD_SESSION marker" and never wrote a

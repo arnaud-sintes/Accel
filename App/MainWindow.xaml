@@ -418,6 +418,34 @@
                                                     </Style>
                                                 </MenuItem.Style>
                                             </MenuItem>
+                                            <!--
+                                                Opens a tab hosting a plain, unmanaged shell (cmd.exe)
+                                                rooted at this folder - MainWindow.OpenTerminalAtRoot_Click
+                                                / PtySession.CreateShellSpec. Entirely unrelated to
+                                                Claude Code: no session id, no transcript, the new
+                                                tab never becomes a panel A row. Icon/colour
+                                                (WarningTextBrush) match TabViewModel.IconGlyph/
+                                                IconColorHex's own Shell-kind choice, so the menu item
+                                                previews the tab's own "different look".
+                                            -->
+                                            <MenuItem Header="Open terminal here…">
+                                                <MenuItem.Icon>
+                                                    <TextBlock Text="&#xE756;" FontFamily="Segoe MDL2 Assets" FontSize="14"
+                                                               Foreground="{StaticResource WarningTextBrush}" />
+                                                </MenuItem.Icon>
+                                                <MenuItem.Style>
+                                                    <Style TargetType="MenuItem" BasedOn="{StaticResource {x:Type MenuItem}}">
+                                                        <Setter Property="Tag" Value="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
+                                                        <Setter Property="Visibility" Value="Collapsed" />
+                                                        <EventSetter Event="MenuItem.Click" Handler="OpenTerminalAtRoot_Click" />
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding PlacementTarget.DataContext.Kind, RelativeSource={RelativeSource AncestorType=ContextMenu}}" Value="Root">
+                                                                <Setter Property="Visibility" Value="Visible" />
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </MenuItem.Style>
+                                            </MenuItem>
                                             <Separator>
                                                 <Separator.Style>
                                                     <Style TargetType="Separator" BasedOn="{StaticResource {x:Type Separator}}">
@@ -825,29 +853,19 @@
                                     <DataTemplate>
                                         <StackPanel Orientation="Horizontal">
                                             <!--
-                                                File tabs (panel B's FILES tree double-click - see
-                                                MainWindow.FilesTreeViewItem_MouseDoubleClick) get a
-                                                document glyph a session tab never shows, so the two
-                                                kinds read as visually distinct at a glance without
-                                                relying on colour alone (Title's own foreground below
-                                                also differs).
+                                                Every tab kind gets its own leading glyph (see
+                                                TabViewModel.IconGlyph/IconColorHex's own remarks for
+                                                the full set: Session/File/single-pane GIT/GIT diff) so
+                                                all four read as visually distinct at a glance, never
+                                                colour-only (Title's own foreground below also differs
+                                                per kind). One TextBlock bound to the computed
+                                                glyph/colour rather than one per kind, so a fifth kind
+                                                later only needs a new switch arm, not new XAML.
                                             -->
-                                            <TextBlock Text="&#xE7C3;" FontFamily="Segoe MDL2 Assets" FontSize="11"
+                                            <TextBlock Text="{Binding IconGlyph}" FontFamily="Segoe MDL2 Assets" FontSize="11"
                                                        Margin="0,0,6,0" VerticalAlignment="Center"
-                                                       Foreground="{StaticResource TealBrush}"
-                                                       Visibility="{Binding IsFileTab, Converter={StaticResource BoolToVis}}" />
-                                            <!--
-                                                Git-change tabs (panel B's GIT section double-click -
-                                                see MainWindow.GitChangeRow_MouseLeftButtonDown) get
-                                                their own glyph/colour (DangerBrush, matching the 'D'
-                                                status badge's own colour in GitChangeRowTemplate)
-                                                rather than reusing IsFileTab's teal - the two entry
-                                                points must never look the same.
-                                            -->
-                                            <TextBlock Text="&#xE7B8;" FontFamily="Segoe MDL2 Assets" FontSize="11"
-                                                       Margin="0,0,6,0" VerticalAlignment="Center"
-                                                       Foreground="{StaticResource DangerBrush}"
-                                                       Visibility="{Binding IsGitChangeTab, Converter={StaticResource BoolToVis}}" />
+                                                       Foreground="{Binding IconColorHex, Converter={StaticResource HexToBrush}}"
+                                                       Visibility="{Binding IconGlyph, Converter={StaticResource StringToVis}}" />
                                             <TextBlock Text="{Binding Title}" MaxWidth="180"
                                                        TextTrimming="CharacterEllipsis" VerticalAlignment="Center">
                                                 <TextBlock.Style>
@@ -859,14 +877,17 @@
                                                                 <Setter Property="Foreground" Value="{StaticResource TextMutedBrush}" />
                                                                 <Setter Property="FontStyle" Value="Italic" />
                                                             </DataTrigger>
-                                                            <!-- A file/git-change tab's own "different look" - the leading
-                                                                 glyph above already carries the same distinction as text/
-                                                                 AutomationDescription. -->
+                                                            <!-- A file/git-change/shell tab's own "different look" - the
+                                                                 leading glyph above already carries the same distinction
+                                                                 as text/AutomationDescription. -->
                                                             <DataTrigger Binding="{Binding IsFileTab}" Value="True">
                                                                 <Setter Property="Foreground" Value="{StaticResource TealBrush}" />
                                                             </DataTrigger>
                                                             <DataTrigger Binding="{Binding IsGitChangeTab}" Value="True">
                                                                 <Setter Property="Foreground" Value="{StaticResource DangerBrush}" />
+                                                            </DataTrigger>
+                                                            <DataTrigger Binding="{Binding IsShellTab}" Value="True">
+                                                                <Setter Property="Foreground" Value="{StaticResource WarningTextBrush}" />
                                                             </DataTrigger>
                                                         </Style.Triggers>
                                                     </Style>
