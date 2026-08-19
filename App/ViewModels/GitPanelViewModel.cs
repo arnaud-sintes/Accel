@@ -18,7 +18,7 @@ public sealed class GitPanelEntryViewModel
     public GitPanelEntryViewModel(GitChangeEntry entry, string repoRootPath)
     {
         Path = entry.Path;
-        StatusLetter = char.ToUpperInvariant(entry.StatusCode).ToString();
+        StatusLetter = entry.StatusCode == '?' ? "U" : char.ToUpperInvariant(entry.StatusCode).ToString();
         StatusDescription = entry.StatusDescription;
         RepoRootPath = repoRootPath;
 
@@ -41,7 +41,8 @@ public sealed class GitPanelEntryViewModel
     /// its tooltip.</summary>
     public string Path { get; }
 
-    /// <summary>Single-letter badge (M/A/D/R/C/U/?) - always paired with <see cref="StatusDescription"/>
+    /// <summary>Single-letter badge (M/A/D/R/C/U, Untracked shown as "U" rather than raw "?") - always
+    /// paired with <see cref="StatusDescription"/>
     /// in the automation name, never color-only (same accessibility rule <see cref="FilesPanelNodeViewModel"/>
     /// follows for folder vs. file).</summary>
     public string StatusLetter { get; }
