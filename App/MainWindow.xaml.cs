@@ -2,6 +2,7 @@ namespace Accel.App;
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -895,6 +896,46 @@ public partial class MainWindow : Window
         // Selecting the new tab is what attaches panel D, exactly like CreateSessionCore's own AddTab
         // call - Shell and Session tabs go through the identical attach path (TabViewModel.HasPtySession).
         Tabs?.AddShellTab(tabId, $"Terminal - {Path.GetFileName(workingDirectory.TrimEnd('\\', '/'))}");
+    }
+
+    /// <summary>
+    /// Panel A's root-folder "Reveal in File Explorer" context menu item (right-click a folder in
+    /// panel A). <c>Tag</c> carries the row's <see cref="RootsPanelNodeViewModel"/> (same convention as
+    /// <see cref="CreateSessionAtRoot_Click"/>/<see cref="OpenTerminalAtRoot_Click"/>); anything other
+    /// than a root row is a silent no-op. Plain OS-level convenience - no session, no tab, no
+    /// <see cref="PtySession"/> involved at all.
+    ///
+    /// <para><c>explorer.exe &lt;folder&gt;</c> (no <c>/select,</c>) opens that folder's own contents in
+    /// a new window, which is what "reveal <b>this</b> folder" means for a root row - unlike revealing
+    /// a single file, there is no parent folder to select it inside. Passed via
+    /// <see cref="ProcessStartInfo.ArgumentList"/> (never a hand-built argument string) so a path
+    /// containing spaces or quotes cannot be misparsed or break out of the intended single argument -
+    /// same discipline <see cref="PtyLaunchSpec"/> requires for a child process's own argv.</para>
+    /// </summary>
+    private void RevealRootInExplorer_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as MenuItem)?.Tag is not RootsPanelNodeViewModel node || node.Kind != RootsPanelNodeKind.Root)
+        {
+            return;
+        }
+
+        try
+        {
+            var startInfo = new ProcessStartInfo("explorer.exe") { UseShellExecute = false };
+            startInfo.ArgumentList.Add(node.Key);
+            Process.Start(startInfo);
+        }
+        catch (Exception ex)
+        {
+            // explorer.exe missing/unlaunchable is not something a user of this app can fix from
+            // here - surfacing the message is strictly better than a silent no-op, but there is
+            // nothing more actionable to offer.
+            AccelMessageDialog.ShowMessage(
+                this,
+                $"Could not open File Explorer for this folder:\n{ex.Message}",
+                "Reveal in File Explorer",
+                AccelDialogIcon.Warning);
+        }
     }
 
     /// <summary>

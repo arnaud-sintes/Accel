@@ -446,6 +446,29 @@
                                                     </Style>
                                                 </MenuItem.Style>
                                             </MenuItem>
+                                            <!--
+                                                Reveals this root folder in a new Windows Explorer
+                                                window - MainWindow.RevealRootInExplorer_Click. Plain
+                                                OS-level convenience, no relationship to any session/
+                                                tab/PtySession at all.
+                                            -->
+                                            <MenuItem Header="Reveal in File Explorer">
+                                                <MenuItem.Icon>
+                                                    <TextBlock Text="&#xE838;" FontFamily="Segoe MDL2 Assets" FontSize="14" />
+                                                </MenuItem.Icon>
+                                                <MenuItem.Style>
+                                                    <Style TargetType="MenuItem" BasedOn="{StaticResource {x:Type MenuItem}}">
+                                                        <Setter Property="Tag" Value="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
+                                                        <Setter Property="Visibility" Value="Collapsed" />
+                                                        <EventSetter Event="MenuItem.Click" Handler="RevealRootInExplorer_Click" />
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding PlacementTarget.DataContext.Kind, RelativeSource={RelativeSource AncestorType=ContextMenu}}" Value="Root">
+                                                                <Setter Property="Visibility" Value="Visible" />
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </MenuItem.Style>
+                                            </MenuItem>
                                             <Separator>
                                                 <Separator.Style>
                                                     <Style TargetType="Separator" BasedOn="{StaticResource {x:Type Separator}}">
