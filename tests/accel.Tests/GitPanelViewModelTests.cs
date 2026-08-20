@@ -1,4 +1,4 @@
-namespace Accel.Tests;
+﻿namespace Accel.Tests;
 
 using System;
 using System.IO;
@@ -58,6 +58,17 @@ public sealed class GitPanelViewModelTests : IDisposable
         var confirmation = new FakeFilesEntryConfirmationService();
         var vm = new GitPanelViewModel(feed, dispatcher, selection, rootsPanel: null, actionDialogs, confirmation);
         return (vm, feed, selection, writer, actionDialogs, confirmation);
+    }
+
+    private static (GitPanelViewModel Vm, FakeTelemetryFeed Feed, ISessionSelectionWriter Writer, FakeDirectoryWatcher Watcher) BuildWithWatcher()
+    {
+        var feed = new FakeTelemetryFeed();
+        var dispatcher = new RecordingUiThreadDispatcher();
+        var selection = new SessionSelectionService();
+        var writer = selection.AcquireWriter();
+        var watcher = new FakeDirectoryWatcher();
+        var vm = new GitPanelViewModel(feed, dispatcher, selection, null, null, null, watcher);
+        return (vm, feed, writer, watcher);
     }
 
     private static void Focus(FakeTelemetryFeed feed, ISessionSelectionWriter writer, string root)
@@ -373,5 +384,146 @@ public sealed class GitPanelViewModelTests : IDisposable
         string currentBranch = GitTestRepo.RunGitCapture(_root, "rev-parse --abbrev-ref HEAD").Trim();
         Assert.Equal("feature-a", currentBranch);
         Assert.True(feed.RefreshRequestCount > 0);
+    }
+
+    // -------------------------------------------------------------------------------------------
+    // Refresh triggers other than a focus change: this panel's own commands, and the disk watcher.
+    // Both exist because Rebuild's same-root fast path means a telemetry refresh cannot do it - which
+    // is why a commit or a push used to leave its own result invisible.
+    // -------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task WatcherChanged_RefreshesTheStatusList()
+    {
+        string repo = InitRepo(Path.Combine(_root, "repo"));
+        var (vm, feed, writer, watcher) = BuildWithWatcher();
+        Focus(feed, writer, repo);
+        Assert.Empty(vm.Changes);
+
+        // Stands in for a Claude Code session (or any other tool) writing in this repo.
+        File.WriteAllText(Path.Combine(repo, "from-an-agent.txt"), "x");
+        watcher.RaiseChanged();
+        await vm.LastRefreshTask!;
+
+        Assert.Contains(vm.Changes, e => e.Path == "from-an-agent.txt");
+        Assert.Equal("1 change(s)", vm.ChangesSummaryText);
+    }
+
+    [Fact]
+    public async Task WatcherChanged_WhileACommandIsInFlight_IsIgnored()
+    {
+        string repo = InitRepo(Path.Combine(_root, "repo"));
+        var (vm, feed, writer, watcher) = BuildWithWatcher();
+        Focus(feed, writer, repo);
+
+        File.WriteAllText(Path.Combine(repo, "mid-command.txt"), "x");
+        vm.IsBusy = true;
+        watcher.RaiseChanged();
+        await vm.LastRefreshTask!;
+
+        // A command's own churn (index.lock appearing, refs being rewritten) is exactly what the
+        // watcher reports; reading a half-finished git state would show a list that never existed.
+        Assert.Empty(vm.Changes);
+    }
+
+    [Fact]
+    public async Task WatcherChanged_DuringAnInFlightRefresh_CoalescesIntoOneFollowUpPass()
+    {
+        string repo = InitRepo(Path.Combine(_root, "repo"));
+        var (vm, feed, writer, watcher) = BuildWithWatcher();
+        Focus(feed, writer, repo);
+
+        // A burst, as a rebase or a large checkout produces: whatever overlaps the in-flight read must
+        // not start a fresh set of git processes per tick, and the final state must still be correct.
+        File.WriteAllText(Path.Combine(repo, "a.txt"), "x");
+        var first = vm.RefreshAsync();
+        File.WriteAllText(Path.Combine(repo, "b.txt"), "x");
+        watcher.RaiseChanged();
+        watcher.RaiseChanged();
+
+        await first;
+        await vm.LastRefreshTask!;
+
+        Assert.Contains(vm.Changes, e => e.Path == "a.txt");
+        Assert.Contains(vm.Changes, e => e.Path == "b.txt");
+    }
+
+    [Fact]
+    public void FocusChange_PointsTheWatcherAtTheRepositoryRoot_NotTheDisplayedSubfolder()
+    {
+        string repo = InitRepo(Path.Combine(_root, "repo"));
+        string subfolder = Path.Combine(repo, "src");
+        Directory.CreateDirectory(subfolder);
+        var (vm, feed, writer, watcher) = BuildWithWatcher();
+
+        Focus(feed, writer, subfolder);
+
+        // .git only exists at the root, so watching the subfolder would miss every commit, push and
+        // checkout - the changes this panel most needs to notice.
+        Assert.Equal(repo, watcher.WatchedPath);
+        Assert.True(vm.HasRepo);
+    }
+
+    [Fact]
+    public void FocusChange_AwayFromAnyRepository_StopsWatching()
+    {
+        string repo = InitRepo(Path.Combine(_root, "repo"));
+        string plain = Path.Combine(_root, "not-a-repo");
+        Directory.CreateDirectory(plain);
+        var (vm, feed, writer, watcher) = BuildWithWatcher();
+
+        Focus(feed, writer, repo);
+        Assert.Equal(repo, watcher.WatchedPath);
+
+        var session = TelemetryFixtures.Session("session-2", isLive: true) with { Cwd = plain };
+        writer.SetFocused("session-2");
+        feed.Publish(TelemetryFixtures.Tree(new[] { TelemetryFixtures.Root(plain, session) }));
+
+        Assert.False(vm.HasRepo);
+        Assert.Null(watcher.WatchedPath);
+    }
+
+    [Fact]
+    public async Task StageAllCommand_MovesTheRowToStaged_WithoutWaitingForTelemetry()
+    {
+        string repo = InitRepo(Path.Combine(_root, "repo"));
+        File.WriteAllText(Path.Combine(repo, "new.txt"), "x");
+        var (vm, feed, _, writer, _, _) = BuildWithActionFakes();
+        Focus(feed, writer, repo);
+        Assert.Single(vm.Changes);
+
+        await vm.StageAllCommand.ExecuteAsync(null);
+
+        // No feed.Publish: the command refreshes this panel itself.
+        Assert.Empty(vm.Changes);
+        Assert.Contains(vm.StagedChanges, e => e.Path == "new.txt");
+    }
+
+    [Fact]
+    public async Task CommitCommand_ClearsTheStagedListWithoutWaitingForTelemetry()
+    {
+        string repo = InitRepo(Path.Combine(_root, "repo"));
+        File.WriteAllText(Path.Combine(repo, "new.txt"), "x");
+        var (vm, feed, _, writer, actionDialogs, _) = BuildWithActionFakes();
+        Focus(feed, writer, repo);
+        await vm.StageAllCommand.ExecuteAsync(null);
+        Assert.Single(vm.StagedChanges);
+
+        actionDialogs.CommitMessage = "a commit";
+        await vm.CommitCommand.ExecuteAsync(null);
+
+        Assert.Empty(vm.StagedChanges);
+        Assert.Empty(vm.Changes);
+        Assert.Equal("0 change(s)", vm.ChangesSummaryText);
+    }
+
+    [Fact]
+    public void Dispose_DisposesTheWatcher()
+    {
+        var (vm, _, _, watcher) = BuildWithWatcher();
+
+        vm.Dispose();
+
+        Assert.True(watcher.Disposed);
     }
 }

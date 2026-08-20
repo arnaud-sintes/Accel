@@ -1,4 +1,4 @@
-namespace Accel.App;
+﻿namespace Accel.App;
 
 using System;
 using System.Collections.Generic;
@@ -1780,11 +1780,17 @@ public partial class MainWindow : Window
     /// (a later external-change check must not immediately think the save itself was an external
     /// change), the undo stack is marked back to "original file" (flips
     /// <see cref="TabViewModel.IsDirty"/> to false through <see cref="ActivateFileEditBuffer"/>'s
-    /// <c>DirtyListener</c>), and panel B's GIT section is refreshed through the exact same mechanism
+    /// <c>DirtyListener</c>), and panel A is refreshed through the exact same mechanism
     /// <see cref="RemoveSession_Click"/> already uses after a disk-changing operation
-    /// (<see cref="RootsPanelViewModel.RefreshCommand"/> -&gt; <c>ITelemetryFeed.RequestRefresh</c> -&gt;
-    /// the same <c>SnapshotAvailable</c> event <see cref="GitPanelViewModel"/> already listens to) -
+    /// (<see cref="RootsPanelViewModel.RefreshCommand"/> -&gt; <c>ITelemetryFeed.RequestRefresh</c>) -
     /// no second refresh mechanism is invented here.</para>
+    ///
+    /// <para><b>Panel B's GIT section is deliberately not refreshed from here.</b> It used to be
+    /// assumed to ride along on the <c>RequestRefresh</c> above, but that lands in
+    /// <see cref="GitPanelViewModel.Rebuild"/>, whose same-root fast path is a no-op - so it never
+    /// actually did. The write this method just performed is now picked up by that panel's own
+    /// <see cref="Accel.App.Services.IDirectoryWatcher"/>, which covers a save made from anywhere
+    /// (here, an agent, another editor) rather than only from this one call site.</para>
     ///
     /// <para><b>On failure</b> (read-only file, permission denied, the path removed underneath the
     /// editor): a message dialog reports it and the buffer/tab are left exactly as they were - still

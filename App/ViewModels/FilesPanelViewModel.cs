@@ -1,4 +1,4 @@
-namespace Accel.App.ViewModels;
+﻿namespace Accel.App.ViewModels;
 
 using System;
 using System.Collections.Generic;
@@ -147,6 +147,130 @@ public sealed partial class FilesPanelNodeViewModel : ObservableObject
         }
     }
 
+    /// <summary>
+    /// Re-reads this row's children from disk and merges the result into <see cref="Children"/>
+    /// <b>in place</b> - matching rows keep their existing ViewModel instance, and therefore their
+    /// <see cref="IsExpanded"/> state and their whole already-loaded subtree.
+    ///
+    /// <para><b>Why merging rather than rebuilding.</b> The obvious implementation of "refresh" -
+    /// clear and re-add - is the exact bug <see cref="FilesPanelViewModel.Rebuild"/>'s no-op fast path
+    /// exists to avoid: replacement rows always start collapsed, so every folder the user had opened
+    /// snaps shut. That is tolerable once, on a genuine focus change; it is not tolerable on a
+    /// refresh triggered by an agent writing a file somewhere in the tree, which can happen several
+    /// times a minute while the user is reading it.</para>
+    ///
+    /// <para><b>Why this stays bounded.</b> Recursion stops at any folder whose children were never
+    /// loaded (<see cref="ChildrenLoaded"/>) - such a row is updated by <see cref="SyncExpandArrow"/>
+    /// from data the parent's enumeration already produced, at no I/O cost at all. So a refresh costs
+    /// one directory enumeration per folder the user has actually opened, and nothing for the rest of
+    /// the tree - the same discipline the lazy load itself follows.</para>
+    /// </summary>
+    internal void RefreshLoadedChildren() =>
+        Merge(Children, FilesTreeBuilder.BuildChildren(Key), _onDirectoryExpanded, _onDirectoryCollapsed);
+
+    /// <summary>
+    /// Brings a never-expanded folder's expand arrow in line with disk: a folder that was empty when
+    /// this level was enumerated needs its arrow back once something appears inside it, and one that
+    /// has since been emptied needs it taken away.
+    /// </summary>
+    /// <remarks>
+    /// Takes <paramref name="hasChildren"/> from the caller rather than probing for it. The parent's
+    /// <see cref="FilesTreeBuilder.BuildChildren"/> already computed exactly this for every child it
+    /// returned, so probing again would open one extra directory handle per collapsed folder per
+    /// refresh - which, on a folder with a few hundred subdirectories being refreshed while an agent
+    /// works in it, is the difference between a cheap refresh and a visibly janky one.
+    /// </remarks>
+    internal void SyncExpandArrow(bool hasChildren)
+    {
+        if (hasChildren && Children.Count == 0)
+        {
+            Children.Add(Placeholder);
+        }
+        else if (!hasChildren && Children.Count > 0 && !_childrenLoaded)
+        {
+            Children.Clear();
+        }
+    }
+
+    /// <summary>
+    /// Reconciles <paramref name="rows"/> against <paramref name="latest"/> so that afterwards it
+    /// holds exactly <paramref name="latest"/>, in that order, reusing the existing ViewModel for
+    /// every row that is still there. Shared by <see cref="RefreshLoadedChildren"/> (a folder's
+    /// children) and <see cref="FilesPanelViewModel.Refresh"/> (the root's own top level), which are
+    /// the same operation at two different levels.
+    /// </summary>
+    /// <remarks>
+    /// Identity is the full path compared <b>ordinally</b>, not case-insensitively: on Windows a pure
+    /// case rename ("readme.md" to "README.md") is the same file to the filesystem but a different
+    /// <see cref="Name"/> to render, and <see cref="Name"/> is immutable - so it has to come through
+    /// as a replacement row rather than a silently-stale one. <see cref="IsDirectory"/> is part of the
+    /// identity for the same reason: a path can be deleted and re-created as the other kind between
+    /// two refreshes.
+    /// </remarks>
+    internal static void Merge(
+        ObservableCollection<FilesPanelNodeViewModel> rows,
+        FileTreeNode[] latest,
+        Action<string>? onDirectoryExpanded,
+        Action<string>? onDirectoryCollapsed)
+    {
+        for (int i = 0; i < latest.Length; i++)
+        {
+            var node = latest[i];
+            int existing = IndexOfEntry(rows, node, i);
+
+            if (existing < 0)
+            {
+                rows.Insert(i, new FilesPanelNodeViewModel(node, onDirectoryExpanded, onDirectoryCollapsed));
+                continue;
+            }
+
+            if (existing != i)
+            {
+                rows.Move(existing, i);
+            }
+
+            if (!rows[i].IsDirectory)
+            {
+                continue;
+            }
+
+            // Recurse only into what the user opened; everything else is settled from node.HasChildren,
+            // which this enumeration already worked out - see SyncExpandArrow's remarks.
+            if (rows[i].ChildrenLoaded)
+            {
+                rows[i].RefreshLoadedChildren();
+            }
+            else
+            {
+                rows[i].SyncExpandArrow(node.HasChildren);
+            }
+        }
+
+        // Everything past latest.Length is what the loop above never claimed - i.e. rows whose entry
+        // is gone from disk, already pushed to the tail by the Move calls.
+        while (rows.Count > latest.Length)
+        {
+            rows.RemoveAt(rows.Count - 1);
+        }
+    }
+
+    /// <summary>Where <paramref name="node"/> already lives in <paramref name="rows"/> at or after
+    /// <paramref name="startIndex"/>, or -1. Never searches before <paramref name="startIndex"/>:
+    /// those slots are already reconciled, so a match there would mean moving a row backwards over
+    /// content that is known-correct.</summary>
+    private static int IndexOfEntry(ObservableCollection<FilesPanelNodeViewModel> rows, FileTreeNode node, int startIndex)
+    {
+        for (int i = startIndex; i < rows.Count; i++)
+        {
+            if (rows[i].IsDirectory == node.IsDirectory && string.Equals(rows[i].Key, node.Path, StringComparison.Ordinal))
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
     /// <summary>Accessible text description for <c>AutomationProperties.Name</c> - same
     /// never-colour/weight-alone rule <see cref="RootsPanelNodeViewModel"/> follows, even though this
     /// row's only visual distinction (bold for a folder) is already independent of colour.</summary>
@@ -161,11 +285,19 @@ public sealed partial class FilesPanelNodeViewModel : ObservableObject
 /// focused, else panel A's own tree selection (<see cref="RootsPanelViewModel.SelectedRootPath"/>)
 /// if a root/session/agent row is selected there instead.
 ///
-/// <para><b>No direct event wiring:</b> like <see cref="RootsPanelViewModel"/>/
-/// <see cref="AgentGraphViewModel"/>, this class never touches a <c>FileSystemWatcher</c> or a
-/// timer. The tree is rebuilt via <see cref="FilesTreeBuilder.Build"/> only when the focus signal
-/// actually changes (a new telemetry snapshot, a focused-session change, or panel A's own selection
-/// changing) - never polled.</para>
+/// <para><b>Two inputs, two different refreshes.</b> A change of <i>which folder</i> to show (a new
+/// telemetry snapshot, a focused-session change, or panel A's own selection changing) goes through
+/// <see cref="Rebuild"/>, which replaces the tree wholesale. A change to the <i>contents</i> of the
+/// folder already being shown goes through <see cref="Refresh"/>, which merges disk into the
+/// existing rows without disturbing them. Neither is a poll: the contents path is driven by an
+/// injected <see cref="IDirectoryWatcher"/> (a debounced <c>FileSystemWatcher</c>, never a timer),
+/// plus this panel's own explorer commands calling <see cref="Refresh"/> directly.</para>
+///
+/// <para><b>Why disk has to be an input at all.</b> Before it was, the panel only ever refreshed on
+/// a focus change - so its own New/Rename/Delete commands appeared to do nothing (they refreshed
+/// through <see cref="ITelemetryFeed.RequestRefresh"/>, which lands back in <see cref="Rebuild"/> and
+/// hits the no-op fast path below), and a Claude Code session creating or deleting files in this very
+/// folder in parallel - the thing Accel exists to watch - left the tree silently stale.</para>
 ///
 /// <para><b>Resolving to the same root path is a no-op</b> (<see cref="Rebuild"/> compares against
 /// <see cref="_currentRootPath"/> before touching <see cref="Nodes"/>): every trigger above can fire
@@ -184,6 +316,7 @@ public sealed partial class FilesPanelViewModel : ObservableObject, IDisposable
     private readonly RootsPanelViewModel? _rootsPanel;
     private readonly IFilesEntryDialogService _entryDialogs;
     private readonly IFilesEntryConfirmationService _entryConfirmation;
+    private readonly IDirectoryWatcher? _watcher;
 
     private RootsTreeDto? _latest;
     private string? _currentRootPath;
@@ -296,7 +429,8 @@ public sealed partial class FilesPanelViewModel : ObservableObject, IDisposable
         ISessionSelectionService? selection = null,
         RootsPanelViewModel? rootsPanel = null,
         IFilesEntryDialogService? entryDialogs = null,
-        IFilesEntryConfirmationService? entryConfirmation = null)
+        IFilesEntryConfirmationService? entryConfirmation = null,
+        IDirectoryWatcher? watcher = null)
     {
         _feed = feed ?? throw new ArgumentNullException(nameof(feed));
         _dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
@@ -304,6 +438,15 @@ public sealed partial class FilesPanelViewModel : ObservableObject, IDisposable
         _rootsPanel = rootsPanel;
         _entryDialogs = entryDialogs ?? new WpfFilesEntryDialogService();
         _entryConfirmation = entryConfirmation ?? new MessageBoxFilesEntryConfirmationService();
+
+        // Optional (and null in every unit test) so the whole ViewModel stays drivable without a real
+        // watcher, a real timer or real filesystem timing - same reason the dialog services above are
+        // injected. Owned from here on: disposed with this panel.
+        _watcher = watcher;
+        if (_watcher is not null)
+        {
+            _watcher.Changed += OnWatchedDirectoryChanged;
+        }
 
         _feed.SnapshotAvailable += OnSnapshotAvailable;
         _feed.SnapshotFailed += OnSnapshotFailed;
@@ -374,6 +517,10 @@ public sealed partial class FilesPanelViewModel : ObservableObject, IDisposable
         _rootResolvedOnce = true;
         _currentRootPath = rootPath;
 
+        // Follows the tree, not the session: the watcher only ever covers the folder actually on
+        // screen, so a focus change stops watching the folder nobody is looking at any more.
+        _watcher?.Watch(rootPath);
+
         Nodes.Clear();
         _expandedFolderPaths.Clear();
 
@@ -409,6 +556,119 @@ public sealed partial class FilesPanelViewModel : ObservableObject, IDisposable
             ApplyFilter();
         }
     }
+
+    /// <summary>
+    /// Re-reads the folder currently on screen and merges disk into the existing rows, keeping every
+    /// expanded folder expanded (see <see cref="FilesPanelNodeViewModel.Merge"/>). This is the
+    /// "contents changed" refresh, as opposed to <see cref="Rebuild"/>'s "different folder" one.
+    ///
+    /// <para>Called by the injected <see cref="IDirectoryWatcher"/> for an external change (an agent,
+    /// another editor, a git checkout) and directly by this panel's own explorer commands, which
+    /// cannot rely on <see cref="ITelemetryFeed.RequestRefresh"/> for it - that path ends in
+    /// <see cref="Rebuild"/>, which correctly does nothing when the focused folder is unchanged.</para>
+    ///
+    /// <para>A no-op when no folder is resolved yet; a root that has itself disappeared degrades to
+    /// the same "Folder not found" state <see cref="Rebuild"/> produces, rather than leaving the last
+    /// known contents of a folder that no longer exists on screen.</para>
+    /// </summary>
+    public void Refresh()
+    {
+        if (string.IsNullOrEmpty(_currentRootPath))
+        {
+            return;
+        }
+
+        var children = FilesTreeBuilder.BuildRootChildren(_currentRootPath);
+
+        if (children is null)
+        {
+            Nodes.Clear();
+            _autoExpandedForSearch.Clear();
+            SyncExpandedFolderPaths();
+            HasTree = false;
+            StatusText = $"Folder not found: {_currentRootPath}";
+            return;
+        }
+
+        FilesPanelNodeViewModel.Merge(Nodes, children, OnNodeExpanded, OnNodeCollapsed);
+        SyncExpandedFolderPaths();
+
+        HasTree = true;
+        StatusText = Nodes.Count == 0 ? $"{_currentRootPath} (empty)" : _currentRootPath;
+
+        if (!string.IsNullOrWhiteSpace(SearchText))
+        {
+            ApplyFilter();
+        }
+    }
+
+    /// <summary>
+    /// Brings the two collections that hold references <i>into</i> the tree back in line with the
+    /// tree after a <see cref="Refresh"/> may have dropped rows: <see cref="_expandedFolderPaths"/>
+    /// (paths) and <see cref="_autoExpandedForSearch"/> (node instances). A merge removes rows
+    /// silently, so without this an expanded folder that was deleted on disk would stay in the set for
+    /// ever - and would keep being reported as the "nearest still-expanded ancestor" of later
+    /// collapses, pointing panel B's git section at a folder that no longer exists.
+    ///
+    /// <para>Also raises <see cref="FolderCollapsed"/> for each expanded folder that vanished, with
+    /// the same nearest-still-expanded-ancestor fallback a user-driven collapse produces - a folder
+    /// deleted underneath the git section is exactly as gone, from that section's point of view, as
+    /// one the user closed.</para>
+    /// </summary>
+    private void SyncExpandedFolderPaths()
+    {
+        var liveExpandedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var liveNodes = new HashSet<FilesPanelNodeViewModel>();
+
+        foreach (var node in EnumerateAll(Nodes))
+        {
+            liveNodes.Add(node);
+
+            if (node.IsDirectory && node.IsExpanded)
+            {
+                liveExpandedPaths.Add(node.Key);
+            }
+        }
+
+        _autoExpandedForSearch.RemoveWhere(node => !liveNodes.Contains(node));
+
+        var vanished = new List<string>();
+        foreach (string path in _expandedFolderPaths)
+        {
+            if (!liveExpandedPaths.Contains(path))
+            {
+                vanished.Add(path);
+            }
+        }
+
+        _expandedFolderPaths.Clear();
+        foreach (string path in liveExpandedPaths)
+        {
+            _expandedFolderPaths.Add(path);
+        }
+
+        foreach (string path in vanished)
+        {
+            string? ancestor = Path.GetDirectoryName(path);
+            while (!string.IsNullOrEmpty(ancestor) && !_expandedFolderPaths.Contains(ancestor))
+            {
+                ancestor = Path.GetDirectoryName(ancestor);
+            }
+
+            FolderCollapsed?.Invoke(path, string.IsNullOrEmpty(ancestor) ? null : ancestor);
+        }
+    }
+
+    /// <summary>The <see cref="IDirectoryWatcher"/> already raises on the UI thread; posting anyway
+    /// costs nothing when already there (see <see cref="IUiThreadDispatcher.Post"/>) and keeps the
+    /// disposed-check idiom identical to every other handler on this class.</summary>
+    private void OnWatchedDirectoryChanged() => _dispatcher.Post(() =>
+    {
+        if (!_disposed)
+        {
+            Refresh();
+        }
+    });
 
     private void OnNodeExpanded(string path)
     {
@@ -522,6 +782,10 @@ public sealed partial class FilesPanelViewModel : ObservableObject, IDisposable
             return;
         }
 
+        // Refresh() for this panel's own tree - RequestRefresh below cannot do it, since it lands in
+        // Rebuild, whose same-root fast path is a no-op - and RequestRefresh for everything else that
+        // reads the focused folder through telemetry.
+        Refresh();
         _feed.RequestRefresh();
     }
 
@@ -563,6 +827,7 @@ public sealed partial class FilesPanelViewModel : ObservableObject, IDisposable
             EntryRemovedOrMoved?.Invoke(node.Key, node.IsDirectory);
         }
 
+        Refresh();
         _feed.RequestRefresh();
     }
 
@@ -607,6 +872,7 @@ public sealed partial class FilesPanelViewModel : ObservableObject, IDisposable
         // NotPresent (the plan-time snapshot going stale) is a soft-success, same as
         // SessionRemoverExecutor's own NotPresent handling - either way, the row is gone.
         EntryRemovedOrMoved?.Invoke(node.Key, node.IsDirectory);
+        Refresh();
         _feed.RequestRefresh();
     }
 
@@ -621,6 +887,12 @@ public sealed partial class FilesPanelViewModel : ObservableObject, IDisposable
         _feed.SnapshotAvailable -= OnSnapshotAvailable;
         _feed.SnapshotFailed -= OnSnapshotFailed;
         _selection?.Unsubscribe(this);
+
+        if (_watcher is not null)
+        {
+            _watcher.Changed -= OnWatchedDirectoryChanged;
+            _watcher.Dispose();
+        }
 
         if (_rootsPanel is not null)
         {

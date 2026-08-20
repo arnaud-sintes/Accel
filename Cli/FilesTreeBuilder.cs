@@ -1,4 +1,4 @@
-namespace Accel.Cli;
+﻿namespace Accel.Cli;
 
 using System;
 using System.Collections.Generic;
@@ -16,9 +16,10 @@ public sealed record FileTreeNode(string Path, string Name, bool IsDirectory, bo
 /// <see cref="MonitorTreeBuilder"/> (which walks session/agent telemetry, not disk). Every call
 /// enumerates exactly one directory level - never the whole subtree - so a folder with a deep or
 /// huge branch (e.g. a monorepo's vendored dependencies) cannot make one focus change (or one
-/// expand click) walk an unbounded amount of disk. Called only on a focus change or a folder's own
-/// expand (see <see cref="Accel.App.ViewModels.FilesPanelViewModel"/>'s remarks), never on a timer
-/// or <c>FileSystemWatcher</c>.
+/// expand click) walk an unbounded amount of disk. Called on a focus change, a folder's own expand,
+/// or a disk-change refresh of the levels already loaded (see
+/// <see cref="Accel.App.ViewModels.FilesPanelViewModel"/>'s remarks) - never on a timer, and never
+/// for a level the user has not opened.
 ///
 /// <para>Never throws: an unreadable or since-removed directory degrades to "no children" for that
 /// level, matching <c>RootsTreeBuilder</c>'s "never propagate an I/O exception" convention.</para>
@@ -61,7 +62,14 @@ public static class FilesTreeBuilder
         return result.ToArray();
     }
 
-    private static bool HasAnyEntries(string directoryPath)
+    /// <summary>Whether <paramref name="directoryPath"/> currently holds at least one entry - the
+    /// cheap check behind <see cref="FileTreeNode.HasChildren"/>, and therefore behind a folder row's
+    /// expand arrow. Public because a *collapsed* folder's arrow is the one part of an already-built
+    /// tree that a disk change can invalidate without changing any row: a folder that was empty when
+    /// the level was enumerated needs its arrow back once something appears inside it (see
+    /// <c>FilesPanelNodeViewModel.RefreshFromDisk</c>), and re-enumerating the whole level to learn
+    /// that would defeat the point of the lazy load.</summary>
+    public static bool HasAnyEntries(string directoryPath)
     {
         try
         {

@@ -1,4 +1,4 @@
-using System.Linq;
+﻿using System.Linq;
 using Accel.Cli;
 using Accel.Server;
 using Microsoft.Extensions.DependencyInjection;
@@ -212,13 +212,43 @@ static async Task<int> RunCombinedAsync(int port, string? dumpRawDir, bool verbo
 
         // Panel B (Phase 5): a read-only file/folder tree rooted at the focused session's cwd, or
         // (via the rootsPanel reference) panel A's own tree selection when no session is focused.
-        var filesPanel = new Accel.App.ViewModels.FilesPanelViewModel(feed, dispatcher, selection, rootsPanel);
+        // The watcher is the panel's second input, alongside telemetry: without it the tree only ever
+        // refreshed on a focus change, so a session working in that very folder in parallel left it
+        // stale. Content changes are excluded (the tree renders names and nesting, not bytes) and
+        // .git is excluded (its constant churn changes nothing the tree shows); build output is
+        // excluded unconditionally by the watcher itself. Between them, an active agent produces a
+        // handful of refreshes rather than one per file write.
+        var filesPanel = new Accel.App.ViewModels.FilesPanelViewModel(
+            feed,
+            dispatcher,
+            selection,
+            rootsPanel,
+            watcher: new Accel.App.Services.FileSystemDirectoryWatcher(
+                dispatcher,
+                new Accel.App.Services.DispatcherDebounceTimer(
+                    System.Windows.Threading.Dispatcher.CurrentDispatcher,
+                    TimeSpan.FromMilliseconds(750)),
+                includeContentChanges: false,
+                ignoreGitInternals: true));
 
         // Panel B's git section (Phase 7): the same focused root as filesPanel, resolved
         // independently (FocusedRootResolver), rendered as a flat git status list instead of a tree.
         // Wired to filesPanel's own FolderExpanded event so drilling into a repo folder in the file
         // tree switches this section to that repo (GitPanelViewModel's remarks).
-        var gitPanel = new Accel.App.ViewModels.GitPanelViewModel(feed, dispatcher, selection, rootsPanel);
+        // Its watcher is the mirror image of the file tree's: content changes are in (a plain file
+        // edit is a `git status` change) and .git is in (that is where a commit, push or checkout
+        // shows up), with a longer debounce window because this panel's refresh shells out to `git`
+        // several times and a single git command is a burst of dozens of filesystem events.
+        var gitPanel = new Accel.App.ViewModels.GitPanelViewModel(
+            feed,
+            dispatcher,
+            selection,
+            rootsPanel,
+            watcher: new Accel.App.Services.FileSystemDirectoryWatcher(
+                dispatcher,
+                new Accel.App.Services.DispatcherDebounceTimer(
+                    System.Windows.Threading.Dispatcher.CurrentDispatcher,
+                    TimeSpan.FromMilliseconds(1500))));
         filesPanel.FolderExpanded += gitPanel.OnFilesPanelFolderExpanded;
         // Mirror image of the above: minimizing a folder the git section is currently following must
         // move it off that now-hidden subtree (GitPanelViewModel.OnFilesPanelFolderCollapsed's remarks).

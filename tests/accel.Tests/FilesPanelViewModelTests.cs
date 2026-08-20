@@ -1,4 +1,4 @@
-namespace Accel.Tests;
+﻿namespace Accel.Tests;
 
 using System;
 using System.IO;
@@ -65,6 +65,17 @@ public sealed class FilesPanelViewModelTests : IDisposable
         var confirmation = new FakeFilesEntryConfirmationService();
         var vm = new FilesPanelViewModel(feed, dispatcher, selection, null, dialogs, confirmation);
         return (vm, feed, writer, dialogs, confirmation);
+    }
+
+    private static (FilesPanelViewModel Vm, FakeTelemetryFeed Feed, ISessionSelectionWriter Writer, FakeDirectoryWatcher Watcher) BuildWithWatcher()
+    {
+        var feed = new FakeTelemetryFeed();
+        var dispatcher = new RecordingUiThreadDispatcher();
+        var selection = new SessionSelectionService();
+        var writer = selection.AcquireWriter();
+        var watcher = new FakeDirectoryWatcher();
+        var vm = new FilesPanelViewModel(feed, dispatcher, selection, null, null, null, watcher);
+        return (vm, feed, writer, watcher);
     }
 
     private static void FocusRoot(FilesPanelViewModel vm, FakeTelemetryFeed feed, ISessionSelectionWriter writer, string root)
@@ -316,5 +327,259 @@ public sealed class FilesPanelViewModelTests : IDisposable
 
         Assert.True(File.Exists(target));
         Assert.False(feed.RefreshRequestCount > 0);
+    }
+
+    // -------------------------------------------------------------------------------------------
+    // Contents-changed refresh (Refresh / IDirectoryWatcher). Distinct from every test above, which
+    // exercises the focus-changed path (Rebuild): these assert that the tree tracks the *same*
+    // folder's contents changing underneath it - by an agent, another editor, or this panel's own
+    // explorer commands - which the focus-change path deliberately cannot do.
+    // -------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void Refresh_PicksUpCreatedAndRemovedEntries()
+    {
+        File.WriteAllText(Path.Combine(_root, "before.txt"), "x");
+        var (vm, feed, _, writer) = Build();
+        FocusRoot(vm, feed, writer, _root);
+        Assert.Equal(new[] { "before.txt" }, vm.Nodes.Select(n => n.Name).ToArray());
+
+        // Exactly what a Claude Code session working in this folder does: one file appears, one goes.
+        File.Delete(Path.Combine(_root, "before.txt"));
+        Directory.CreateDirectory(Path.Combine(_root, "added-dir"));
+        File.WriteAllText(Path.Combine(_root, "added.txt"), "y");
+
+        vm.Refresh();
+
+        Assert.Equal(new[] { "added-dir", "added.txt" }, vm.Nodes.Select(n => n.Name).ToArray());
+    }
+
+    [Fact]
+    public void Refresh_KeepsExpandedFoldersExpanded_AndTheirLoadedChildren()
+    {
+        Directory.CreateDirectory(Path.Combine(_root, "src"));
+        File.WriteAllText(Path.Combine(_root, "src", "a.cs"), "x");
+        var (vm, feed, _, writer) = Build();
+        FocusRoot(vm, feed, writer, _root);
+
+        var src = vm.Nodes.Single(n => n.Name == "src");
+        src.IsExpanded = true;
+        Assert.Equal(new[] { "a.cs" }, src.Children.Select(n => n.Name).ToArray());
+
+        File.WriteAllText(Path.Combine(_root, "src", "b.cs"), "y");
+        File.WriteAllText(Path.Combine(_root, "top.txt"), "z");
+
+        vm.Refresh();
+
+        // Same node instance, still expanded - a clear-and-rebuild would have snapped it shut.
+        Assert.Same(src, vm.Nodes.Single(n => n.Name == "src"));
+        Assert.True(src.IsExpanded);
+        Assert.Equal(new[] { "a.cs", "b.cs" }, src.Children.Select(n => n.Name).ToArray());
+        Assert.Equal(new[] { "src", "top.txt" }, vm.Nodes.Select(n => n.Name).ToArray());
+    }
+
+    [Fact]
+    public void Refresh_DoesNotLoadChildrenOfANeverExpandedFolder()
+    {
+        Directory.CreateDirectory(Path.Combine(_root, "untouched"));
+        File.WriteAllText(Path.Combine(_root, "untouched", "deep.txt"), "x");
+        var (vm, feed, _, writer) = Build();
+        FocusRoot(vm, feed, writer, _root);
+
+        vm.Refresh();
+
+        var folder = vm.Nodes.Single(n => n.Name == "untouched");
+        Assert.False(folder.ChildrenLoaded);
+        // Still just the expand-arrow placeholder: a refresh must not walk folders the user never
+        // opened, or it would enumerate the whole tree on every agent file write.
+        Assert.Single(folder.Children);
+        Assert.Equal(string.Empty, folder.Children[0].Key);
+    }
+
+    [Fact]
+    public void Refresh_FolderThatBecameNonEmpty_GainsItsExpandArrow()
+    {
+        string folder = Path.Combine(_root, "empty");
+        Directory.CreateDirectory(folder);
+        var (vm, feed, _, writer) = Build();
+        FocusRoot(vm, feed, writer, _root);
+        Assert.Empty(vm.Nodes.Single(n => n.Name == "empty").Children);
+
+        File.WriteAllText(Path.Combine(folder, "appeared.txt"), "x");
+        vm.Refresh();
+
+        Assert.Single(vm.Nodes.Single(n => n.Name == "empty").Children);
+    }
+
+    [Fact]
+    public void Refresh_FolderThatBecameEmpty_LosesItsExpandArrow()
+    {
+        string folder = Path.Combine(_root, "full");
+        Directory.CreateDirectory(folder);
+        File.WriteAllText(Path.Combine(folder, "doomed.txt"), "x");
+        var (vm, feed, _, writer) = Build();
+        FocusRoot(vm, feed, writer, _root);
+        Assert.Single(vm.Nodes.Single(n => n.Name == "full").Children);
+
+        File.Delete(Path.Combine(folder, "doomed.txt"));
+        vm.Refresh();
+
+        Assert.Empty(vm.Nodes.Single(n => n.Name == "full").Children);
+    }
+
+    [Fact]
+    public void Refresh_CaseOnlyRename_ShowsTheNewName()
+    {
+        File.WriteAllText(Path.Combine(_root, "readme.md"), "x");
+        var (vm, feed, _, writer) = Build();
+        FocusRoot(vm, feed, writer, _root);
+
+        File.Move(Path.Combine(_root, "readme.md"), Path.Combine(_root, "README.md"));
+        vm.Refresh();
+
+        Assert.Equal(new[] { "README.md" }, vm.Nodes.Select(n => n.Name).ToArray());
+    }
+
+    [Fact]
+    public void Refresh_RootItselfDeleted_ShowsFolderNotFound()
+    {
+        string root = Path.Combine(_root, "doomed-root");
+        Directory.CreateDirectory(root);
+        File.WriteAllText(Path.Combine(root, "a.txt"), "x");
+        var (vm, feed, _, writer) = Build();
+        FocusRoot(vm, feed, writer, root);
+        Assert.True(vm.HasTree);
+
+        Directory.Delete(root, recursive: true);
+        vm.Refresh();
+
+        Assert.False(vm.HasTree);
+        Assert.Empty(vm.Nodes);
+        Assert.Equal($"Folder not found: {root}", vm.StatusText);
+    }
+
+    [Fact]
+    public void Refresh_NothingFocused_IsANoOp()
+    {
+        var (vm, _, _, _) = Build();
+
+        vm.Refresh();
+
+        Assert.False(vm.HasTree);
+        Assert.Equal("No folder or session focused.", vm.StatusText);
+    }
+
+    [Fact]
+    public void Refresh_ExpandedFolderDeleted_ReportsItAsCollapsed()
+    {
+        Directory.CreateDirectory(Path.Combine(_root, "src"));
+        File.WriteAllText(Path.Combine(_root, "src", "a.cs"), "x");
+        var (vm, feed, _, writer) = Build();
+        FocusRoot(vm, feed, writer, _root);
+        vm.Nodes.Single(n => n.Name == "src").IsExpanded = true;
+
+        (string Collapsed, string? Ancestor)? reported = null;
+        vm.FolderCollapsed += (collapsed, ancestor) => reported = (collapsed, ancestor);
+
+        Directory.Delete(Path.Combine(_root, "src"), recursive: true);
+        vm.Refresh();
+
+        // The git section follows the expanded folder, so a folder deleted underneath it has to be
+        // reported exactly like one the user closed - otherwise it keeps showing a folder that is gone.
+        Assert.Equal((Path.Combine(_root, "src"), (string?)null), reported);
+    }
+
+    [Fact]
+    public void Refresh_ReAppliesTheActiveSearchFilter()
+    {
+        File.WriteAllText(Path.Combine(_root, "match-me.txt"), "x");
+        var (vm, feed, _, writer) = Build();
+        FocusRoot(vm, feed, writer, _root);
+        vm.SearchText = "match";
+
+        File.WriteAllText(Path.Combine(_root, "other.txt"), "y");
+        File.WriteAllText(Path.Combine(_root, "match-too.txt"), "z");
+        vm.Refresh();
+
+        Assert.True(vm.Nodes.Single(n => n.Name == "match-me.txt").IsVisible);
+        Assert.True(vm.Nodes.Single(n => n.Name == "match-too.txt").IsVisible);
+        Assert.False(vm.Nodes.Single(n => n.Name == "other.txt").IsVisible);
+    }
+
+    [Fact]
+    public void WatcherChanged_RefreshesTheTree()
+    {
+        var (vm, feed, writer, watcher) = BuildWithWatcher();
+        FocusRoot(vm, feed, writer, _root);
+        Assert.Empty(vm.Nodes);
+
+        File.WriteAllText(Path.Combine(_root, "from-an-agent.txt"), "x");
+        watcher.RaiseChanged();
+
+        Assert.Equal(new[] { "from-an-agent.txt" }, vm.Nodes.Select(n => n.Name).ToArray());
+    }
+
+    [Fact]
+    public void FocusChange_PointsTheWatcherAtTheResolvedRoot()
+    {
+        string other = Path.Combine(_root, "other");
+        Directory.CreateDirectory(other);
+        var (vm, feed, writer, watcher) = BuildWithWatcher();
+
+        FocusRoot(vm, feed, writer, _root);
+        Assert.Equal(_root, watcher.WatchedPath);
+
+        FocusRoot(vm, feed, writer, other);
+        Assert.Equal(other, watcher.WatchedPath);
+    }
+
+    [Fact]
+    public void Dispose_DisposesTheWatcher()
+    {
+        var (vm, _, _, watcher) = BuildWithWatcher();
+
+        vm.Dispose();
+
+        Assert.True(watcher.Disposed);
+    }
+
+    [Fact]
+    public async System.Threading.Tasks.Task NewFileCommand_ShowsTheNewFileWithoutWaitingForTelemetry()
+    {
+        var (vm, feed, writer, dialogs, _) = BuildWithExplorerFakes();
+        FocusRoot(vm, feed, writer, _root);
+        dialogs.NewEntryName = "new.txt";
+
+        await vm.NewFileCommand.ExecuteAsync(null);
+
+        // No feed.Publish here on purpose: RequestRefresh lands in Rebuild, whose same-root fast path
+        // is a no-op, so the command has to refresh this tree itself.
+        Assert.Equal(new[] { "new.txt" }, vm.Nodes.Select(n => n.Name).ToArray());
+    }
+
+    [Fact]
+    public async System.Threading.Tasks.Task DeleteCommand_RemovesTheRowWithoutWaitingForTelemetry()
+    {
+        File.WriteAllText(Path.Combine(_root, "doomed.txt"), "bye");
+        var (vm, feed, writer, _, confirmation) = BuildWithExplorerFakes();
+        FocusRoot(vm, feed, writer, _root);
+        confirmation.ConfirmDeleteResult = true;
+
+        await vm.DeleteCommand.ExecuteAsync(vm.Nodes.Single(n => n.Name == "doomed.txt"));
+
+        Assert.Empty(vm.Nodes);
+    }
+
+    [Fact]
+    public async System.Threading.Tasks.Task MoveRenameCommand_ShowsTheNewNameWithoutWaitingForTelemetry()
+    {
+        File.WriteAllText(Path.Combine(_root, "old.txt"), "x");
+        var (vm, feed, writer, dialogs, _) = BuildWithExplorerFakes();
+        FocusRoot(vm, feed, writer, _root);
+        dialogs.MoveDestination = Path.Combine(_root, "new.txt");
+
+        await vm.MoveRenameCommand.ExecuteAsync(vm.Nodes.Single(n => n.Name == "old.txt"));
+
+        Assert.Equal(new[] { "new.txt" }, vm.Nodes.Select(n => n.Name).ToArray());
     }
 }

@@ -1,4 +1,4 @@
-namespace Accel.Cli;
+﻿namespace Accel.Cli;
 
 using System;
 using System.Collections.Generic;
@@ -26,10 +26,10 @@ public sealed record GitRepoSummary(string RepoName, string? Branch, string? Rem
 ///
 /// <para>Never throws: git not installed, the folder not being a repository, and any I/O failure
 /// all degrade to <c>null</c> for that call, matching <see cref="FilesTreeBuilder"/>'s "never
-/// propagate" convention. Called only on a focus change (see
-/// <see cref="Accel.App.ViewModels.GitPanelViewModel"/>'s remarks), never on a timer or
-/// <c>FileSystemWatcher</c> - so a stale git status simply waits for the next focus change, same
-/// as panel B's file tree.</para>
+/// propagate" convention. Called on a focus change, on one of panel B's own git actions, and on a
+/// debounced <c>FileSystemWatcher</c> signal for the repository being shown (see
+/// <see cref="Accel.App.ViewModels.GitPanelViewModel"/>'s remarks) - never on a timer, so an
+/// untouched repository costs nothing.</para>
 /// </summary>
 public static class GitStatusBuilder
 {
@@ -100,6 +100,44 @@ public static class GitStatusBuilder
         }
 
         return new GitRepoSummary(repoName, branch, remoteBranch, aheadCount);
+    }
+
+    /// <summary>
+    /// The root of the repository containing <paramref name="path"/> (`git rev-parse
+    /// --show-toplevel`, normalized to a platform path), or null when <paramref name="path"/> is not
+    /// inside a repository at all.
+    /// </summary>
+    /// <remarks>
+    /// Needed because every other method here happily accepts a <i>subfolder</i> of a repository -
+    /// `git status` run in <c>repo/src</c> still reports the whole repository, with repo-root-relative
+    /// paths - so "the folder panel B is showing" and "the folder whose contents determine what panel
+    /// B shows" are not the same directory. Anything that has to scope itself to the second (notably
+    /// <see cref="Accel.App.Services.IDirectoryWatcher"/>: a commit or a branch switch shows up in
+    /// <c>.git</c>, which only exists at the root) needs this rather than the displayed path.
+    /// </remarks>
+    public static string? FindRepositoryRoot(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !Directory.Exists(path))
+        {
+            return null;
+        }
+
+        string? toplevel = RunGitCommand(path, "rev-parse --show-toplevel");
+        if (string.IsNullOrEmpty(toplevel))
+        {
+            return null;
+        }
+
+        try
+        {
+            // git prints forward slashes even on Windows; GetFullPath normalizes them so the result
+            // compares equal to paths built anywhere else in the app.
+            return Path.GetFullPath(toplevel);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return null;
+        }
     }
 
     /// <summary>

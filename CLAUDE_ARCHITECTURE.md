@@ -359,6 +359,21 @@ and guarantees they don't outlive the app even across crashes.
   convention.
 - **`IUiThreadDispatcher` / `IDebounceTimer`** — seams over `Dispatcher`/`DispatcherTimer` purely for
   headless testability, mirroring the pattern used by the legacy WinForms monitor this UI replaced.
+- **`IDirectoryWatcher`** (`App/Services/IDirectoryWatcher.cs`) — panel B's *disk* input, alongside
+  telemetry: a re-targetable recursive `FileSystemWatcher` behind the same `DebounceCoalescer` +
+  `IDebounceTimer` pair `TelemetryFeed` uses, raising one coalesced `Changed` per quiet window on the UI
+  thread. Never polls; a watcher it cannot create leaves the panel behaving as it did before disk
+  watching existed. `FakeDirectoryWatcher` stands in for tests.
+  - **Filtering is a performance requirement, not a nicety.** `HighChurnDirectories` (`bin`, `obj`,
+    `node_modules`, `target`, `packages`, `.vs`, tool caches …) is dropped unconditionally for both
+    panels: one `dotnet build` in the watched folder otherwise keeps the debounce window permanently
+    re-armed and turns panel B into a refresh loop for the duration of the build. Same list, same
+    reason, as VS Code's `files.watcherExclude` defaults. Matched as whole path segments and only
+    *below* the watched root, so a project living in a folder called `target` is unaffected. The cost
+    is that a change inside one of those folders no longer auto-refreshes panel B.
+  - Per-panel on top of that: the file tree also excludes content-only changes (it renders names and
+    nesting, not bytes) and `.git`, at a 750ms window; the git section includes both at 1500ms, because
+    `.git` is where a commit/push/checkout shows up and its refresh is the expensive one.
 - **Dialogs** (`CreateSessionDialog`, `EditSessionArgsDialog`, `RenameSessionDialog`) — each pairs a
   WPF-agnostic ViewModel (`[RelayCommand] Confirm`/`Cancel`, `event RequestClose`) with a thin
   code-behind. `CreateSessionDialogViewModel` builds a `PtyLaunchSpec` via `PtySession.CreateClaudeSpec`
@@ -402,8 +417,10 @@ and guarantees they don't outlive the app even across crashes.
     deliberately check-on-activate + check-on-save polling, not a `FileSystemWatcher` (see the
     rationale comment at its call sites): a clean buffer silently reloads; a dirty one gets a
     three-way Keep-mine / Reload / Cancel prompt. A successful save re-reads its own snapshot and
-    triggers the same `RootsPanelViewModel.RefreshCommand` refresh path panel B's git section already
-    listens to.
+    triggers the same `RootsPanelViewModel.RefreshCommand` refresh path `RemoveSession_Click` uses;
+    panel B's git section is *not* refreshed from here (that was assumed to ride along on
+    `RequestRefresh`, which lands in the no-op fast path) — its own `IDirectoryWatcher` picks the write
+    up instead, and covers a save made from anywhere rather than only from this call site.
   - **Guards**: closing a dirty tab prompts Save/Discard/Cancel (`ConfirmCloseDirtyTabAsync` delegate
     on `TabsViewModel`); closing the window with any dirty tabs shows one summary dialog (Save All /
     Discard All / Cancel). Syntax colours come from `App/Services/SyntaxColorizer.cs`, a debounced
@@ -429,15 +446,47 @@ and guarantees they don't outlive the app even across crashes.
   earlier sibling's subtree was large. Raises `FolderExpanded`/`FolderCollapsed` so `GitPanelViewModel`
   can follow which folder is being drilled into. Double-clicking a file row opens (or selects) its tab
   in panel C/D (handled in `MainWindow` code-behind via `TabsViewModel.AddFileTab`, not through this
-  ViewModel — editable in panel D's editor when the file reads as text); no stage/commit actions.
+  ViewModel — editable in panel D's editor when the file reads as text).
+  - **Two refreshes, deliberately different.** `Rebuild` (a focus change) replaces the tree wholesale
+    and is a no-op when the resolved root is unchanged — the anti-thrash fast path that stops an
+    unrelated telemetry snapshot from snapping every expanded folder shut. `Refresh` (contents of the
+    *same* folder changed) merges disk into the existing rows, reusing each row's ViewModel so
+    expansion state and already-loaded subtrees survive; recursion stops at any never-expanded folder,
+    so its cost tracks what the user actually opened, not the size of the tree. `Refresh` is driven by
+    an injected `IDirectoryWatcher` and by this panel's own New/Rename/Delete commands, which cannot
+    use `RequestRefresh` for it (that lands back in `Rebuild`'s fast path). A collapsed folder's expand
+    arrow is settled from the `HasChildren` its parent's enumeration already produced rather than
+    re-probed, so a refresh is one enumeration per opened folder and no I/O at all for the rest —
+    measured at ~8ms with 31 folders open, against the hundreds of extra directory handles per refresh
+    the probing version cost.
 - **`GitPanelViewModel.cs`** (panel B, bottom) — a flat `git status` list (via `GitStatusBuilder.Build`)
   for the same focused root `FilesPanelViewModel` resolves, split into `StagedChanges`/`Changes`
   (unstaged + untracked), VS Code Source Control-style. Wired to `FilesPanelViewModel.FolderExpanded`/
   `FolderCollapsed` in `Program.cs` so drilling into a repo folder in the file tree switches this section
   to that repo. Double-clicking an Added/Untracked/Deleted row opens a single-pane tab in panel C/D
   (editable when a working-tree copy reads as text; a Deleted entry falls back to read-only
-  `git show HEAD:` content) and a Modified row opens the read-only side-by-side diff; no
-  stage/unstage/discard/commit action yet.
+  `git show HEAD:` content) and a Modified row opens the read-only side-by-side diff.
+  - **Mutating actions** (stage/unstage/stage-all, discard, commit, push/pull, branch switch) shell out
+    via `GitActionsService` behind a single `IsBusy` flag that disables the whole toolbar, and on
+    success re-run the full `git status` rather than patching the lists locally.
+  - **Three refresh triggers**: a focus change (`Rebuild`, same no-op-on-same-root fast path as the
+    file tree); its own commands, calling the rebuild directly — `RequestRefresh` cannot serve them,
+    which is why a commit or a push used to leave its own result invisible until the next focus change;
+    and an `IDirectoryWatcher` for everything Accel does not do itself (a session committing in the
+    terminal, an agent editing files, a `git pull` elsewhere, a save from panel D's editor). The
+    watcher is pointed at `GitStatusBuilder.FindRepositoryRoot` rather than the displayed folder — they
+    differ for a subfolder of a repo, and `.git` (where commits, pushes and checkouts show up) only
+    exists at the root. Watcher-driven refreshes are skipped while `IsBusy`, since a command's own
+    `.git` churn is exactly what the watcher is reporting.
+  - **The watcher-driven refresh reads git off the UI thread; the other two do not.** A refresh is
+    ~half a dozen `git` subprocesses (measured ~400ms on this repo), so `RefreshAsync` splits it into a
+    static `ReadDisplayState` (no ViewModel state touched — that is what makes it safe on a thread pool
+    thread) and a UI-thread `ApplyDisplayState`, with in-flight coalescing so ticks arriving mid-read
+    become one follow-up pass rather than another half-dozen processes each, and a captured-folder
+    staleness check so a focus change during a read is not overwritten by it. Focus changes and
+    commands stay synchronous: user-driven, rare, and expected to have landed on return. The *branch
+    list* is only re-read when the repo changed, a command ran, or the current branch is one the
+    ComboBox has never heard of — it was two more subprocesses per refresh otherwise.
 - **`McpSkillsPanelViewModel.cs`** (panel A, bottom third) — the focused session's MCP-tool and Skill
   hit counts as two flat lists (`ToolUsageRowViewModel`), most-used first. A third independent reader of
   the same `ITelemetryFeed`/`ISessionSelectionService` pair; all its data already rides on the pushed
