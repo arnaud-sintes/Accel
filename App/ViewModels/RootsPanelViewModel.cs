@@ -265,6 +265,12 @@ public sealed partial class RootsPanelNodeViewModel : ObservableObject
     [ObservableProperty]
     private bool _isSelected;
 
+    /// <summary>Whether the search box's current text matches this row or any descendant - see
+    /// <see cref="RootsPanelViewModel.ApplyFilter"/>. Defaults to true (every row visible) so a
+    /// panel with no search text active never needs to touch this at all.</summary>
+    [ObservableProperty]
+    private bool _isVisible = true;
+
     partial void OnIsSelectedChanged(bool value) => _owner?.OnNodeSelectionChanged(this, value);
 
     private string BuildAutomationDescription()
@@ -619,6 +625,77 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
     /// </summary>
     public event Action? SessionWaitingForAttention;
 
+    /// <summary>The search box's current text - filters <see cref="Roots"/> down to rows whose
+    /// <see cref="RootsPanelNodeViewModel.DisplayText"/>/<see cref="RootsPanelNodeViewModel.Text"/>
+    /// contains it (case-insensitive), plus any ancestor of a match (so a matching session still
+    /// shows under its root). Re-applied on every <see cref="Rebuild"/> too, since telemetry ticks
+    /// replace every node wholesale.</summary>
+    [ObservableProperty]
+    private string _searchText = string.Empty;
+
+    /// <summary>Every node this VM auto-expanded purely to reveal a search match under a
+    /// previously-collapsed row - collapsed back once <see cref="SearchText"/> is cleared, so
+    /// clearing a search restores the tree to how the user actually left it rather than leaving
+    /// everything the search happened to touch stuck open.</summary>
+    private readonly HashSet<RootsPanelNodeViewModel> _autoExpandedForSearch = new();
+
+    partial void OnSearchTextChanged(string value) => ApplyFilter();
+
+    /// <summary>The search box's reset button.</summary>
+    [RelayCommand]
+    private void ClearSearch() => SearchText = string.Empty;
+
+    private void ApplyFilter()
+    {
+        string search = SearchText.Trim();
+
+        if (search.Length == 0)
+        {
+            foreach (var node in _autoExpandedForSearch)
+            {
+                node.IsExpanded = false;
+            }
+
+            _autoExpandedForSearch.Clear();
+
+            foreach (var node in EnumerateAll(Roots))
+            {
+                node.IsVisible = true;
+            }
+
+            return;
+        }
+
+        foreach (var root in Roots)
+        {
+            ApplyFilterRecursive(root, search);
+        }
+    }
+
+    private bool ApplyFilterRecursive(RootsPanelNodeViewModel node, string search)
+    {
+        bool selfMatch = node.DisplayText.Contains(search, StringComparison.OrdinalIgnoreCase) ||
+            node.Text.Contains(search, StringComparison.OrdinalIgnoreCase);
+
+        bool anyChildVisible = false;
+        foreach (var child in node.Children)
+        {
+            if (ApplyFilterRecursive(child, search))
+            {
+                anyChildVisible = true;
+            }
+        }
+
+        if (anyChildVisible && !node.IsExpanded)
+        {
+            node.IsExpanded = true;
+            _autoExpandedForSearch.Add(node);
+        }
+
+        node.IsVisible = selfMatch || anyChildVisible;
+        return node.IsVisible;
+    }
+
     /// <summary>Starts the feed (idempotent) - separate from the constructor so a host can build the
     /// whole panel graph before any telemetry starts flowing.</summary>
     public void Start() => _feed.Start();
@@ -800,6 +877,10 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
             var expandedKeys = CaptureExpandedKeys();
             string? selectedKey = SelectedKey;
 
+            // Every rebuild replaces every node - the old ones this set references are gone either
+            // way, so there is nothing to collapse back.
+            _autoExpandedForSearch.Clear();
+
             Roots.Clear();
 
             foreach (var root in tree.Roots)
@@ -841,6 +922,11 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
             }
 
             RaiseSessionWaitingForAttentionIfNewlyWaiting();
+
+            if (!string.IsNullOrWhiteSpace(SearchText))
+            {
+                ApplyFilter();
+            }
         }
         finally
         {

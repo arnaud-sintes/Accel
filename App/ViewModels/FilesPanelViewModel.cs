@@ -99,8 +99,21 @@ public sealed partial class FilesPanelNodeViewModel : ObservableObject
 
     public ObservableCollection<FilesPanelNodeViewModel> Children { get; } = new();
 
+    /// <summary>Whether <see cref="Children"/> reflects real, on-disk content yet (false while it
+    /// still only holds <see cref="Placeholder"/>) - lets <see cref="FilesPanelViewModel.ApplyFilterRecursive"/>
+    /// search only what has already been loaded, rather than forcing a synchronous, unbounded
+    /// filesystem walk of every never-expanded folder (potentially the whole tree, including things
+    /// like <c>node_modules</c> or <c>.git</c>) on every keystroke.</summary>
+    internal bool ChildrenLoaded => _childrenLoaded;
+
     [ObservableProperty]
     private bool _isExpanded;
+
+    /// <summary>Whether the search box's current text matches this row or any descendant - see
+    /// <see cref="FilesPanelViewModel.ApplyFilter"/>. Defaults to true (every row visible) so a
+    /// panel with no search text active never needs to touch this at all.</summary>
+    [ObservableProperty]
+    private bool _isVisible = true;
 
     partial void OnIsExpandedChanged(bool value)
     {
@@ -176,6 +189,100 @@ public sealed partial class FilesPanelViewModel : ObservableObject, IDisposable
     private string? _currentRootPath;
     private bool _rootResolvedOnce;
     private bool _disposed;
+
+    /// <summary>The search box's current text - filters <see cref="Nodes"/> down to rows whose
+    /// <see cref="FilesPanelNodeViewModel.Name"/> contains it (case-insensitive), plus any ancestor
+    /// folder of a match. Deliberately does <b>not</b> reach into a folder the user has never
+    /// expanded (see <see cref="ApplyFilterRecursive"/>'s remarks) - only already-loaded content is
+    /// searched, so a match nested under a folder that's still collapsed simply isn't found until
+    /// the user expands it themselves.</summary>
+    [ObservableProperty]
+    private string _searchText = string.Empty;
+
+    /// <summary>Every folder this VM auto-expanded (and thereby lazily loaded) purely to search or
+    /// reveal a match under a previously-collapsed row - collapsed back once <see cref="SearchText"/>
+    /// is cleared, so clearing a search restores the tree to how the user actually left it.</summary>
+    private readonly HashSet<FilesPanelNodeViewModel> _autoExpandedForSearch = new();
+
+    partial void OnSearchTextChanged(string value) => ApplyFilter();
+
+    /// <summary>The search box's reset button.</summary>
+    [RelayCommand]
+    private void ClearSearch() => SearchText = string.Empty;
+
+    private void ApplyFilter()
+    {
+        string search = SearchText.Trim();
+
+        if (search.Length == 0)
+        {
+            foreach (var node in _autoExpandedForSearch)
+            {
+                node.IsExpanded = false;
+            }
+
+            _autoExpandedForSearch.Clear();
+
+            foreach (var node in EnumerateAll(Nodes))
+            {
+                node.IsVisible = true;
+            }
+
+            return;
+        }
+
+        foreach (var node in Nodes)
+        {
+            ApplyFilterRecursive(node, search);
+        }
+    }
+
+    /// <summary>
+    /// Only recurses into a directory whose children are already loaded (<see cref="FilesPanelNodeViewModel.ChildrenLoaded"/>)
+    /// - a folder the user has never expanded is matched on its own <see cref="FilesPanelNodeViewModel.Name"/>
+    /// only, never force-loaded just to search it. Forcing every never-expanded folder open on every
+    /// keystroke was tried first and hung the app on any real project tree: it turns a single
+    /// keystroke into a synchronous, unbounded filesystem walk of the whole tree (including things
+    /// like <c>node_modules</c> or <c>.git</c>), all on the UI thread.
+    /// </summary>
+    private bool ApplyFilterRecursive(FilesPanelNodeViewModel node, string search)
+    {
+        bool selfMatch = node.Name.Contains(search, StringComparison.OrdinalIgnoreCase);
+        bool anyChildVisible = false;
+
+        if (node.IsDirectory && node.ChildrenLoaded)
+        {
+            foreach (var child in node.Children)
+            {
+                if (ApplyFilterRecursive(child, search))
+                {
+                    anyChildVisible = true;
+                }
+            }
+
+            if (anyChildVisible && !node.IsExpanded)
+            {
+                node.IsExpanded = true;
+                _autoExpandedForSearch.Add(node);
+            }
+        }
+
+        node.IsVisible = selfMatch || anyChildVisible;
+        return node.IsVisible;
+    }
+
+    private static IEnumerable<FilesPanelNodeViewModel> EnumerateAll(IEnumerable<FilesPanelNodeViewModel> nodes)
+    {
+        foreach (var node in nodes)
+        {
+            yield return node;
+
+            foreach (var child in EnumerateAll(node.Children))
+            {
+                yield return child;
+            }
+        }
+    }
 
     /// <summary>Every directory path currently expanded in <see cref="Nodes"/> - lets
     /// <see cref="FolderCollapsed"/> report the nearest still-expanded ancestor of a folder that just
@@ -270,6 +377,10 @@ public sealed partial class FilesPanelViewModel : ObservableObject, IDisposable
         Nodes.Clear();
         _expandedFolderPaths.Clear();
 
+        // Every rebuild replaces every node - the old ones this set references are gone either way,
+        // so there is nothing to collapse back.
+        _autoExpandedForSearch.Clear();
+
         if (string.IsNullOrEmpty(rootPath))
         {
             HasTree = false;
@@ -292,6 +403,11 @@ public sealed partial class FilesPanelViewModel : ObservableObject, IDisposable
 
         HasTree = true;
         StatusText = Nodes.Count == 0 ? $"{rootPath} (empty)" : rootPath;
+
+        if (!string.IsNullOrWhiteSpace(SearchText))
+        {
+            ApplyFilter();
+        }
     }
 
     private void OnNodeExpanded(string path)

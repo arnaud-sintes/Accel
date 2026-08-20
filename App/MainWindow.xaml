@@ -333,6 +333,24 @@
                                 Style="{StaticResource SecondaryButtonStyle}" HorizontalAlignment="Left" />
                     </StackPanel>
 
+                    <!--
+                        Search box: filters Roots down to rows matching SearchText (plus any
+                        ancestor of a match, so a matching session still shows under its root) as
+                        the user types - see RootsPanelViewModel.ApplyFilter. The ✕ button only
+                        appears once there is text to clear (StringToVis).
+                    -->
+                    <Grid DockPanel.Dock="Top" Margin="16,0,16,12">
+                        <TextBox Text="{Binding SearchText, UpdateSourceTrigger=PropertyChanged}"
+                                 Padding="8,6,30,6"
+                                 AutomationProperties.Name="Search sessions" />
+                        <Button Content="&#xE711;" FontFamily="Segoe MDL2 Assets" FontSize="10"
+                                HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,4,0"
+                                Command="{Binding ClearSearchCommand}"
+                                Visibility="{Binding SearchText, Converter={StaticResource StringToVis}}"
+                                Style="{StaticResource TabCloseButtonStyle}"
+                                ToolTip="Clear search" AutomationProperties.Name="Clear search" />
+                    </Grid>
+
                     <!-- Feed status / counts: makes "working but empty" visibly different from "broken". -->
                     <Border DockPanel.Dock="Bottom" BorderBrush="{StaticResource StrokeSubtleBrush}" BorderThickness="0,1,0,0"
                             Padding="16,10">
@@ -399,6 +417,7 @@
                             <Style TargetType="TreeViewItem" BasedOn="{StaticResource {x:Type TreeViewItem}}">
                                 <Setter Property="IsExpanded" Value="{Binding IsExpanded, Mode=TwoWay}" />
                                 <Setter Property="IsSelected" Value="{Binding IsSelected, Mode=TwoWay}" />
+                                <Setter Property="Visibility" Value="{Binding IsVisible, Converter={StaticResource BoolToVis}}" />
                                 <Setter Property="Tag" Value="{Binding RelativeSource={RelativeSource AncestorType=TreeView}, Path=DataContext}" />
                                 <!--
                                     Stretch (not the TreeViewItem default of Left) so each row's
@@ -1343,6 +1362,27 @@
                             <TextBlock Text="FILES" Style="{StaticResource SectionHeaderTextStyle}" />
                         </Border>
 
+                        <!--
+                            Search box: filters Nodes down to rows matching SearchText (plus any
+                            ancestor folder of a match) as the user types - see
+                            FilesPanelViewModel.ApplyFilter. Deliberately searches only already-loaded
+                            content, never force-loading a folder the user hasn't expanded yet - doing
+                            that turned every keystroke into a synchronous, unbounded filesystem walk
+                            of the whole tree and hung the app. The ✕ button only appears once there
+                            is text to clear (StringToVis).
+                        -->
+                        <Grid DockPanel.Dock="Top" Margin="16,0,16,12">
+                            <TextBox Text="{Binding SearchText, UpdateSourceTrigger=PropertyChanged}"
+                                     Padding="8,6,30,6"
+                                     AutomationProperties.Name="Search files" />
+                            <Button Content="&#xE711;" FontFamily="Segoe MDL2 Assets" FontSize="10"
+                                    HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,4,0"
+                                    Command="{Binding ClearSearchCommand}"
+                                    Visibility="{Binding SearchText, Converter={StaticResource StringToVis}}"
+                                    Style="{StaticResource TabCloseButtonStyle}"
+                                    ToolTip="Clear search" AutomationProperties.Name="Clear search" />
+                        </Grid>
+
                         <TreeView x:Name="FilesTreeView" ItemsSource="{Binding Nodes}" BorderThickness="0" Background="Transparent"
                                   Padding="8,0,8,8" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                             <!--
@@ -1373,6 +1413,7 @@
                                     <!-- Two-way: the user's own expand/collapse gestures are the only
                                          interaction this tree supports (Phase 5 scope). -->
                                     <Setter Property="IsExpanded" Value="{Binding IsExpanded, Mode=TwoWay}" />
+                                    <Setter Property="Visibility" Value="{Binding IsVisible, Converter={StaticResource BoolToVis}}" />
                                     <Setter Property="HorizontalContentAlignment" Value="Stretch" />
                                     <Setter Property="AutomationProperties.Name" Value="{Binding AutomationDescription}" />
                                     <Setter Property="ToolTip" Value="{Binding Key}" />

@@ -401,9 +401,15 @@ public partial class MainWindow : Window
         NativeMethods.FlashWindowEx(ref info);
     }
 
-    /// <summary>Synchronously repaints the entire window (RDW_UPDATENOW), including its full frame
-    /// (RDW_FRAME) and every child (RDW_ALLCHILDREN) - a hard guarantee against any stale/leftover
-    /// bitmap surviving an activation change, regardless of the precise Win32 message-level cause.</summary>
+    /// <summary>Synchronously repaints the entire window (RDW_UPDATENOW) and every child
+    /// (RDW_ALLCHILDREN) - a hard guarantee against any stale/leftover bitmap surviving an
+    /// activation change, regardless of the precise Win32 message-level cause.
+    /// Deliberately NOT RDW_FRAME (nor RDW_ERASE): this WindowStyle="None" window's client rect
+    /// already covers the entire window (WindowChrome's / this hook's WM_NCCALCSIZE handling), so
+    /// invalidating the client area reaches every visible pixel - while RDW_FRAME forces a
+    /// synchronous WM_NCPAINT that DefWindowProc answers by painting the classic grey Win32 frame
+    /// for the window's WS_THICKFRAME style over the edge pixels, visible as a grey border flash
+    /// on every focus change until WPF's next render pass paints back over it.</summary>
     private void ForceFullWindowRedraw()
     {
         if (_windowHandle == IntPtr.Zero)
@@ -412,8 +418,6 @@ public partial class MainWindow : Window
         }
 
         const uint RDW_INVALIDATE = 0x0001;
-        const uint RDW_ERASE = 0x0004;
-        const uint RDW_FRAME = 0x0400;
         const uint RDW_ALLCHILDREN = 0x0080;
         const uint RDW_UPDATENOW = 0x0100;
 
@@ -421,7 +425,7 @@ public partial class MainWindow : Window
             _windowHandle,
             IntPtr.Zero,
             IntPtr.Zero,
-            RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW);
+            RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
     }
 
     /// <summary>
@@ -478,6 +482,9 @@ public partial class MainWindow : Window
     {
         const int WM_GETMINMAXINFO = 0x0024;
         const int WM_NCCALCSIZE = 0x0083;
+        const int WM_NCPAINT = 0x0085;
+        const int WM_NCUAHDRAWCAPTION = 0x00AE;
+        const int WM_NCUAHDRAWFRAME = 0x00AF;
 
         switch (msg)
         {
@@ -486,6 +493,29 @@ public partial class MainWindow : Window
                 return IntPtr.Zero;
             case WM_NCCALCSIZE:
                 return ClampMaximizedClientRectToWorkArea(hwnd, wParam, lParam, ref handled);
+            case WM_NCPAINT:
+                // Swallowed entirely (the Chromium / Windows Terminal borderless-window move):
+                // letting this reach DefWindowProc paints the CLASSIC grey Win32 frame for the
+                // window's WS_THICKFRAME style over the outer edge pixels - the grey border flash
+                // seen on every focus change, because WindowChrome re-asserts frame state on
+                // activation via SetWindowPos(SWP_FRAMECHANGED), and SWP_FRAMECHANGED is the same
+                // bit as SWP_DRAWFRAME ("draws a frame around the window"), so each activation
+                // change carries a WM_NCPAINT with it. Nothing legitimate is lost: WM_NCCALCSIZE
+                // handling (WindowChrome's, and this hook's while zoomed) makes the client rect
+                // cover the entire window, so there is no non-client surface for this message to
+                // paint - only DefWindowProc's style-driven frame drawing, which ignores that.
+                handled = true;
+                return IntPtr.Zero;
+            case WM_NCUAHDRAWCAPTION:
+            case WM_NCUAHDRAWFRAME:
+                // Undocumented "UAH" (User32 Appearance Handler) messages Windows sends to themed
+                // windows on activation change; DefWindowProc answers them by drawing the CLASSIC
+                // caption/frame directly - NOT via WM_NCPAINT, which is why suppressing WM_NCPAINT
+                // above does not cover this path. Swallowing both is the conventional custom-chrome
+                // companion to the WM_NCPAINT suppression (same rationale: the client rect covers
+                // the whole window, so there is no legitimate non-client surface to draw).
+                handled = true;
+                return IntPtr.Zero;
         }
 
         return IntPtr.Zero;
