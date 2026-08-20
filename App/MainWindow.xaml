@@ -1269,6 +1269,36 @@
                                                  AutomationProperties.Name="After (read-only)" />
 
                                     <!--
+                                        Editable "After" pane for an unstaged Modified git-change tab
+                                        (MainWindow.ShowGitDiffTabAsync - only when GitDiffNewSide is
+                                        WorkingTree and a FileEditBuffer could be created). Occupies the
+                                        same cells as DiffNewLineNumbers' gutter Border + DiffNewText
+                                        above and is mutually exclusive with both: exactly one of
+                                        "DiffNewEditor" or "DiffNewLineNumbers Border + DiffNewText" is
+                                        Visible at a time, toggled in code-behind. Uses AvalonEdit's own
+                                        ShowLineNumbers gutter instead of the hand-rolled one, same as
+                                        FileEditor.
+                                    -->
+                                    <avalonEdit:TextEditor x:Name="DiffNewEditor" Grid.Row="1" Grid.Column="3" Grid.ColumnSpan="2"
+                                                           Visibility="Collapsed"
+                                                           ShowLineNumbers="True"
+                                                           WordWrap="False"
+                                                           VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
+                                                           FontFamily="Consolas" FontSize="{StaticResource FontSizeBody}"
+                                                           Padding="8,16,16,16" BorderThickness="0"
+                                                           Background="{StaticResource BackgroundBaseBrush}"
+                                                           Foreground="{StaticResource TextPrimaryBrush}"
+                                                           LineNumbersForeground="{StaticResource TextMutedBrush}"
+                                                           AutomationProperties.Name="After content (editable)">
+                                        <avalonEdit:TextEditor.Options>
+                                            <avalonEdit:TextEditorOptions HighlightCurrentLine="True"
+                                                                          EnableHyperlinks="False"
+                                                                          EnableEmailHyperlinks="False"
+                                                                          ConvertTabsToSpaces="False" />
+                                        </avalonEdit:TextEditor.Options>
+                                    </avalonEdit:TextEditor>
+
+                                    <!--
                                         "After" side's diff-mark overview strip: a thin always-visible ruler
                                         (green = an added/changed line at this position, red = old lines were
                                         removed just before this position), one mark per DiffNewText source

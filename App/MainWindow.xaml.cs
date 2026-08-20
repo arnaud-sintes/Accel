@@ -194,6 +194,11 @@ public partial class MainWindow : Window
         DiffOldText.AddHandler(ScrollViewer.ScrollChangedEvent, new ScrollChangedEventHandler(DiffOldText_ScrollChanged), true);
         DiffNewText.AddHandler(ScrollViewer.ScrollChangedEvent, new ScrollChangedEventHandler(DiffNewText_ScrollChanged), true);
 
+        // DiffNewEditor is a second AvalonEdit TextEditor (the diff view's editable "After" pane, see
+        // ShowGitDiffTabAsync's remarks) - it needs the same scroll-sync handler as DiffNewText,
+        // since exactly one of the two is ever visible for a given diff tab.
+        DiffNewEditor.AddHandler(ScrollViewer.ScrollChangedEvent, new ScrollChangedEventHandler(DiffNewText_ScrollChanged), true);
+
         // Theme.xaml brushes for the two things AvalonEdit exposes only behind read-only TextArea/
         // TextView properties, which XAML therefore cannot reach (everything else FileEditor needs is
         // a real dependency property and is bound in MainWindow.xaml). Frozen brushes come straight
@@ -210,6 +215,24 @@ public partial class MainWindow : Window
         _fileSyntaxColorizer = new SyntaxColorizer(new DispatcherDebounceTimer(Dispatcher, SyntaxColorizer.RebuildDebounce));
         _fileSyntaxColorizer.CacheRebuilt += () => FileEditor.TextArea.TextView.Redraw();
         FileEditor.TextArea.TextView.LineTransformers.Add(_fileSyntaxColorizer);
+
+        // DiffNewEditor is a second, independent AvalonEdit surface (the diff view's editable "After"
+        // pane), so it needs its own SyntaxColorizer instance - the file editor's is already bound to
+        // FileEditor's TextView and cannot serve two controls at once. Same theming/wiring as above.
+        DiffNewEditor.TextArea.SelectionBrush = (Brush)FindResource("SelectionBrush");
+        DiffNewEditor.TextArea.SelectionBorder = null;
+        DiffNewEditor.TextArea.TextView.CurrentLineBackground = (Brush)FindResource("SurfaceElevatedBrush");
+        DiffNewEditor.TextArea.TextView.CurrentLineBorder = new Pen((Brush)FindResource("StrokeSubtleBrush"), 1);
+
+        _diffSyntaxColorizer = new SyntaxColorizer(new DispatcherDebounceTimer(Dispatcher, SyntaxColorizer.RebuildDebounce));
+        _diffSyntaxColorizer.CacheRebuilt += () => DiffNewEditor.TextArea.TextView.Redraw();
+        DiffNewEditor.TextArea.TextView.LineTransformers.Add(_diffSyntaxColorizer);
+
+        // Paints the "After" pane's added-line background over DiffNewEditor's live document - the
+        // AvalonEdit equivalent of BuildHighlightedDocument's per-paragraph background for the
+        // read-only DiffNewText pane. Its highlighted-line set is refreshed by ShowGitDiffTabAsync.
+        _diffAddedLineHighlighter = new DiffLineHighlighter();
+        DiffNewEditor.TextArea.TextView.LineTransformers.Add(_diffAddedLineHighlighter);
 
         RootsPanel = rootsPanel;
         Tabs = tabs;
@@ -1377,6 +1400,15 @@ public partial class MainWindow : Window
     /// document by <see cref="ShowFileTabAsync"/>.</summary>
     private readonly SyntaxColorizer _fileSyntaxColorizer;
 
+    /// <summary>Same role as <see cref="_fileSyntaxColorizer"/>, for <see cref="DiffNewEditor"/> - see
+    /// <see cref="ShowGitDiffTabAsync"/>'s remarks for why the diff view's editable "After" pane needs
+    /// its own instance rather than sharing the file editor's.</summary>
+    private readonly SyntaxColorizer _diffSyntaxColorizer;
+
+    /// <summary>Paints <see cref="DiffNewEditor"/>'s added-line background - see
+    /// <see cref="DiffLineHighlighter"/>. Refreshed by <see cref="ShowGitDiffTabAsync"/>.</summary>
+    private readonly DiffLineHighlighter _diffAddedLineHighlighter;
+
     /// <summary>
     /// One <see cref="FileEditBuffer"/> per open <b>editable</b> file/git-change tab, keyed by
     /// <see cref="TabViewModel.TabId"/> - which for those kinds is the file's own full path (see
@@ -1402,6 +1434,13 @@ public partial class MainWindow : Window
     /// right buffer when the tab is left, without having to know which tab is being left - see
     /// <see cref="CaptureFileEditorViewState"/>.</summary>
     private FileEditBuffer? _activeFileEditBuffer;
+
+    /// <summary>Same role as <see cref="_activeFileEditBuffer"/>, for <see cref="DiffNewEditor"/> -
+    /// the buffer it is currently pointed at when a diff tab's "After" pane is editable
+    /// (<see cref="GitDiffSide.WorkingTree"/>), or <see langword="null"/> otherwise. The two fields are
+    /// never both non-null for the same buffer at once: <see cref="FileEditor"/> and
+    /// <see cref="DiffNewEditor"/> render mutually-exclusive panes.</summary>
+    private FileEditBuffer? _activeDiffEditBuffer;
 
     /// <summary>
     /// Renders <paramref name="tab"/> in panel D's editor, coloured per
@@ -1502,12 +1541,18 @@ public partial class MainWindow : Window
 
     /// <summary>
     /// Builds the edit buffer for <paramref name="tab"/>, or <see langword="null"/> when the tab must
-    /// stay read-only. Three independent reasons for null, all of them "there is nothing a save could
-    /// write to": the tab is not a single-pane file/git-change tab at all; its working-tree copy does
-    /// not exist (a Deleted GIT entry, whose content <see cref="ReadTabContentAsync"/> then pulls out
-    /// of <c>HEAD</c>); or the bytes are not safely editable as text
-    /// (<see cref="FileTextSnapshot.IsTextEditable"/> - saving decoded text back over those would
-    /// persist U+FFFD in place of the user's data).
+    /// stay read-only. Four independent reasons for null, all of them "there is nothing a save could
+    /// write to": the tab is not a single-pane file/git-change tab, and not a diff tab whose "After"
+    /// side is the working tree either (see below); its working-tree copy does not exist (a Deleted
+    /// GIT entry, whose content <see cref="ReadTabContentAsync"/> then pulls out of <c>HEAD</c>); or
+    /// the bytes are not safely editable as text (<see cref="FileTextSnapshot.IsTextEditable"/> -
+    /// saving decoded text back over those would persist U+FFFD in place of the user's data).
+    ///
+    /// <para>A diff tab (<see cref="TabViewModel.IsGitDiffTab"/>) only qualifies when
+    /// <see cref="TabViewModel.GitDiffNewSide"/> is <see cref="GitDiffSide.WorkingTree"/> - an unstaged
+    /// Modified entry's "After" pane (see <see cref="ShowGitDiffTabAsync"/>'s remarks). A staged
+    /// entry's "After" side is the index blob, which has no direct disk file to write edits back to,
+    /// so it stays read-only.</para>
     /// </summary>
     /// <remarks>
     /// The read goes through <see cref="FileTextCodec"/>, not <see cref="File.ReadAllTextAsync(string)"/>
@@ -1518,7 +1563,11 @@ public partial class MainWindow : Window
     /// </remarks>
     private static async Task<FileEditBuffer?> TryCreateFileEditBufferAsync(TabViewModel tab, SourceLanguage language)
     {
-        if (!(tab.IsFileTab || tab.IsGitChangeTab) || tab.IsGitDiffTab || !File.Exists(tab.TabId))
+        bool canEdit = tab.IsFileTab
+            || (tab.IsGitChangeTab && !tab.IsGitDiffTab)
+            || (tab.IsGitDiffTab && tab.GitDiffNewSide == GitDiffSide.WorkingTree);
+
+        if (!canEdit || !File.Exists(tab.TabId))
         {
             return null;
         }
@@ -1548,26 +1597,9 @@ public partial class MainWindow : Window
     /// </summary>
     private void ActivateFileEditBuffer(TabViewModel tab, FileEditBuffer buffer)
     {
-        var undoStack = buffer.Document.UndoStack;
-
         tab.IsEditable = true;
-        tab.IsDirty = !undoStack.IsOriginalFile;
-
-        // IsOriginalFile is AvalonEdit's own "the document is back at its loaded/saved state" flag -
-        // it flips both ways (undoing back past every edit clears the dirty state, which a naive
-        // "any TextChanged means dirty" listener would get wrong). Subscribed once per buffer, at
-        // first activation, and dropped in EvictFileEditBuffer.
-        if (buffer.DirtyListener is null)
-        {
-            buffer.DirtyListener = (_, e) =>
-            {
-                if (e.PropertyName == nameof(UndoStack.IsOriginalFile))
-                {
-                    tab.IsDirty = !undoStack.IsOriginalFile;
-                }
-            };
-            undoStack.PropertyChanged += buffer.DirtyListener;
-        }
+        tab.IsDirty = !buffer.Document.UndoStack.IsOriginalFile;
+        EnsureDirtyListener(tab, buffer);
 
         ShowFileEditorDocument(buffer.Document, buffer.Language, isReadOnly: false);
         _activeFileEditBuffer = buffer;
@@ -1591,6 +1623,65 @@ public partial class MainWindow : Window
 
                 FileEditor.ScrollToVerticalOffset(vertical);
                 FileEditor.ScrollToHorizontalOffset(horizontal);
+            },
+            DispatcherPriority.Loaded);
+    }
+
+    /// <summary>Subscribes <paramref name="buffer"/>'s undo stack to push <see cref="TabViewModel.IsDirty"/>
+    /// onto <paramref name="tab"/> - shared by <see cref="ActivateFileEditBuffer"/> and
+    /// <see cref="ActivateDiffEditBuffer"/>, since both surfaces track dirty state the same way (see
+    /// <see cref="ActivateFileEditBuffer"/>'s remarks). Subscribed once per buffer and dropped in
+    /// <see cref="EvictFileEditBuffer"/>.</summary>
+    private static void EnsureDirtyListener(TabViewModel tab, FileEditBuffer buffer)
+    {
+        if (buffer.DirtyListener is not null)
+        {
+            return;
+        }
+
+        var undoStack = buffer.Document.UndoStack;
+        buffer.DirtyListener = (_, e) =>
+        {
+            if (e.PropertyName == nameof(UndoStack.IsOriginalFile))
+            {
+                tab.IsDirty = !undoStack.IsOriginalFile;
+            }
+        };
+        undoStack.PropertyChanged += buffer.DirtyListener;
+    }
+
+    /// <summary>
+    /// Points <see cref="DiffNewEditor"/> at <paramref name="buffer"/> - the diff view's editable
+    /// "After" pane equivalent of <see cref="ActivateFileEditBuffer"/>. Does not itself show/hide any
+    /// pane or control: <see cref="ShowGitDiffTabAsync"/> already toggles <see cref="DiffNewEditor"/>
+    /// vs. <see cref="DiffNewText"/>/<see cref="DiffNewLineNumbers"/> visibility once, after both diff
+    /// sides are resolved.
+    /// </summary>
+    private void ActivateDiffEditBuffer(TabViewModel tab, FileEditBuffer buffer)
+    {
+        tab.IsEditable = true;
+        tab.IsDirty = !buffer.Document.UndoStack.IsOriginalFile;
+        EnsureDirtyListener(tab, buffer);
+
+        DiffNewEditor.Document = buffer.Document;
+        _diffSyntaxColorizer.SetDocument(buffer.Document, buffer.Language);
+        _activeDiffEditBuffer = buffer;
+
+        DiffNewEditor.CaretOffset = Math.Min(buffer.CaretOffset, buffer.Document.TextLength);
+        double vertical = buffer.VerticalOffset;
+        double horizontal = buffer.HorizontalOffset;
+        Dispatcher.BeginInvoke(
+            () =>
+            {
+                if (!ReferenceEquals(_activeDiffEditBuffer, buffer))
+                {
+                    // Selection moved on while this was queued - restoring now would scroll whatever
+                    // tab is showing instead.
+                    return;
+                }
+
+                DiffNewEditor.ScrollToVerticalOffset(vertical);
+                DiffNewEditor.ScrollToHorizontalOffset(horizontal);
             },
             DispatcherPriority.Loaded);
     }
@@ -1629,14 +1720,21 @@ public partial class MainWindow : Window
     /// </summary>
     private void CaptureFileEditorViewState()
     {
-        if (_activeFileEditBuffer is not { } buffer || !ReferenceEquals(FileEditor.Document, buffer.Document))
+        if (_activeFileEditBuffer is { } buffer && ReferenceEquals(FileEditor.Document, buffer.Document))
         {
-            return;
+            buffer.CaretOffset = FileEditor.CaretOffset;
+            buffer.VerticalOffset = FileEditor.VerticalOffset;
+            buffer.HorizontalOffset = FileEditor.HorizontalOffset;
         }
 
-        buffer.CaretOffset = FileEditor.CaretOffset;
-        buffer.VerticalOffset = FileEditor.VerticalOffset;
-        buffer.HorizontalOffset = FileEditor.HorizontalOffset;
+        // Same capture, for whichever buffer the diff view's editable "After" pane
+        // (DiffNewEditor) is currently showing - see _activeDiffEditBuffer's remarks.
+        if (_activeDiffEditBuffer is { } diffBuffer && ReferenceEquals(DiffNewEditor.Document, diffBuffer.Document))
+        {
+            diffBuffer.CaretOffset = DiffNewEditor.CaretOffset;
+            diffBuffer.VerticalOffset = DiffNewEditor.VerticalOffset;
+            diffBuffer.HorizontalOffset = DiffNewEditor.HorizontalOffset;
+        }
     }
 
     /// <summary>
@@ -1659,6 +1757,11 @@ public partial class MainWindow : Window
             // The editor may still be pointed at this document until the next selection renders;
             // forgetting it here is what stops CaptureFileEditorViewState writing into a dead buffer.
             _activeFileEditBuffer = null;
+        }
+
+        if (ReferenceEquals(_activeDiffEditBuffer, buffer))
+        {
+            _activeDiffEditBuffer = null;
         }
     }
 
@@ -2218,9 +2321,24 @@ public partial class MainWindow : Window
     /// <c>MainWindow.GitChangeRow_MouseLeftButtonDown</c>'s remarks for which side is which). Each
     /// side is read and rendered independently - a failure reading one side (e.g. the file was never
     /// committed, so <see cref="GitDiffSide.Head"/> has nothing to show) does not blank out the other.
+    ///
+    /// <para><b>The "After" pane is editable when it is the working tree.</b> An unstaged Modified
+    /// entry's <see cref="TabViewModel.GitDiffNewSide"/> is <see cref="GitDiffSide.WorkingTree"/> - a
+    /// real disk file a save can write to - so it gets (or re-uses) a <see cref="FileEditBuffer"/> via
+    /// <see cref="DiffNewEditor"/>, exactly the same buffer <see cref="ShowFileTabAsync"/> would use
+    /// for a single-pane view of the same path (they share <see cref="_fileEditBuffers"/>, keyed by
+    /// <see cref="TabViewModel.TabId"/> - a diff tab and a single-pane tab for the same file are the
+    /// same <see cref="TabViewModel"/> to begin with, see <see cref="TabsViewModel.AddGitDiffTab"/>).
+    /// A staged entry's "After" side is the index blob (<see cref="GitDiffSide.Index"/>), which has no
+    /// disk file behind it, so it stays read-only in <see cref="DiffNewText"/> like before.</para>
     /// </summary>
     private async Task ShowGitDiffTabAsync(TabViewModel tab)
     {
+        // Before anything re-points either editor: remember where the user was in whichever tab (a
+        // single-pane file view or another diff tab) is being left - see ShowFileTabAsync's own
+        // opening remark for why this must happen first.
+        CaptureFileEditorViewState();
+
         SourceLanguage language = SourceLanguageResolver.Resolve(tab.TabId);
 
         string oldContent;
@@ -2233,14 +2351,43 @@ public partial class MainWindow : Window
             oldContent = $"Could not read \"before\" content:\n{ex.Message}";
         }
 
+        FileEditBuffer? buffer = null;
         string newContent;
-        try
+        if (tab.GitDiffNewSide == GitDiffSide.WorkingTree)
         {
-            newContent = await ReadGitDiffSideAsync(tab, tab.GitDiffNewSide!.Value).ConfigureAwait(true);
+            if (_fileEditBuffers.TryGetValue(tab.TabId, out var cached))
+            {
+                // Re-activation: show the live (possibly unsaved) buffer text, not a fresh disk read -
+                // same "the buffer is the source of truth once one exists" rule ShowMarkdownPreviewAsync
+                // already follows.
+                buffer = cached;
+                newContent = buffer.Document.Text;
+            }
+            else
+            {
+                try
+                {
+                    buffer = await TryCreateFileEditBufferAsync(tab, language).ConfigureAwait(true);
+                    newContent = buffer is not null
+                        ? buffer.Document.Text
+                        : await ReadGitDiffSideAsync(tab, tab.GitDiffNewSide!.Value).ConfigureAwait(true);
+                }
+                catch (Exception ex)
+                {
+                    newContent = $"Could not read \"after\" content:\n{ex.Message}";
+                }
+            }
         }
-        catch (Exception ex)
+        else
         {
-            newContent = $"Could not read \"after\" content:\n{ex.Message}";
+            try
+            {
+                newContent = await ReadGitDiffSideAsync(tab, tab.GitDiffNewSide!.Value).ConfigureAwait(true);
+            }
+            catch (Exception ex)
+            {
+                newContent = $"Could not read \"after\" content:\n{ex.Message}";
+            }
         }
 
         oldContent = NormalizeLineEndings(oldContent);
@@ -2253,12 +2400,35 @@ public partial class MainWindow : Window
         var removedLineBrush = (Brush)FindResource("DiffRemovedLineBrush");
         var addedLineBrush = (Brush)FindResource("DiffAddedLineBrush");
         DiffOldText.Document = BuildHighlightedDocument(oldContent, language, i => removedOldLines.Contains(i) ? removedLineBrush : null);
-        DiffNewText.Document = BuildHighlightedDocument(newContent, language, i => addedNewLines.Contains(i) ? addedLineBrush : null);
 
         SetLineNumbers(DiffOldLineNumbers, oldLines.Length);
-        SetLineNumbers(DiffNewLineNumbers, newLines.Length);
         ResetScroll(DiffOldText, DiffOldLineNumbersTransform);
-        ResetScroll(DiffNewText, DiffNewLineNumbersTransform);
+
+        if (buffer is not null)
+        {
+            _fileEditBuffers[tab.TabId] = buffer;
+            _diffAddedLineHighlighter.SetHighlightedLines(addedNewLines, addedLineBrush);
+            ActivateDiffEditBuffer(tab, buffer);
+            DiffNewEditor.TextArea.TextView.Redraw();
+
+            DiffNewText.Visibility = Visibility.Collapsed;
+            DiffNewLineNumbers.Visibility = Visibility.Collapsed;
+            DiffNewEditor.Visibility = Visibility.Visible;
+        }
+        else
+        {
+            tab.IsEditable = false;
+            tab.IsDirty = false;
+
+            DiffNewText.Document = BuildHighlightedDocument(newContent, language, i => addedNewLines.Contains(i) ? addedLineBrush : null);
+            SetLineNumbers(DiffNewLineNumbers, newLines.Length);
+            ResetScroll(DiffNewText, DiffNewLineNumbersTransform);
+
+            DiffNewEditor.Visibility = Visibility.Collapsed;
+            DiffNewText.Visibility = Visibility.Visible;
+            DiffNewLineNumbers.Visibility = Visibility.Visible;
+            _activeDiffEditBuffer = null;
+        }
 
         _diffMarkTotalLines = newLines.Length;
         RenderDiffMarkStrip();
@@ -2414,7 +2584,37 @@ public partial class MainWindow : Window
     private void DiffOldText_ScrollChanged(object sender, ScrollChangedEventArgs e)
     {
         DiffOldLineNumbersTransform.Y = -e.VerticalOffset;
-        SyncDiffScroll(DiffNewText, e.VerticalOffset);
+        SyncDiffNewScroll(e.VerticalOffset);
+    }
+
+    /// <summary>The "old to new" half of <see cref="DiffOldText_ScrollChanged"/>'s sync, generalized
+    /// over which control is currently showing the "After" side - the read-only
+    /// <see cref="DiffNewText"/> <see cref="RichTextBox"/>, or the editable <see cref="DiffNewEditor"/>
+    /// AvalonEdit control (see <see cref="ShowGitDiffTabAsync"/>'s remarks for when each is shown).
+    /// Exactly one of the two is ever visible for a given diff tab.</summary>
+    private void SyncDiffNewScroll(double verticalOffset)
+    {
+        if (_isSyncingDiffScroll)
+        {
+            return;
+        }
+
+        _isSyncingDiffScroll = true;
+        try
+        {
+            if (DiffNewEditor.Visibility == Visibility.Visible)
+            {
+                DiffNewEditor.ScrollToVerticalOffset(verticalOffset);
+            }
+            else
+            {
+                DiffNewText.ScrollToVerticalOffset(verticalOffset);
+            }
+        }
+        finally
+        {
+            _isSyncingDiffScroll = false;
+        }
     }
 
     /// <summary>See <see cref="DiffOldText_ScrollChanged"/>'s remarks - the "After" pane's half of the
