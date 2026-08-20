@@ -1,11 +1,12 @@
 namespace Accel.Tests;
 
 using System;
-using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Threading.Tasks;
 using Accel.App.Services;
 using Accel.App.ViewModels;
+using Accel.Cli;
 using Xunit;
 
 /// <summary>
@@ -13,7 +14,7 @@ using Xunit;
 /// <see cref="FilesPanelViewModelTests"/> (<see cref="FakeTelemetryFeed"/> +
 /// <see cref="RecordingUiThreadDispatcher"/>, a real <see cref="SessionSelectionService"/>). Real
 /// temporary git repositories (via a real `git init`) stand in for the focused folder, since
-/// <see cref="Accel.Cli.GitStatusBuilder"/> shells out to the real `git` executable, not mockable
+/// <see cref="GitStatusBuilder"/> shells out to the real `git` executable, not mockable
 /// telemetry.
 /// </summary>
 public sealed class GitPanelViewModelTests : IDisposable
@@ -34,33 +35,7 @@ public sealed class GitPanelViewModelTests : IDisposable
         }
     }
 
-    private static string InitRepo(string path)
-    {
-        Directory.CreateDirectory(path);
-        RunGit(path, "init");
-        RunGit(path, "config user.email test@example.com");
-        RunGit(path, "config user.name \"Accel Tests\"");
-        return path;
-    }
-
-    private static void RunGit(string workingDirectory, string arguments)
-    {
-        using var process = new Process
-        {
-            StartInfo = new ProcessStartInfo("git", arguments)
-            {
-                WorkingDirectory = workingDirectory,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-            },
-        };
-        process.Start();
-        process.StandardOutput.ReadToEnd();
-        process.StandardError.ReadToEnd();
-        process.WaitForExit(5000);
-    }
+    private static string InitRepo(string path) => GitTestRepo.InitRepo(path);
 
     private static (GitPanelViewModel Vm, FakeTelemetryFeed Feed, SessionSelectionService Selection, ISessionSelectionWriter Writer) Build(
         RootsPanelViewModel? rootsPanel = null)
@@ -70,6 +45,26 @@ public sealed class GitPanelViewModelTests : IDisposable
         var selection = new SessionSelectionService();
         var writer = selection.AcquireWriter();
         return (new GitPanelViewModel(feed, dispatcher, selection, rootsPanel), feed, selection, writer);
+    }
+
+    private static (GitPanelViewModel Vm, FakeTelemetryFeed Feed, SessionSelectionService Selection, ISessionSelectionWriter Writer,
+        FakeGitActionsDialogService ActionDialogs, FakeFilesEntryConfirmationService Confirmation) BuildWithActionFakes()
+    {
+        var feed = new FakeTelemetryFeed();
+        var dispatcher = new RecordingUiThreadDispatcher();
+        var selection = new SessionSelectionService();
+        var writer = selection.AcquireWriter();
+        var actionDialogs = new FakeGitActionsDialogService();
+        var confirmation = new FakeFilesEntryConfirmationService();
+        var vm = new GitPanelViewModel(feed, dispatcher, selection, rootsPanel: null, actionDialogs, confirmation);
+        return (vm, feed, selection, writer, actionDialogs, confirmation);
+    }
+
+    private static void Focus(FakeTelemetryFeed feed, ISessionSelectionWriter writer, string root)
+    {
+        var session = TelemetryFixtures.Session("session-1", isLive: true) with { Cwd = root };
+        writer.SetFocused("session-1");
+        feed.Publish(TelemetryFixtures.Tree(new[] { TelemetryFixtures.Root(root, session) }));
     }
 
     [Fact]
@@ -204,5 +199,179 @@ public sealed class GitPanelViewModelTests : IDisposable
 
         Assert.False(vm.HasRepo);
         Assert.Equal("No folder or session focused.", vm.StatusText);
+    }
+
+    [Fact]
+    public async Task StageFileCommand_MovesEntryFromChangesToStaged()
+    {
+        InitRepo(_root);
+        File.WriteAllText(Path.Combine(_root, "new.txt"), "content");
+
+        var (vm, feed, _, writer) = Build();
+        Focus(feed, writer, _root);
+
+        var entry = Assert.Single(vm.Changes);
+        await vm.StageFileCommand.ExecuteAsync(entry);
+
+        var entries = GitStatusBuilder.Build(_root);
+        Assert.Contains(entries!, e => e.Path == "new.txt" && e.IsStaged);
+        Assert.True(feed.RefreshRequestCount > 0);
+    }
+
+    [Fact]
+    public async Task UnstageFileCommand_MovesEntryBackToChanges()
+    {
+        InitRepo(_root);
+        File.WriteAllText(Path.Combine(_root, "new.txt"), "content");
+        GitTestRepo.RunGit(_root, "add new.txt");
+
+        var (vm, feed, _, writer) = Build();
+        Focus(feed, writer, _root);
+
+        var entry = Assert.Single(vm.StagedChanges);
+        await vm.UnstageFileCommand.ExecuteAsync(entry);
+
+        var entries = GitStatusBuilder.Build(_root);
+        Assert.Contains(entries!, e => e.Path == "new.txt" && !e.IsStaged);
+        Assert.True(feed.RefreshRequestCount > 0);
+    }
+
+    [Fact]
+    public async Task StageAllCommand_StagesEveryDirtyFile()
+    {
+        InitRepo(_root);
+        File.WriteAllText(Path.Combine(_root, "a.txt"), "a");
+        File.WriteAllText(Path.Combine(_root, "b.txt"), "b");
+
+        var (vm, feed, _, writer) = Build();
+        Focus(feed, writer, _root);
+
+        await vm.StageAllCommand.ExecuteAsync(null);
+
+        var entries = GitStatusBuilder.Build(_root);
+        Assert.All(entries!, e => Assert.True(e.IsStaged));
+        Assert.True(feed.RefreshRequestCount > 0);
+    }
+
+    [Fact]
+    public async Task StageAllCommand_NothingDirty_IsANoOp()
+    {
+        InitRepo(_root);
+
+        var (vm, feed, _, writer) = Build();
+        Focus(feed, writer, _root);
+
+        await vm.StageAllCommand.ExecuteAsync(null);
+
+        Assert.Equal(0, feed.RefreshRequestCount);
+    }
+
+    [Fact]
+    public async Task DiscardFileCommand_Confirmed_RestoresOriginalContent()
+    {
+        InitRepo(_root);
+        File.WriteAllText(Path.Combine(_root, "tracked.txt"), "original");
+        GitTestRepo.RunGit(_root, "add tracked.txt");
+        GitTestRepo.RunGit(_root, "commit -m initial");
+        File.WriteAllText(Path.Combine(_root, "tracked.txt"), "edited");
+
+        var (vm, feed, _, writer, _, confirmation) = BuildWithActionFakes();
+        confirmation.ConfirmDiscardChangesResult = true;
+        Focus(feed, writer, _root);
+
+        var entry = Assert.Single(vm.Changes);
+        await vm.DiscardFileCommand.ExecuteAsync(entry);
+
+        Assert.Equal("original", File.ReadAllText(Path.Combine(_root, "tracked.txt")));
+        Assert.True(feed.RefreshRequestCount > 0);
+    }
+
+    [Fact]
+    public async Task DiscardFileCommand_Cancelled_LeavesFileUntouched()
+    {
+        InitRepo(_root);
+        File.WriteAllText(Path.Combine(_root, "tracked.txt"), "original");
+        GitTestRepo.RunGit(_root, "add tracked.txt");
+        GitTestRepo.RunGit(_root, "commit -m initial");
+        File.WriteAllText(Path.Combine(_root, "tracked.txt"), "edited");
+
+        var (vm, feed, _, writer, _, confirmation) = BuildWithActionFakes();
+        confirmation.ConfirmDiscardChangesResult = false;
+        Focus(feed, writer, _root);
+
+        var entry = Assert.Single(vm.Changes);
+        await vm.DiscardFileCommand.ExecuteAsync(entry);
+
+        Assert.Equal("edited", File.ReadAllText(Path.Combine(_root, "tracked.txt")));
+        Assert.Equal(0, feed.RefreshRequestCount);
+    }
+
+    [Fact]
+    public async Task CommitCommand_WithStagedChanges_CreatesCommit()
+    {
+        InitRepo(_root);
+        File.WriteAllText(Path.Combine(_root, "new.txt"), "content");
+        GitTestRepo.RunGit(_root, "add new.txt");
+
+        var (vm, feed, _, writer, actionDialogs, _) = BuildWithActionFakes();
+        actionDialogs.CommitMessage = "A commit message";
+        Focus(feed, writer, _root);
+
+        await vm.CommitCommand.ExecuteAsync(null);
+
+        string log = GitTestRepo.RunGitCapture(_root, "log -1 --pretty=%s");
+        Assert.Equal("A commit message", log.Trim());
+        Assert.True(feed.RefreshRequestCount > 0);
+    }
+
+    [Fact]
+    public async Task CommitCommand_DialogCancelled_DoesNotCommit()
+    {
+        InitRepo(_root);
+        File.WriteAllText(Path.Combine(_root, "new.txt"), "content");
+        GitTestRepo.RunGit(_root, "add new.txt");
+
+        var (vm, feed, _, writer, actionDialogs, _) = BuildWithActionFakes();
+        actionDialogs.CommitMessage = null;
+        Focus(feed, writer, _root);
+
+        await vm.CommitCommand.ExecuteAsync(null);
+
+        Assert.Equal(0, feed.RefreshRequestCount);
+    }
+
+    [Fact]
+    public async Task CommitCommand_NothingStaged_IsANoOp()
+    {
+        InitRepo(_root);
+        File.WriteAllText(Path.Combine(_root, "committed.txt"), "content");
+        GitTestRepo.RunGit(_root, "add committed.txt");
+        GitTestRepo.RunGit(_root, "commit -m initial");
+
+        var (vm, feed, _, writer) = Build();
+        Focus(feed, writer, _root);
+
+        await vm.CommitCommand.ExecuteAsync(null);
+
+        Assert.Equal(0, feed.RefreshRequestCount);
+    }
+
+    [Fact]
+    public async Task SwitchBranchAsync_CleanTree_ChecksOutWithoutPrompting()
+    {
+        InitRepo(_root);
+        File.WriteAllText(Path.Combine(_root, "committed.txt"), "content");
+        GitTestRepo.RunGit(_root, "add committed.txt");
+        GitTestRepo.RunGit(_root, "commit -m initial");
+        GitTestRepo.RunGit(_root, "branch feature-a");
+
+        var (vm, feed, _, writer) = Build();
+        Focus(feed, writer, _root);
+
+        await vm.SwitchBranchAsync("feature-a");
+
+        string currentBranch = GitTestRepo.RunGitCapture(_root, "rev-parse --abbrev-ref HEAD").Trim();
+        Assert.Equal("feature-a", currentBranch);
+        Assert.True(feed.RefreshRequestCount > 0);
     }
 }

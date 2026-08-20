@@ -10,6 +10,12 @@ using CommunityToolkit.Mvvm.Input;
 using Accel.App.Services;
 using Accel.Orchestration;
 
+// AccelDialogChoice (Accel.App) - the three-way Primary/Secondary/Cancel result T9's
+// external-change conflict prompt already defined; reused here (Primary = Save, Secondary =
+// Discard, Cancel = Cancel) rather than adding a second near-identical enum. It is a plain enum
+// with no WPF/dialog code behind it, so referencing it does not make this class dialog-aware.
+using Accel.App;
+
 /// <summary>What a tab in panel C actually represents - see <see cref="TabViewModel.Kind"/>.</summary>
 public enum TabKind
 {
@@ -17,11 +23,13 @@ public enum TabKind
     /// original, and still overwhelmingly common, kind of tab).</summary>
     Session,
 
-    /// <summary>A read-only view of a file's contents - panel B's FILES tree double-click gesture
-    /// (see <see cref="TabsViewModel.AddFileTab"/>). Has no <c>PtySession</c> behind it at all.</summary>
+    /// <summary>A view of a file's contents - panel B's FILES tree double-click gesture
+    /// (see <see cref="TabsViewModel.AddFileTab"/>) - editable in panel D's editor when the file
+    /// reads as text (see <see cref="TabViewModel.IsEditable"/>). Has no <c>PtySession</c> behind it
+    /// at all.</summary>
     File,
 
-    /// <summary>A read-only view of a new/removed file from panel B's GIT section (see
+    /// <summary>A view of a new/removed file from panel B's GIT section (see
     /// <see cref="TabsViewModel.AddGitChangeTab"/>) - visually distinct from <see cref="File"/> so
     /// the two entry points never look the same, even though both end up showing the same file
     /// viewer in panel D. Has no <c>PtySession</c> behind it either.</summary>
@@ -91,7 +99,8 @@ public sealed partial class TabViewModel : ObservableObject
     }
 
     /// <summary>
-    /// A read-only file tab - panel B's FILES tree double-click gesture (see
+    /// A file tab (editable in panel D when the file reads as text - see <see cref="IsEditable"/>) -
+    /// panel B's FILES tree double-click gesture (see
     /// <see cref="TabsViewModel.AddFileTab"/>). <see cref="TabId"/> is the file's own full path: files
     /// have no registry registration to key identity on, and re-opening the same path must resolve to
     /// the same tab rather than duplicating it.
@@ -103,8 +112,10 @@ public sealed partial class TabViewModel : ObservableObject
     }
 
     /// <summary>
-    /// A read-only tab for a new/removed file from panel B's GIT section (see
-    /// <see cref="TabsViewModel.AddGitChangeTab"/>). <paramref name="filePath"/> is the on-disk path
+    /// A tab for a new/removed file from panel B's GIT section (editable when a working-tree copy
+    /// exists and reads as text; a Deleted entry's <c>git show</c> fallback stays read-only - see
+    /// <see cref="IsEditable"/>). See
+    /// <see cref="TabsViewModel.AddGitChangeTab"/>. <paramref name="filePath"/> is the on-disk path
     /// (may not exist - a Deleted entry's working-tree copy is gone); <paramref name="gitRepoRootPath"/>/
     /// <paramref name="gitRelativePath"/> are the repo root and the entry's repo-relative path, kept
     /// around purely so <c>MainWindow.ShowFileTabAsync</c> can fall back to
@@ -199,6 +210,36 @@ public sealed partial class TabViewModel : ObservableObject
     private bool _isPreviewMode;
 
     /// <summary>
+    /// Whether panel D's editor accepts typing for this tab - i.e. whether there is a working-tree
+    /// file this tab's text can actually be written back to.
+    ///
+    /// <para><b>Why this is a settable flag rather than a computed predicate.</b> The kind/path test
+    /// (<see cref="IsFileTab"/>, or <see cref="IsGitChangeTab"/> that is not an
+    /// <see cref="IsGitDiffTab"/>) is necessary but not sufficient: a <b>Deleted</b> GIT-section entry
+    /// has no working-tree copy left, so <c>MainWindow.ReadTabContentAsync</c> falls back to
+    /// <c>git show HEAD:&lt;path&gt;</c> - content with no file behind it, which must stay read-only.
+    /// The same is true of a file that turns out not to be text at all
+    /// (<see cref="Accel.App.Services.FileTextSnapshot.IsTextEditable"/>) or that fails to read. Only
+    /// the load path knows which of those happened, so it is the writer: this defaults to
+    /// <see langword="false"/> and is raised by <c>MainWindow.ShowFileTabAsync</c> once a real
+    /// editable buffer exists.</para>
+    /// </summary>
+    [ObservableProperty]
+    private bool _isEditable;
+
+    /// <summary>
+    /// Whether this tab's edit buffer has unsaved changes. Pushed here by
+    /// <c>MainWindow.ShowFileTabAsync</c> from the buffer's own
+    /// <c>TextDocument.UndoStack.IsOriginalFile</c> (inverted) - AvalonEdit's undo stack already
+    /// tracks "is this document back at the state it was loaded/saved in", including after undoing
+    /// back past every edit, so nothing here diffs text against a baseline. Drives the tab header's
+    /// dirty marker and the Save/Discard buttons' enabled state; meaningless (and never set) unless
+    /// <see cref="IsEditable"/>.
+    /// </summary>
+    [ObservableProperty]
+    private bool _isDirty;
+
+    /// <summary>
     /// Whether a real <c>PtySession</c> sits behind this tab (<see cref="TabKind.Session"/> and
     /// <see cref="TabKind.Shell"/> both do - the only difference between them is which child process
     /// was launched; <see cref="TabKind.File"/>/<see cref="TabKind.GitChange"/> never do). This is the
@@ -278,11 +319,25 @@ public sealed partial class TabViewModel : ObservableObject
     /// accessibility rule applies here too), but the real styling is out of scope for P3-T1.</summary>
     public string StatusSuffix => HasEnded ? (ExitCode is { } code ? $"(exited {code})" : "(ended)") : string.Empty;
 
+    /// <summary>
+    /// Plain-text rendering of a file/git-change tab's edit state, so the header's dirty marker is
+    /// never the only carrier of it (panel A's "state is never colour-only, and never glyph-only
+    /// either" accessibility rule - see <c>CLAUDE_DESIGN.md</c>). Folded into
+    /// <see cref="AutomationDescription"/>; empty for the kinds that have no edit state at all.
+    /// </summary>
+    public string EditStateSuffix => (IsFileTab || IsGitChangeTab) switch
+    {
+        false => string.Empty,
+        true when !IsEditable => "Read-only.",
+        true when IsDirty => "Editable, unsaved changes.",
+        _ => "Editable, saved.",
+    };
+
     /// <summary>Accessible description of the whole tab, for <c>AutomationProperties.Name</c>.</summary>
     public string AutomationDescription => Kind switch
     {
-        TabKind.File => $"File tab: {Title}. Read-only.",
-        TabKind.GitChange => $"Git change tab: {Title}. Read-only.",
+        TabKind.File => $"File tab: {Title}. {EditStateSuffix}",
+        TabKind.GitChange => $"Git change tab: {Title}. {EditStateSuffix}",
         TabKind.Shell => HasEnded ? $"Terminal tab: {Title}. Ended {StatusSuffix}." : $"Terminal tab: {Title}. Running.",
         _ => HasEnded ? $"Session tab: {Title}. Ended {StatusSuffix}." : $"Session tab: {Title}. Running.",
     };
@@ -300,6 +355,18 @@ public sealed partial class TabViewModel : ObservableObject
     }
 
     partial void OnTitleChanged(string value) => OnPropertyChanged(nameof(AutomationDescription));
+
+    partial void OnIsEditableChanged(bool value)
+    {
+        OnPropertyChanged(nameof(EditStateSuffix));
+        OnPropertyChanged(nameof(AutomationDescription));
+    }
+
+    partial void OnIsDirtyChanged(bool value)
+    {
+        OnPropertyChanged(nameof(EditStateSuffix));
+        OnPropertyChanged(nameof(AutomationDescription));
+    }
 
     private static string ShortId(string tabId) => tabId.Length <= 8 ? tabId : tabId[..8];
 
@@ -420,7 +487,8 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
 
     /// <summary>
     /// Panel D's file-viewer show hook: renders the selected <see cref="TabKind.File"/>/
-    /// <see cref="TabKind.GitChange"/> tab's content read-only and swaps panel D over to it, set
+    /// <see cref="TabKind.GitChange"/> tab's content (editable when the file reads as text, read-only
+    /// otherwise - see <see cref="TabViewModel.IsEditable"/>) and swaps panel D over to it, set
     /// alongside <see cref="AttachTerminalAsync"/> by the same window. Left null in tests and the
     /// pure-scaffolding construction path, same as <see cref="AttachTerminalAsync"/>.
     /// </summary>
@@ -428,10 +496,62 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
 
     /// <summary>
     /// Panel D's file-viewer hide hook: swaps panel D back to the terminal - called before attaching a
-    /// selected <see cref="TabKind.Session"/> tab, so a file tab's read-only view never lingers on top of
+    /// selected <see cref="TabKind.Session"/> tab, so a file tab's content never lingers on top of
     /// the terminal it is about to reattach.
     /// </summary>
     public Action? HideFileViewer { get; set; }
+
+    /// <summary>
+    /// Panel D's save hook: <c>tab =&gt; MainWindow.SaveFileTabAsync(tab)</c>, set alongside
+    /// <see cref="ShowFileAsync"/> by the same window. Writes the tab's edit buffer back to disk
+    /// (preserving its on-disk encoding/BOM/EOL shape - see <see cref="Accel.App.Services.FileTextCodec"/>),
+    /// updates the buffer's tracked snapshot to the just-written file's identity, and marks the
+    /// buffer's undo stack as the new "original file" baseline. Returns whether the save succeeded -
+    /// <see cref="SaveTabAsync"/> itself does not need it, but a future caller (a tab-header Save
+    /// button, T7) will. Left null in tests and the pure-scaffolding construction path, same as
+    /// <see cref="ShowFileAsync"/>.
+    /// </summary>
+    public Func<TabViewModel, Task<bool>>? SaveFileAsync { get; set; }
+
+    /// <summary>
+    /// Panel D's discard hook: <c>tab =&gt; MainWindow.DiscardFileTabChangesAsync(tab)</c>, set
+    /// alongside <see cref="ShowFileAsync"/> by the same window. Re-reads the tab's file from disk and
+    /// replaces the edit buffer's document text with it inside a single AvalonEdit undo group, so
+    /// discarding is itself one more undoable action rather than wiping the undo stack outright, then
+    /// marks the buffer's undo stack as the new "original file" baseline. Left null in tests and the
+    /// pure-scaffolding construction path, same as <see cref="ShowFileAsync"/>.
+    /// </summary>
+    public Func<TabViewModel, Task>? DiscardFileAsync { get; set; }
+
+    /// <summary>
+    /// Panel D's per-tab-buffer release hook: <c>tab =&gt; MainWindow.EvictFileEditBuffer(tab)</c>, set
+    /// alongside <see cref="ShowFileAsync"/> by the same window. Called from
+    /// <see cref="CloseTabAsync(TabViewModel?)"/> for <b>every</b> closed tab, so the window can drop
+    /// the closed tab's edit buffer (its <c>TextDocument</c>, undo stack and unsaved text) instead of
+    /// keeping it alive for a tab that no longer exists - and so re-opening the same path reads the
+    /// file from disk again rather than resurrecting a stale buffer.
+    ///
+    /// <para>Deliberately a hook rather than a second consumer of <see cref="TabClosed"/>: that event
+    /// is raised only for tabs that have a session behind them (see
+    /// <see cref="CloseTabAsync(TabViewModel?)"/>'s early return), which is exactly the set of tabs
+    /// that never have an edit buffer. Left null in tests and the pure-scaffolding construction path,
+    /// same as <see cref="ShowFileAsync"/>.</para>
+    /// </summary>
+    public Action<TabViewModel>? ReleaseFileTab { get; set; }
+
+    /// <summary>
+    /// T8's close guard: <c>tab =&gt; MainWindow.ConfirmCloseDirtyTabAsync(tab)</c>, set alongside
+    /// <see cref="ShowFileAsync"/> by the same window. Asked by <see cref="CloseTabAsync(TabViewModel?)"/>
+    /// before it removes a tab that is both <see cref="TabViewModel.IsEditable"/> and
+    /// <see cref="TabViewModel.IsDirty"/>, so an editor's worth of unsaved text is never dropped by
+    /// closing its tab. Returns <see cref="AccelDialogChoice.Primary"/> for "Save",
+    /// <see cref="AccelDialogChoice.Secondary"/> for "Discard", or <see cref="AccelDialogChoice.Cancel"/>
+    /// to abort the close entirely - reusing T9's three-way result rather than a new enum, since the
+    /// shape (two real actions plus a safe do-nothing default) is identical. Left null in tests and the
+    /// pure-scaffolding construction path, same as <see cref="ShowFileAsync"/> - a null hook means a
+    /// dirty tab closes unprompted, which is why every real window wires this up.
+    /// </summary>
+    public Func<TabViewModel, Task<AccelDialogChoice>>? ConfirmCloseDirtyTabAsync { get; set; }
 
     /// <summary>Awaitable form of the most recent attach, for the smoke-test/verification paths that need
     /// to know when panel D has finished reattaching. Null before the first selection.</summary>
@@ -544,7 +664,8 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
     }
 
     /// <summary>
-    /// Opens (or, if already open, selects) a read-only tab for a file - panel B's FILES tree
+    /// Opens (or, if already open, selects) a tab for a file (editable in panel D when it reads as
+    /// text) - panel B's FILES tree
     /// double-click gesture (see <c>MainWindow.FilesTreeViewItem_MouseDoubleClick</c>). Idempotent for a
     /// path that already has a tab, exactly like <see cref="AddTab"/> is for a tabId - re-opening the
     /// same file selects its existing tab instead of duplicating it.
@@ -553,8 +674,9 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
         AddOrSelectReadOnlyTab(filePath, () => TabViewModel.ForFile(filePath));
 
     /// <summary>
-    /// Opens (or, if already open, selects) a read-only tab for a new/removed file from panel B's GIT
-    /// section - see <c>MainWindow.GitChangeRow_MouseLeftButtonDown</c>. Keyed on
+    /// Opens (or, if already open, selects) a tab for a new/removed file from panel B's GIT section
+    /// (editable when a working-tree copy exists and reads as text; a Deleted entry stays read-only) -
+    /// see <c>MainWindow.GitChangeRow_MouseLeftButtonDown</c>. Keyed on
     /// <paramref name="filePath"/>, the same tabId space <see cref="AddFileTab"/> uses: opening the
     /// same path from either entry point resolves to one tab, not two.
     /// </summary>
@@ -620,7 +742,50 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
             return;
         }
 
+        // T8's close guard: a dirty, editable tab must never lose its unsaved text just because the
+        // user clicked the tab's close glyph. Read-only tabs and clean tabs skip straight past this -
+        // there is nothing of the user's to lose for either.
+        if (tab.IsEditable && tab.IsDirty)
+        {
+            var confirm = ConfirmCloseDirtyTabAsync;
+            if (confirm is not null)
+            {
+                var choice = await confirm(tab).ConfigureAwait(true);
+                switch (choice)
+                {
+                    case AccelDialogChoice.Cancel:
+                        // Abort the close entirely - the tab stays exactly as it was, still open and
+                        // still dirty. No RemoveTab, no ReleaseFileTab, nothing torn down.
+                        return;
+
+                    case AccelDialogChoice.Primary:
+                        // "Save": go through the exact same write path SaveTabAsync uses. A failed save
+                        // (permission denied, disk full, ...) must not close the tab - same
+                        // never-silently-swallow rule as T6's own save path - so the close aborts here
+                        // too, leaving the tab open and dirty for the user to retry or copy their text out.
+                        var save = SaveFileAsync;
+                        if (save is null || !await save(tab).ConfigureAwait(true))
+                        {
+                            return;
+                        }
+
+                        break;
+
+                    case AccelDialogChoice.Secondary:
+                        // "Discard": nothing to write. Falling through to the removal below IS the
+                        // discard - the buffer (and its unsaved text) dies with the tab via
+                        // ReleaseFileTab, exactly as it always has for a clean tab.
+                        break;
+                }
+            }
+        }
+
         RemoveTab(tab);
+
+        // Panel D's edit buffer for this tab (if it had one) dies with the tab - see ReleaseFileTab.
+        // Runs for every kind so the hook has exactly one call site; the window's own lookup is what
+        // decides whether there is anything to release.
+        ReleaseFileTab?.Invoke(tab);
 
         // A File/GitChange tab has no PtySession/registry registration behind it at all - nothing
         // for the host to close, and panel A's refresh (TabClosed) has no row keyed on a filesystem
@@ -704,6 +869,55 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
         {
             LastAttach = ShowFileSafelyAsync(tab);
         }
+    }
+
+    /// <summary>
+    /// Writes <paramref name="tab"/>'s unsaved edits back to disk - the FILE/GIT tab header's Save
+    /// button (T7) and Ctrl+S (wired in <c>MainWindow.xaml</c>'s <c>Window.InputBindings</c>). A no-op
+    /// unless <paramref name="tab"/> is both editable and actually dirty: nothing to write for a
+    /// read-only tab, and re-writing a clean file would be a pointless disk hit (and, if something else
+    /// changed it underneath, a needless conflict). Stays UI-framework-agnostic - the actual write goes
+    /// through <see cref="SaveFileAsync"/>, exactly the delegate-hook pattern <see cref="ShowFileAsync"/>
+    /// already establishes, so this class never touches AvalonEdit or the filesystem directly.
+    /// </summary>
+    [RelayCommand]
+    public async Task SaveTabAsync(TabViewModel? tab)
+    {
+        if (tab is null || !tab.IsEditable || !tab.IsDirty)
+        {
+            return;
+        }
+
+        var save = SaveFileAsync;
+        if (save is null)
+        {
+            return;
+        }
+
+        await save(tab).ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// Reverts <paramref name="tab"/>'s edit buffer to what is on disk - the FILE/GIT tab header's
+    /// Discard button (T7). Same guard, and the same delegate-hook posture, as
+    /// <see cref="SaveTabAsync"/> - the actual re-read/replace happens through
+    /// <see cref="DiscardFileAsync"/>.
+    /// </summary>
+    [RelayCommand]
+    public async Task DiscardTabChangesAsync(TabViewModel? tab)
+    {
+        if (tab is null || !tab.IsEditable || !tab.IsDirty)
+        {
+            return;
+        }
+
+        var discard = DiscardFileAsync;
+        if (discard is null)
+        {
+            return;
+        }
+
+        await discard(tab).ConfigureAwait(true);
     }
 
     /// <summary>

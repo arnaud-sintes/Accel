@@ -5,15 +5,21 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.IO;
+using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+using Accel.App;
 using Accel.App.Services;
 using Accel.Cli;
 using Accel.Metrics;
+using Accel.Orchestration;
 
 /// <summary>
-/// One row in panel B's read-only file/folder tree. The only user interaction it supports is a
-/// folder's own expand/collapse (<see cref="IsExpanded"/>, two-way bound) - no selection, no
-/// rename, no delete, no file-open action.
+/// One row in panel B's read-only file/folder tree. The only user interaction this ViewModel itself
+/// supports is a folder's own expand/collapse (<see cref="IsExpanded"/>, two-way bound) - no
+/// selection, no rename, no delete. (A file row's double-click does open its tab in panel C/D, but
+/// that gesture is handled entirely in <c>MainWindow.FilesTreeViewItem_MouseDoubleClick</c>, never
+/// through this class.)
 ///
 /// <para><b>Children load lazily, on first expand</b> (<see cref="OnIsExpandedChanged"/> calls
 /// <see cref="FilesTreeBuilder.BuildChildren"/> with this node's own path) - never eagerly for the
@@ -163,6 +169,8 @@ public sealed partial class FilesPanelViewModel : ObservableObject, IDisposable
     private readonly IUiThreadDispatcher _dispatcher;
     private readonly ISessionSelectionService? _selection;
     private readonly RootsPanelViewModel? _rootsPanel;
+    private readonly IFilesEntryDialogService _entryDialogs;
+    private readonly IFilesEntryConfirmationService _entryConfirmation;
 
     private RootsTreeDto? _latest;
     private string? _currentRootPath;
@@ -179,12 +187,16 @@ public sealed partial class FilesPanelViewModel : ObservableObject, IDisposable
         ITelemetryFeed feed,
         IUiThreadDispatcher dispatcher,
         ISessionSelectionService? selection = null,
-        RootsPanelViewModel? rootsPanel = null)
+        RootsPanelViewModel? rootsPanel = null,
+        IFilesEntryDialogService? entryDialogs = null,
+        IFilesEntryConfirmationService? entryConfirmation = null)
     {
         _feed = feed ?? throw new ArgumentNullException(nameof(feed));
         _dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
         _selection = selection;
         _rootsPanel = rootsPanel;
+        _entryDialogs = entryDialogs ?? new WpfFilesEntryDialogService();
+        _entryConfirmation = entryConfirmation ?? new MessageBoxFilesEntryConfirmationService();
 
         _feed.SnapshotAvailable += OnSnapshotAvailable;
         _feed.SnapshotFailed += OnSnapshotFailed;
@@ -224,6 +236,19 @@ public sealed partial class FilesPanelViewModel : ObservableObject, IDisposable
     /// (<see cref="GitPanelViewModel.OnFilesPanelFolderCollapsed"/>) fall back off a subtree that just
     /// disappeared instead of continuing to show it.</summary>
     public event Action<string, string?>? FolderCollapsed;
+
+    /// <summary>The currently resolved focused root - the containment boundary every explorer command
+    /// below passes to <see cref="FileSystemEntryPlanner"/>, and the parent directory used for a
+    /// "New File…"/"New Folder…" invoked with nothing selected (the tree's empty background).</summary>
+    public string? CurrentRootPath => _currentRootPath;
+
+    /// <summary>
+    /// Raised after Delete/DeletePermanently/MoveRename actually removes <paramref name="oldPath"/>
+    /// from its old location (a plain delete, or the pre-move path of a rename/move) - never for a
+    /// create. <c>MainWindow</c> subscribes to close any open tab keyed on that path, or nested under
+    /// it: per this feature's scope, a mutated tab is simply closed, never rebound/reloaded.
+    /// </summary>
+    public event Action<string, bool>? EntryRemovedOrMoved;
 
     /// <summary>The full rebuild. Public so tests can drive it directly with a fixture
     /// <see cref="RootsTreeDto"/>, exactly as <see cref="AgentGraphViewModel.Rebuild"/> is. See this
@@ -333,6 +358,140 @@ public sealed partial class FilesPanelViewModel : ObservableObject, IDisposable
                 Rebuild(_latest);
             }
         });
+    }
+
+    /// <summary>
+    /// Creates a new file. <paramref name="node"/> is the row that was right-clicked - a directory row
+    /// creates inside itself, any other row (or <see langword="null"/>, the tree's empty background)
+    /// creates at <see cref="CurrentRootPath"/>.
+    /// </summary>
+    [RelayCommand]
+    private Task NewFileAsync(FilesPanelNodeViewModel? node) =>
+        CreateEntryAsync(node, NewFileSystemEntryKind.File);
+
+    /// <summary>See <see cref="NewFileAsync"/> - identical shape, for a folder.</summary>
+    [RelayCommand]
+    private Task NewFolderAsync(FilesPanelNodeViewModel? node) =>
+        CreateEntryAsync(node, NewFileSystemEntryKind.Folder);
+
+    private async Task CreateEntryAsync(FilesPanelNodeViewModel? node, NewFileSystemEntryKind kind)
+    {
+        string? parentDir = node is { IsDirectory: true } && !string.IsNullOrEmpty(node.Key) ? node.Key : _currentRootPath;
+        if (string.IsNullOrEmpty(parentDir) || string.IsNullOrEmpty(_currentRootPath))
+        {
+            return;
+        }
+
+        string? name = _entryDialogs.PromptForNewEntryName(kind, parentDir);
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return; // cancelled
+        }
+
+        var plan = kind == NewFileSystemEntryKind.File
+            ? FileSystemEntryPlanner.PlanCreateFile(parentDir, name, _currentRootPath)
+            : FileSystemEntryPlanner.PlanCreateFolder(parentDir, name, _currentRootPath);
+
+        string title = kind == NewFileSystemEntryKind.File ? "New file" : "New folder";
+        if (!plan.IsSafe)
+        {
+            AccelMessageDialog.ShowMessage(null, string.Join('\n', plan.Warnings), title, AccelDialogIcon.Error);
+            return;
+        }
+
+        var result = await Task.Run(() => FileSystemEntryExecutor.Execute(plan)).ConfigureAwait(true);
+        if (result.Outcome == FileSystemEntryOutcome.Failed)
+        {
+            AccelMessageDialog.ShowMessage(null, result.Detail ?? "The operation failed.", title, AccelDialogIcon.Error);
+            return;
+        }
+
+        _feed.RequestRefresh();
+    }
+
+    /// <summary>
+    /// Opens the Rename/Move dialog for <paramref name="node"/> and, once confirmed, moves it - a
+    /// plain rename is simply a move whose destination shares the source's own parent directory. On
+    /// success, raises <see cref="EntryRemovedOrMoved"/> for the row's old path before refreshing.
+    /// </summary>
+    [RelayCommand]
+    private async Task MoveRenameAsync(FilesPanelNodeViewModel? node)
+    {
+        if (node is null || string.IsNullOrEmpty(node.Key) || string.IsNullOrEmpty(_currentRootPath))
+        {
+            return;
+        }
+
+        string? destination = _entryDialogs.PromptForMoveDestination(node.Key, node.IsDirectory);
+        if (string.IsNullOrWhiteSpace(destination))
+        {
+            return; // cancelled
+        }
+
+        var plan = FileSystemEntryPlanner.PlanMove(node.Key, destination, _currentRootPath);
+        if (!plan.IsSafe)
+        {
+            AccelMessageDialog.ShowMessage(null, string.Join('\n', plan.Warnings), "Rename / Move", AccelDialogIcon.Error);
+            return;
+        }
+
+        var result = await Task.Run(() => FileSystemEntryExecutor.Execute(plan)).ConfigureAwait(true);
+        if (result.Outcome == FileSystemEntryOutcome.Failed)
+        {
+            AccelMessageDialog.ShowMessage(null, result.Detail ?? "The operation failed.", "Rename / Move", AccelDialogIcon.Error);
+            return;
+        }
+
+        if (result.Outcome == FileSystemEntryOutcome.Succeeded)
+        {
+            EntryRemovedOrMoved?.Invoke(node.Key, node.IsDirectory);
+        }
+
+        _feed.RequestRefresh();
+    }
+
+    /// <summary>Moves <paramref name="node"/> to the recycle bin, after confirming.</summary>
+    [RelayCommand]
+    private Task DeleteAsync(FilesPanelNodeViewModel? node) => DeleteCoreAsync(node, SessionRemovalMode.RecycleBin);
+
+    /// <summary>Permanently deletes <paramref name="node"/>, after a stronger confirmation.</summary>
+    [RelayCommand]
+    private Task DeletePermanentlyAsync(FilesPanelNodeViewModel? node) => DeleteCoreAsync(node, SessionRemovalMode.PermanentDelete);
+
+    private async Task DeleteCoreAsync(FilesPanelNodeViewModel? node, SessionRemovalMode mode)
+    {
+        if (node is null || string.IsNullOrEmpty(node.Key) || string.IsNullOrEmpty(_currentRootPath))
+        {
+            return;
+        }
+
+        bool confirmed = mode == SessionRemovalMode.RecycleBin
+            ? _entryConfirmation.ConfirmDelete(node.Name, node.IsDirectory)
+            : _entryConfirmation.ConfirmPermanentDelete(node.Name, node.IsDirectory);
+        if (!confirmed)
+        {
+            return;
+        }
+
+        var plan = FileSystemEntryPlanner.PlanDelete(node.Key, _currentRootPath);
+        string title = mode == SessionRemovalMode.RecycleBin ? "Delete" : "Delete permanently";
+        if (!plan.IsSafe)
+        {
+            AccelMessageDialog.ShowMessage(null, string.Join('\n', plan.Warnings), title, AccelDialogIcon.Error);
+            return;
+        }
+
+        var result = await Task.Run(() => FileSystemEntryExecutor.Execute(plan, mode)).ConfigureAwait(true);
+        if (result.Outcome == FileSystemEntryOutcome.Failed)
+        {
+            AccelMessageDialog.ShowMessage(null, result.Detail ?? "The operation failed.", title, AccelDialogIcon.Error);
+            return;
+        }
+
+        // NotPresent (the plan-time snapshot going stale) is a soft-success, same as
+        // SessionRemoverExecutor's own NotPresent handling - either way, the row is gone.
+        EntryRemovedOrMoved?.Invoke(node.Key, node.IsDirectory);
+        _feed.RequestRefresh();
     }
 
     public void Dispose()

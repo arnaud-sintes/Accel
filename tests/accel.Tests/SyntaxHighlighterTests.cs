@@ -6,7 +6,7 @@ namespace Accel.Tests;
 
 /// <summary>
 /// Pins down <see cref="SourceLanguageResolver"/>'s extension bucketing and
-/// <see cref="SyntaxHighlighter"/>'s token colouring for panel D's read-only file viewer - not
+/// <see cref="SyntaxHighlighter"/>'s token colouring for panel D's file editor/viewer - not
 /// exhaustive per-language grammar coverage (this is deliberately a regex approximation, not a real
 /// parser), just enough to catch a broken pattern (e.g. an unbalanced group) or a language wired to
 /// the wrong bucket.

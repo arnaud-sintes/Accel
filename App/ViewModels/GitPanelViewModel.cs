@@ -4,7 +4,11 @@ using System;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+using Accel.App;
 using Accel.App.Services;
 using Accel.Cli;
 using Accel.Metrics;
@@ -29,7 +33,8 @@ public sealed class GitPanelEntryViewModel
 
         // This row's own double-click gesture (MainWindow.GitChangeRow_MouseLeftButtonDown) is
         // deliberately narrower than every status this list can show: Added/Untracked/Deleted open a
-        // single read-only view (MainWindow.ShowFileTabAsync), Modified opens a side-by-side diff
+        // single-pane view (MainWindow.ShowFileTabAsync - editable when a working-tree copy reads as
+        // text, read-only for Deleted's git-show fallback), Modified opens a side-by-side diff
         // (MainWindow.ShowGitDiffTabAsync) - Renamed/Copied/Conflict have no well-defined "before" or
         // "after" this Phase's viewer can show cleanly yet.
         IsOpenable = entry.StatusCode is 'A' or '?' or 'D' or 'M';
@@ -76,15 +81,18 @@ public sealed class GitPanelEntryViewModel
 }
 
 /// <summary>
-/// Panel B's second ViewModel (Phase 7): a read-only, flat git status list for whichever folder is
-/// currently focused - the exact same root <see cref="FocusedRootResolver"/> resolves for
-/// <see cref="FilesPanelViewModel"/>, so the file tree and the git list above/below each other
-/// always agree on which folder they describe.
+/// Panel B's second ViewModel: a git status list plus a set of mutating actions (stage/unstage,
+/// discard, commit, push/pull, branch switch) for whichever folder is currently focused - the exact
+/// same root <see cref="FocusedRootResolver"/> resolves for <see cref="FilesPanelViewModel"/>, so
+/// the file tree and the git list above/below each other always agree on which folder they
+/// describe.
 ///
 /// <para>Entries are split into <see cref="StagedChanges"/> and <see cref="Changes"/> (unstaged +
-/// untracked), matching VS Code's Source Control view grouping. No commit/stage/push action exists
-/// yet - this is list-only, same restraint panel B's file tree already applies (no rename/delete/
-/// open).</para>
+/// untracked), matching VS Code's Source Control view grouping. Every mutating command below shells
+/// out via <see cref="GitActionsService"/> and, on success, calls <see cref="ITelemetryFeed.RequestRefresh"/>
+/// rather than mutating <see cref="StagedChanges"/>/<see cref="Changes"/> directly - the next
+/// <see cref="RefreshDisplay"/> rebuilds them wholesale from a fresh `git status`, same as any other
+/// change to the focused folder.</para>
 ///
 /// <para>Like <see cref="FilesPanelViewModel"/>, the list is rebuilt via <see cref="GitStatusBuilder.Build"/>
 /// only when the focus signal actually changes (<see cref="Rebuild"/> is a no-op when the resolved
@@ -108,10 +116,14 @@ public sealed partial class GitPanelViewModel : ObservableObject, IDisposable
     private readonly IUiThreadDispatcher _dispatcher;
     private readonly ISessionSelectionService? _selection;
     private readonly RootsPanelViewModel? _rootsPanel;
+    private readonly IGitActionsDialogService _actionDialogs;
+    private readonly IFilesEntryConfirmationService _discardConfirmation;
 
     private RootsTreeDto? _latest;
     private string? _resolvedRootPath;
     private string? _expandedFolderPath;
+    private string? _effectiveRepoPath;
+    private bool _suppressBranchSelectionEcho;
     private bool _rootResolvedOnce;
     private bool _disposed;
 
@@ -119,12 +131,16 @@ public sealed partial class GitPanelViewModel : ObservableObject, IDisposable
         ITelemetryFeed feed,
         IUiThreadDispatcher dispatcher,
         ISessionSelectionService? selection = null,
-        RootsPanelViewModel? rootsPanel = null)
+        RootsPanelViewModel? rootsPanel = null,
+        IGitActionsDialogService? actionDialogs = null,
+        IFilesEntryConfirmationService? discardConfirmation = null)
     {
         _feed = feed ?? throw new ArgumentNullException(nameof(feed));
         _dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
         _selection = selection;
         _rootsPanel = rootsPanel;
+        _actionDialogs = actionDialogs ?? new WpfGitActionsDialogService();
+        _discardConfirmation = discardConfirmation ?? new MessageBoxFilesEntryConfirmationService();
 
         _feed.SnapshotAvailable += OnSnapshotAvailable;
         _feed.SnapshotFailed += OnSnapshotFailed;
@@ -184,6 +200,39 @@ public sealed partial class GitPanelViewModel : ObservableObject, IDisposable
     /// the view can bold only the count, not the "commit(s) to push" label.</summary>
     [ObservableProperty]
     private string _pendingPushCountText = string.Empty;
+
+    /// <summary>Local branch names for the header's branch-switcher ComboBox - repopulated by
+    /// <see cref="RefreshBranchesAsync"/> after every <see cref="RefreshDisplay"/>.</summary>
+    public ObservableCollection<string> AvailableBranches { get; } = new();
+
+    /// <summary>The branch shown/selected in the header ComboBox. Setting this to a value other than
+    /// the current branch triggers <see cref="SwitchBranchCommand"/> - see
+    /// <see cref="OnSelectedBranchChanged"/> for the echo-suppression guard that keeps
+    /// <see cref="RefreshBranchesAsync"/> from triggering a checkout every time it re-syncs this
+    /// property to the branch git already reports as current.</summary>
+    [ObservableProperty]
+    private string? _selectedBranch;
+
+    /// <summary>True while any mutating command (stage/unstage/discard/commit/push/pull/checkout) is
+    /// in flight - disables the whole action toolbar and branch switcher rather than reasoning about
+    /// which combinations of concurrent commands would be safe.</summary>
+    [ObservableProperty]
+    private bool _isBusy;
+
+    /// <summary>Short label describing the in-flight command (e.g. "Pushing…") - shown next to a busy
+    /// indicator while <see cref="IsBusy"/> is true.</summary>
+    [ObservableProperty]
+    private string? _busyStatusText;
+
+    partial void OnSelectedBranchChanged(string? value)
+    {
+        if (_suppressBranchSelectionEcho || string.IsNullOrEmpty(value) || string.IsNullOrEmpty(_effectiveRepoPath))
+        {
+            return;
+        }
+
+        _ = SwitchBranchAsync(value);
+    }
 
     /// <summary>The full rebuild. Public so tests can drive it directly with a fixture
     /// <see cref="RootsTreeDto"/>, exactly as <see cref="FilesPanelViewModel.Rebuild"/> is. A resolved
@@ -253,6 +302,8 @@ public sealed partial class GitPanelViewModel : ObservableObject, IDisposable
             HasRepo = false;
             StatusText = "No folder or session focused.";
             ClearSummary();
+            _effectiveRepoPath = null;
+            ClearBranches();
             return;
         }
 
@@ -279,6 +330,8 @@ public sealed partial class GitPanelViewModel : ObservableObject, IDisposable
             HasRepo = false;
             StatusText = $"Not a git repository: {effectivePath}";
             ClearSummary();
+            _effectiveRepoPath = null;
+            ClearBranches();
             return;
         }
 
@@ -290,6 +343,8 @@ public sealed partial class GitPanelViewModel : ObservableObject, IDisposable
 
         HasRepo = true;
         StatusText = entries.Length == 0 ? $"{effectivePath} (clean)" : effectivePath!;
+        _effectiveRepoPath = effectivePath;
+        _ = RefreshBranchesAsync(effectivePath!);
 
         var summary = GitStatusBuilder.BuildSummary(effectivePath);
         RepoName = summary?.RepoName ?? string.Empty;
@@ -321,6 +376,222 @@ public sealed partial class GitPanelViewModel : ObservableObject, IDisposable
         ChangesCountText = string.Empty;
         PendingPushSummaryText = string.Empty;
         PendingPushCountText = string.Empty;
+    }
+
+    private void ClearBranches()
+    {
+        AvailableBranches.Clear();
+        _suppressBranchSelectionEcho = true;
+        SelectedBranch = null;
+        _suppressBranchSelectionEcho = false;
+    }
+
+    /// <summary>Repopulates <see cref="AvailableBranches"/>/<see cref="SelectedBranch"/> for
+    /// <paramref name="repoPath"/> - kept as a separate async tail call rather than folding into
+    /// <see cref="RefreshDisplay"/> itself, since that method's own rebuild is otherwise fully
+    /// synchronous and every other caller expects it to stay that way.</summary>
+    private async Task RefreshBranchesAsync(string repoPath)
+    {
+        string[]? branches = await GitActionsService.ListLocalBranchesAsync(repoPath).ConfigureAwait(true);
+        string? currentBranch = GitStatusBuilder.BuildSummary(repoPath)?.Branch;
+
+        if (_disposed || !string.Equals(_effectiveRepoPath, repoPath, StringComparison.Ordinal))
+        {
+            return; // stale by the time this completed - a newer refresh has already superseded it.
+        }
+
+        _suppressBranchSelectionEcho = true;
+        AvailableBranches.Clear();
+        foreach (string branch in branches ?? Array.Empty<string>())
+        {
+            AvailableBranches.Add(branch);
+        }
+
+        SelectedBranch = currentBranch;
+        _suppressBranchSelectionEcho = false;
+    }
+
+    /// <summary>Stages a single path - context-menu action on an unstaged/untracked
+    /// <see cref="GitPanelEntryViewModel"/> row.</summary>
+    [RelayCommand]
+    private Task StageFileAsync(GitPanelEntryViewModel? entry) =>
+        RunGitActionAsync(entry?.RepoRootPath, "Stage", "Staging…",
+            ct => GitActionsService.StageAsync(entry!.RepoRootPath, entry.Path, ct));
+
+    /// <summary>Unstages a single path - context-menu action on a staged
+    /// <see cref="GitPanelEntryViewModel"/> row.</summary>
+    [RelayCommand]
+    private Task UnstageFileAsync(GitPanelEntryViewModel? entry) =>
+        RunGitActionAsync(entry?.RepoRootPath, "Unstage", "Unstaging…",
+            ct => GitActionsService.UnstageAsync(entry!.RepoRootPath, entry.Path, ct));
+
+    /// <summary>Stages every unstaged/untracked change in one call - the toolbar's "Stage all"
+    /// button. A no-op (no git call, no busy flag) when there's nothing unstaged to add - deliberately
+    /// not gated by a generated <c>CanExecute</c>, since <see cref="Changes"/> is a plain
+    /// <see cref="ObservableCollection{T}"/> whose count changes wouldn't otherwise notify the
+    /// command, same reasoning <see cref="FilesPanelViewModel"/>'s commands use plain guards instead
+    /// of <c>CanExecute</c> predicates.</summary>
+    [RelayCommand]
+    private Task StageAllAsync()
+    {
+        if (Changes.Count == 0)
+        {
+            return Task.CompletedTask;
+        }
+
+        return RunGitActionAsync(_effectiveRepoPath, "Stage all", "Staging…",
+            ct => GitActionsService.StageAllAsync(_effectiveRepoPath!, ct));
+    }
+
+    /// <summary>Reverts a single path back to HEAD (see <see cref="GitActionsService.DiscardAsync"/>
+    /// for the staged/unstaged/untracked distinction), after a tiered confirmation - context-menu
+    /// "Discard changes…" action.</summary>
+    [RelayCommand]
+    private async Task DiscardFileAsync(GitPanelEntryViewModel? entry)
+    {
+        if (entry is null || string.IsNullOrEmpty(entry.RepoRootPath))
+        {
+            return;
+        }
+
+        bool confirmed = _discardConfirmation.ConfirmDiscardChanges(entry.Path, entry.IsStaged);
+        if (!confirmed)
+        {
+            return;
+        }
+
+        bool isUntracked = entry.StatusLetter == "U";
+        await RunGitActionAsync(entry.RepoRootPath, "Discard changes", "Discarding…",
+            ct => GitActionsService.DiscardAsync(entry.RepoRootPath, entry.Path, entry.IsStaged, isUntracked, ct)).ConfigureAwait(true);
+    }
+
+    /// <summary>Opens the commit-message dialog and, once confirmed, commits every currently staged
+    /// change - the toolbar's "Commit" button. A no-op when nothing is staged - see
+    /// <see cref="StageAllAsync"/>'s remarks for why this is a plain guard rather than a generated
+    /// <c>CanExecute</c>.</summary>
+    [RelayCommand]
+    private async Task CommitAsync()
+    {
+        if (string.IsNullOrEmpty(_effectiveRepoPath) || StagedChanges.Count == 0)
+        {
+            return;
+        }
+
+        string? message = _actionDialogs.PromptForCommitMessage(StagedChanges.Count);
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            return; // cancelled
+        }
+
+        await RunGitActionAsync(_effectiveRepoPath, "Commit", "Committing…",
+            ct => GitActionsService.CommitAsync(_effectiveRepoPath!, message, ct)).ConfigureAwait(true);
+    }
+
+    /// <summary>Pushes the current branch to its upstream - the toolbar's "Push" button.</summary>
+    [RelayCommand]
+    private Task PushAsync() =>
+        RunGitActionAsync(_effectiveRepoPath, "Push", "Pushing…",
+            ct => GitActionsService.PushAsync(_effectiveRepoPath!, ct));
+
+    /// <summary>Pulls the current branch's upstream - the toolbar's "Pull" button.</summary>
+    [RelayCommand]
+    private Task PullAsync() =>
+        RunGitActionAsync(_effectiveRepoPath, "Pull", "Pulling…",
+            ct => GitActionsService.PullAsync(_effectiveRepoPath!, ct));
+
+    /// <summary>Switches to <paramref name="branchName"/>, warning first if the working tree has
+    /// uncommitted changes - invoked from <see cref="OnSelectedBranchChanged"/> when the header
+    /// ComboBox selection changes by user action (not by <see cref="RefreshBranchesAsync"/> re-syncing
+    /// it). Reverts <see cref="SelectedBranch"/> back to the branch that was current, without ever
+    /// calling git, whenever the user cancels the dirty-tree warning or git itself refuses the
+    /// checkout.</summary>
+    /// <summary>Internal (not private) purely so tests can drive this directly without going
+    /// through the <see cref="SelectedBranch"/> property setter's fire-and-forget dispatch.</summary>
+    internal async Task SwitchBranchAsync(string branchName)
+    {
+        string? repoPath = _effectiveRepoPath;
+        if (string.IsNullOrEmpty(repoPath))
+        {
+            return;
+        }
+
+        string? previousBranch = GitStatusBuilder.BuildSummary(repoPath)?.Branch;
+        if (string.Equals(previousBranch, branchName, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        if (GitActionsService.HasUncommittedChanges(repoPath))
+        {
+            bool proceed = AccelMessageDialog.ShowConfirm(
+                null,
+                "Switching branches will keep your uncommitted changes and may fail if they conflict — continue?",
+                "Switch branch",
+                AccelDialogIcon.Warning);
+
+            if (!proceed)
+            {
+                RevertSelectedBranch(previousBranch);
+                return;
+            }
+        }
+
+        IsBusy = true;
+        BusyStatusText = "Switching branch…";
+        try
+        {
+            var result = await GitActionsService.CheckoutBranchAsync(repoPath, branchName).ConfigureAwait(true);
+            if (result.Outcome != GitActionOutcome.Success)
+            {
+                RevertSelectedBranch(previousBranch);
+                AccelMessageDialog.ShowMessage(null, result.ErrorMessage ?? "The checkout failed.", "Switch branch", AccelDialogIcon.Error);
+                return;
+            }
+
+            _feed.RequestRefresh();
+        }
+        finally
+        {
+            IsBusy = false;
+            BusyStatusText = null;
+        }
+    }
+
+    private void RevertSelectedBranch(string? previousBranch)
+    {
+        _suppressBranchSelectionEcho = true;
+        SelectedBranch = previousBranch;
+        _suppressBranchSelectionEcho = false;
+    }
+
+    /// <summary>Shared shape for every simple mutating command: guard/announce
+    /// <see cref="IsBusy"/>/<see cref="BusyStatusText"/>, run <paramref name="action"/>, refresh on
+    /// success, show an error dialog on failure.</summary>
+    private async Task RunGitActionAsync(string? repoPath, string title, string busyText, Func<CancellationToken, Task<GitActionResult>> action)
+    {
+        if (string.IsNullOrEmpty(repoPath) || IsBusy)
+        {
+            return;
+        }
+
+        IsBusy = true;
+        BusyStatusText = busyText;
+        try
+        {
+            var result = await action(default).ConfigureAwait(true);
+            if (result.Outcome != GitActionOutcome.Success)
+            {
+                AccelMessageDialog.ShowMessage(null, result.ErrorMessage ?? "The operation failed.", title, AccelDialogIcon.Error);
+                return;
+            }
+
+            _feed.RequestRefresh();
+        }
+        finally
+        {
+            IsBusy = false;
+            BusyStatusText = null;
+        }
     }
 
     private void OnSnapshotAvailable(RootsTreeDto snapshot) => _dispatcher.Post(() =>

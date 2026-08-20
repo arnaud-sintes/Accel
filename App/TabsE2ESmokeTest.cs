@@ -303,6 +303,80 @@ public static class TabsE2ESmokeTest
         output.WriteLine($"  [{Pf(endedTab)}] tab still present, HasEnded={tabOne?.HasEnded}, status suffix '{tabOne?.StatusSuffix}', automation text '{tabOne?.AutomationDescription}'");
         output.WriteLine($"      registry entries left: {registry.Count}; FocusedSessionId={selection.FocusedSessionId ?? "<null>"}");
 
+        // --- T11: the one piece of the editable-file-viewer feature that is not unit-testable - the
+        // real control swap. Open a real on-disk file the same way panel B's FILES tree double-click
+        // does (TabsViewModel.AddFileTab), edit it through the same shared AvalonEdit control Ctrl+S
+        // saves from, invoke the exact command/parameter MainWindow.xaml's Ctrl+S KeyBinding uses, and
+        // prove the bytes that land on disk are the ones that were "typed".
+        output.WriteLine();
+        output.WriteLine("== check 10: FILE tab open -> type -> Ctrl+S -> re-read from disk matches ==");
+
+        string tempFilePath = Path.Combine(Path.GetTempPath(), $"accel-tabs-e2e-{Guid.NewGuid():N}.txt");
+        const string initialContent = "line one\nline two\n";
+        await File.WriteAllTextAsync(tempFilePath, initialContent);
+        try
+        {
+            var fileTab = tabs.AddFileTab(tempFilePath);
+            if (tabs.LastAttach is { } fileAttach)
+            {
+                await fileAttach;
+            }
+
+            var becameEditable = fileTab.IsEditable;
+            ok &= becameEditable;
+            output.WriteLine($"  [{Pf(becameEditable)}] a real on-disk file tab became editable: IsEditable={fileTab.IsEditable}");
+
+            const string typedContent = "line one EDITED\nline two\nline three, typed by the smoke test\n";
+
+            // Stands in for real keystrokes: the control swap itself isn't unit-testable, but pointing
+            // the same shared FileEditor's document at new text and letting AvalonEdit's own undo-stack
+            // machinery flip TabViewModel.IsDirty is exactly what typing does.
+            window.FileEditor.Document.Text = typedContent;
+
+            var becameDirty = fileTab.IsDirty;
+            ok &= becameDirty;
+            output.WriteLine($"  [{Pf(becameDirty)}] editing FileEditor's document marked the tab dirty: IsDirty={fileTab.IsDirty}");
+
+            // The exact command + CommandParameter MainWindow.xaml's Ctrl+S KeyBinding is bound to
+            // (DataContext.SaveTabCommand on panel C, CommandParameter=SelectedTab) - WPF's own
+            // InputBinding-to-keypress routing is not this codebase's code, only what the command does.
+            var canSave = tabs.SaveTabCommand.CanExecute(fileTab);
+            tabs.SaveTabCommand.Execute(fileTab);
+            await tabs.SaveTabCommand.ExecutionTask!;
+
+            var savedClean = !fileTab.IsDirty;
+            ok &= canSave && savedClean;
+            output.WriteLine($"  [{Pf(canSave)}] SaveTabCommand.CanExecute(fileTab) was true before the save");
+            output.WriteLine($"  [{Pf(savedClean)}] after Ctrl+S's command ran, tab.IsDirty={fileTab.IsDirty}");
+
+            string onDisk = await File.ReadAllTextAsync(tempFilePath);
+            var matches = string.Equals(onDisk, typedContent, StringComparison.Ordinal);
+            ok &= matches;
+            output.WriteLine($"  [{Pf(matches)}] re-read from disk matches what was typed ({onDisk.Length} bytes, expected {typedContent.Length})");
+        }
+        finally
+        {
+            File.Delete(tempFilePath);
+        }
+
+        // --- A Deleted GIT-section entry (no working-tree copy) must stay read-only even though it is
+        // still a GitChange tab - TabViewModel.IsEditable's own remarks call this out explicitly as the
+        // one case the kind/path test alone gets wrong. Never created on disk, standing in for exactly
+        // that: TryCreateFileEditBufferAsync's File.Exists check must be what refuses it.
+        output.WriteLine();
+        output.WriteLine("== check 11: a Deleted GIT-section entry stays read-only, even though it is a GitChange tab ==");
+
+        string deletedPath = Path.Combine(Path.GetTempPath(), $"accel-tabs-e2e-deleted-{Guid.NewGuid():N}.txt");
+        var deletedTab = tabs.AddGitChangeTab(deletedPath, Path.GetFileName(deletedPath), Path.GetTempPath(), Path.GetFileName(deletedPath));
+        if (tabs.LastAttach is { } deletedAttach)
+        {
+            await deletedAttach;
+        }
+
+        var staysReadOnly = deletedTab.IsGitChangeTab && !deletedTab.IsEditable;
+        ok &= staysReadOnly;
+        output.WriteLine($"  [{Pf(staysReadOnly)}] GitChange tab for a path with no working-tree copy: Kind={deletedTab.Kind}, IsEditable={deletedTab.IsEditable} (expected false)");
+
         return ok;
     }
 

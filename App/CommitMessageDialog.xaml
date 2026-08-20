@@ -1,0 +1,51 @@
+<Window x:Class="Accel.App.CommitMessageDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:controls="clr-namespace:Accel.App.Controls"
+        Title="{Binding Title}" Height="300" Width="440"
+        WindowStartupLocation="CenterOwner" ResizeMode="NoResize"
+        ShowInTaskbar="False" WindowStyle="None" Style="{StaticResource DialogWindowStyle}">
+    <Window.Resources>
+        <ResourceDictionary Source="Theme.xaml" />
+    </Window.Resources>
+    <!-- Same elevation ladder as NewEntryDialog: L1 surface body under the L2 title bar. -->
+    <Border BorderBrush="{StaticResource WindowBorderBrush}" BorderThickness="1">
+    <DockPanel LastChildFill="True" Background="{StaticResource SurfaceBrush}">
+        <controls:CustomTitleBar x:Name="TitleBar" DockPanel.Dock="Top" TitleText="{Binding Title}"
+                                  ShowMinimizeButton="False" ShowMaximizeButton="False" />
+        <Grid Margin="24">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <TextBlock Grid.Row="0" Text="{Binding PromptLabel}" Style="{StaticResource FieldLabelTextStyle}" />
+            <TextBox x:Name="MessageBox" Grid.Row="1"
+                     Text="{Binding Message, UpdateSourceTrigger=PropertyChanged}"
+                     AcceptsReturn="True" TextWrapping="Wrap"
+                     MinLines="4" MaxLines="8" VerticalScrollBarVisibility="Auto"
+                     Margin="0,0,0,12" />
+
+            <!-- Validation error: an inset danger card, matching NewEntryDialog's. -->
+            <Border Grid.Row="2" Background="#1FE98F8F" BorderBrush="#4DE98F8F" BorderThickness="1"
+                    CornerRadius="6" Padding="12,8"
+                    Visibility="{Binding Visibility, ElementName=ErrorText}">
+                <TextBlock x:Name="ErrorText"
+                           Text="{Binding ErrorMessage}"
+                           Foreground="{StaticResource DangerBrush}" TextWrapping="Wrap"
+                           Visibility="Collapsed" />
+            </Border>
+
+            <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,20,0,0">
+                <Button x:Name="CancelButton" Content="Cancel" Command="{Binding CancelCommand}"
+                        MinWidth="96" Margin="0,0,10,0" IsCancel="True" />
+                <Button x:Name="CommitButton" Content="{Binding ConfirmButtonText}" Command="{Binding ConfirmCommand}"
+                        Style="{StaticResource PrimaryButtonStyle}" MinWidth="96" IsDefault="True" />
+            </StackPanel>
+        </Grid>
+    </DockPanel>
+    </Border>
+</Window>

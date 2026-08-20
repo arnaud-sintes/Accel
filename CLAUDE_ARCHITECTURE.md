@@ -27,8 +27,10 @@ DI container and no separate server/UI processes talking over HTTP to each other
 3. **A WPF monitor UI** — a single `MainWindow` showing, across five panels (A–E): a tree of tracked
    project folders/sessions/agents plus the focused session's MCP-tool/Skill hit counts (panel A), a
    read-only file tree and a `git status` list for the focused folder (panel B), a tab strip of live PTY
-   sessions (panel C), an embedded terminal (panel D via WebView2 + xterm.js), and a left-to-right node
-   graph of the focused session's running sub-agents (panel E).
+   sessions plus file/git-change tabs opened from panel B (panel C), an embedded terminal that doubles as
+   a file editor / diff viewer for those file tabs (panel D via WebView2 + xterm.js for the terminal,
+   AvalonEdit for the editor), and a left-to-right node graph of the focused session's running sub-agents
+   (panel E).
 
 `Program.cs` also acts as a **CLI dispatcher**: Claude Code itself invokes the *same* `accel.exe` as a
 short-lived child process for two verbs — `accel statusline` and `accel subagent-statusline` — which do
@@ -370,6 +372,42 @@ and guarantees they don't outlive the app even across crashes.
   reattached per tab selection (`AttachPtyAsync(tabId, port)` calls `window.accelAttachPty` which opens a
   `ws://…/pty/{tabId}` connection) rather than one WebView2 instance per tab, trading scrollback-on-switch
   for far lower resource cost.
+- **Panel D file editor** (`FileViewerHost` in `MainWindow.xaml` + `ShowFileTabAsync` and friends in
+  `MainWindow.xaml.cs`) — a single AvalonEdit `TextEditor` (`FileEditor`) layered over the terminal
+  (Visibility-toggled, never tearing the PTY down) that renders `TabKind.File`/`TabKind.GitChange` tabs
+  opened by double-click from panel B. It is an *editor* for those tabs, not just a viewer; the
+  side-by-side diff viewer (`DiffViewerHost`, Modified git entries) and the WebView2 markdown HTML
+  preview remain read-only.
+  - **Editable-vs-read-only rule** (`TryCreateFileEditBufferAsync`): a tab is editable iff it is a
+    single-pane file/git-change tab whose working-tree file exists *and* decodes safely as text
+    (`FileTextSnapshot.IsTextEditable` — no NUL bytes / invalid UTF-8 that a round-trip would corrupt).
+    Everything else — a Deleted git entry's `git show HEAD:` fallback, a diff tab, a binary file, a
+    failed read — is shown read-only in a throwaway document. Only the load path knows which case
+    occurred, so it is the single writer of `TabViewModel.IsEditable`.
+  - **Per-tab buffer ownership** (`App/Services/FileEditBuffer.cs`, owned by `MainWindow`'s
+    `_fileEditBuffers` dictionary keyed by `TabId` = full path): because `FileEditor` is one shared
+    control re-pointed on every tab selection (same one-control-and-reattach design as `TerminalView`),
+    the control cannot hold unsaved text or undo history — a tab switch would destroy both. Each open
+    editable tab therefore owns a `FileEditBuffer` (AvalonEdit `TextDocument` + `FileTextSnapshot` +
+    caret/scroll state); a tab switch is just `FileEditor.Document = buffer.Document`, and dirty state
+    falls out of the document's own `UndoStack.IsOriginalFile` (no hand-rolled baseline diffing).
+    Buffers are created lazily on first activation and evicted when the tab closes
+    (`EvictFileEditBuffer`, wired as `TabsViewModel.ReleaseFileTab`).
+  - **Save path** (`SaveFileTabAsync`, Ctrl+S / tab-header Save button through
+    `TabsViewModel.SaveTabCommand`): writes through `App/Services/FileTextCodec.cs`, which reproduces
+    the encoding/BOM/EOL shape (LF/CRLF/mixed, trailing-newline presence) recorded at read time —
+    display text is LF-normalised, but a save never rewrites the whole file's line-ending or encoding
+    shape. Immediately before the write, `App/Services/ExternalFileChangeDetector.cs` checks whether
+    something else (typically a Claude Code session) rewrote the file since the buffer read it —
+    deliberately check-on-activate + check-on-save polling, not a `FileSystemWatcher` (see the
+    rationale comment at its call sites): a clean buffer silently reloads; a dirty one gets a
+    three-way Keep-mine / Reload / Cancel prompt. A successful save re-reads its own snapshot and
+    triggers the same `RootsPanelViewModel.RefreshCommand` refresh path panel B's git section already
+    listens to.
+  - **Guards**: closing a dirty tab prompts Save/Discard/Cancel (`ConfirmCloseDirtyTabAsync` delegate
+    on `TabsViewModel`); closing the window with any dirty tabs shows one summary dialog (Save All /
+    Discard All / Cancel). Syntax colours come from `App/Services/SyntaxColorizer.cs`, a debounced
+    `DocumentColorizingTransformer` over the same `SyntaxHighlighter.Tokenize` the diff viewer uses.
 - **`EffortBarsControl`** — radial ring gauge rendering `Metrics.EffortBarLevel`'s 0–4 scale (arc for 1–3,
   filled disc for max, shape as well as color for accessibility).
 - **`AgentGraphViewModel.cs`** (panel E, Phase 6) — a *second* reader on the same `ITelemetryFeed` instance
@@ -389,12 +427,17 @@ and guarantees they don't outlive the app even across crashes.
   first expand (`FilesTreeBuilder.BuildChildren`, one level at a time) rather than eagerly for the whole
   subtree — an earlier eager/shared-budget walk could silently truncate a top-level listing when an
   earlier sibling's subtree was large. Raises `FolderExpanded`/`FolderCollapsed` so `GitPanelViewModel`
-  can follow which folder is being drilled into. Expand/collapse only — no file-open, no stage/commit.
+  can follow which folder is being drilled into. Double-clicking a file row opens (or selects) its tab
+  in panel C/D (handled in `MainWindow` code-behind via `TabsViewModel.AddFileTab`, not through this
+  ViewModel — editable in panel D's editor when the file reads as text); no stage/commit actions.
 - **`GitPanelViewModel.cs`** (panel B, bottom) — a flat `git status` list (via `GitStatusBuilder.Build`)
   for the same focused root `FilesPanelViewModel` resolves, split into `StagedChanges`/`Changes`
   (unstaged + untracked), VS Code Source Control-style. Wired to `FilesPanelViewModel.FolderExpanded`/
   `FolderCollapsed` in `Program.cs` so drilling into a repo folder in the file tree switches this section
-  to that repo. List-only — no stage/unstage/discard/commit action yet.
+  to that repo. Double-clicking an Added/Untracked/Deleted row opens a single-pane tab in panel C/D
+  (editable when a working-tree copy reads as text; a Deleted entry falls back to read-only
+  `git show HEAD:` content) and a Modified row opens the read-only side-by-side diff; no
+  stage/unstage/discard/commit action yet.
 - **`McpSkillsPanelViewModel.cs`** (panel A, bottom third) — the focused session's MCP-tool and Skill
   hit counts as two flat lists (`ToolUsageRowViewModel`), most-used first. A third independent reader of
   the same `ITelemetryFeed`/`ISessionSelectionService` pair; all its data already rides on the pushed

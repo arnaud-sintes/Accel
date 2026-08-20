@@ -200,6 +200,19 @@ just a color; `EffortBarsControl` renders an actual partial/full ring, not just 
 every interactive row also sets `AutomationProperties.Name`/`ToolTip` to a plain-text description
 of its state (`RootsPanelNodeViewModel.AutomationDescription`, `TabViewModel.AutomationDescription`).
 
+**AvalonEdit theming** (panel D's `FileEditor`, the file editor): brushes always come from
+`Theme.xaml` resources, never inline hex. The properties AvalonEdit exposes as real dependency
+properties (`Background`, `Foreground`, `LineNumbersForeground`) are bound in `MainWindow.xaml` via
+`{StaticResource ...Brush}`; the ones it only exposes behind read-only `TextArea`/`TextView`
+properties — which XAML cannot reach — (`SelectionBrush`, `CurrentLineBackground`,
+`CurrentLineBorder`) are set in `MainWindow.xaml.cs`'s constructor from the same resource
+dictionary (`FindResource`), sharing the frozen brushes rather than allocating new ones. The
+never-color-only rule applies to editor state too: a tab's unsaved-changes state is a literal `●`
+glyph plus a bold title (weight + glyph, never a color change alone), with the text form reaching
+assistive tech through `TabViewModel.AutomationDescription`/`EditStateSuffix`, and the editor pane's
+own `AutomationProperties.Name` flips between "File content (editable)" and "File content
+(read-only)".
+
 **Selection vs. hover are always visually distinct fills** (teal tint for selection vs. neutral
 elevation overlay for hover), often reinforced with a left accent bar (`ListBoxItem`,
 `TreeViewItem`, `TabItemContainerStyle` all use a 2–3px `AccentBar` element that only becomes

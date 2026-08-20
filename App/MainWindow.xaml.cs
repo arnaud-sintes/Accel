@@ -2,6 +2,7 @@ namespace Accel.App;
 
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -14,6 +15,7 @@ using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Threading;
 using Rectangle = System.Windows.Shapes.Rectangle;
+using ICSharpCode.AvalonEdit.Document;
 using Accel.App.Services;
 using Accel.App.ViewModels;
 using Accel.Cli;
@@ -179,12 +181,35 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
 
-        // Line-number gutters and the two diff panes' scroll sync are wired here rather than in XAML
-        // since ScrollViewer.ScrollChangedEvent has no attached-property XAML shorthand - see
-        // FileViewerText_ScrollChanged/DiffOldText_ScrollChanged/DiffNewText_ScrollChanged's remarks.
-        FileViewerText.AddHandler(ScrollViewer.ScrollChangedEvent, new ScrollChangedEventHandler(FileViewerText_ScrollChanged), true);
+        // T8: the shutdown guard - see OnClosingAsync's remarks. Wired unconditionally (not just
+        // inside the `tabs is not null` block below): a null Tabs just means the sweep finds nothing
+        // dirty and lets the close proceed, same as every other Tabs-optional hook in this file.
+        Closing += MainWindow_Closing;
+
+        // The diff viewer's line-number gutters and its two panes' scroll sync are wired here rather
+        // than in XAML since ScrollViewer.ScrollChangedEvent has no attached-property XAML shorthand -
+        // see DiffOldText_ScrollChanged/DiffNewText_ScrollChanged's remarks. The single-pane file view
+        // needs no equivalent: FileEditor is an AvalonEdit TextEditor whose gutter is part of its own
+        // TextView, so it scrolls with the text by construction.
         DiffOldText.AddHandler(ScrollViewer.ScrollChangedEvent, new ScrollChangedEventHandler(DiffOldText_ScrollChanged), true);
         DiffNewText.AddHandler(ScrollViewer.ScrollChangedEvent, new ScrollChangedEventHandler(DiffNewText_ScrollChanged), true);
+
+        // Theme.xaml brushes for the two things AvalonEdit exposes only behind read-only TextArea/
+        // TextView properties, which XAML therefore cannot reach (everything else FileEditor needs is
+        // a real dependency property and is bound in MainWindow.xaml). Frozen brushes come straight
+        // out of the resource dictionary, so this shares them rather than allocating new ones.
+        FileEditor.TextArea.SelectionBrush = (Brush)FindResource("SelectionBrush");
+        FileEditor.TextArea.SelectionBorder = null;
+        FileEditor.TextArea.TextView.CurrentLineBackground = (Brush)FindResource("SurfaceElevatedBrush");
+        FileEditor.TextArea.TextView.CurrentLineBorder = new Pen((Brush)FindResource("StrokeSubtleBrush"), 1);
+
+        // Syntax colouring for the file editor comes from the same SyntaxHighlighter.Tokenize the diff
+        // viewer uses (see SyntaxColorizer's remarks for why this is a line transformer over a cached
+        // token map rather than an .xshd definition). The colorizer cannot redraw itself - it does not
+        // own the TextView - so the rebuild notification is turned into a redraw here.
+        _fileSyntaxColorizer = new SyntaxColorizer(new DispatcherDebounceTimer(Dispatcher, SyntaxColorizer.RebuildDebounce));
+        _fileSyntaxColorizer.CacheRebuilt += () => FileEditor.TextArea.TextView.Redraw();
+        FileEditor.TextArea.TextView.LineTransformers.Add(_fileSyntaxColorizer);
 
         RootsPanel = rootsPanel;
         Tabs = tabs;
@@ -215,13 +240,24 @@ public partial class MainWindow : Window
             // DetachTerminalAsync remarks).
             tabs.DetachTerminalAsync = () => Terminal.DetachPtyAsync();
 
-            // Panel D's file-viewer hooks (a read-only tab's TabId is the file's own full path - see
+            // Panel D's file-viewer hooks (a file/git-change tab's TabId is the file's own full path - see
             // TabViewModel.ForFile/ForGitChange/ForGitDiff). The pty stays attached underneath rather
             // than being detached and reattached on every flip between a file/git tab and a session
             // tab - only FileViewerHost's/DiffViewerHost's Visibility toggles (see PanelD's own XAML
             // comment for why).
             tabs.ShowFileAsync = ShowFileTabAsync;
             tabs.HideFileViewer = ShowTerminalPane;
+
+            // T6: Save/Discard - see SaveFileTabAsync/DiscardFileTabChangesAsync's own remarks.
+            tabs.SaveFileAsync = SaveFileTabAsync;
+            tabs.DiscardFileAsync = DiscardFileTabChangesAsync;
+
+            // A closed tab's edit buffer (unsaved text + undo history) must not outlive it - see
+            // _fileEditBuffers and TabsViewModel.ReleaseFileTab.
+            tabs.ReleaseFileTab = EvictFileEditBuffer;
+
+            // T8: the close guard - see ConfirmCloseDirtyTabAsync's own remarks.
+            tabs.ConfirmCloseDirtyTabAsync = ConfirmCloseDirtyTabAsync;
         }
 
         if (filesPanel is not null)
@@ -231,6 +267,12 @@ public partial class MainWindow : Window
             // DataContext.
             FilesPanelVm = filesPanel;
             FilesSectionRoot.DataContext = filesPanel;
+
+            // A file/folder the FILES panel just deleted, or moved/renamed away from, must not leave
+            // a tab pointing at a path that no longer exists there - see
+            // OnFilesPanelEntryRemovedOrMoved's remarks for why this closes the tab rather than trying
+            // to rebind it.
+            filesPanel.EntryRemovedOrMoved += OnFilesPanelEntryRemovedOrMoved;
         }
         else if (selection is not null)
         {
@@ -1208,8 +1250,9 @@ public partial class MainWindow : Window
 
     /// <summary>
     /// Panel B's FILES tree double-click gesture: opens (or selects, if already open -
-    /// <see cref="TabsViewModel.AddFileTab"/> is idempotent per path) a read-only tab for the
-    /// double-clicked file. A no-op for a directory row (its own double-click is the TreeView's
+    /// <see cref="TabsViewModel.AddFileTab"/> is idempotent per path) a tab for the double-clicked
+    /// file - editable in panel D's editor when the file reads as text (see
+    /// <see cref="ShowFileTabAsync"/>). A no-op for a directory row (its own double-click is the TreeView's
     /// built-in expand/collapse) or the lazy-load <see cref="FilesPanelNodeViewModel"/> placeholder
     /// (empty <see cref="FilesPanelNodeViewModel.Key"/>).
     /// </summary>
@@ -1226,8 +1269,42 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Panel B's GIT section double-click gesture: opens (or selects, if already open) a read-only
-    /// tab for the double-clicked row - a single-pane view for Added/Untracked/Deleted, a
+    /// Panel B's FILES tree explorer commands (<see cref="FilesPanelViewModel.EntryRemovedOrMoved"/>)
+    /// never rebind or reload an open tab whose backing file/folder just moved or was removed - per
+    /// this feature's confirmed scope, the tab is simply closed. Handles both a directly-affected file
+    /// (exact <see cref="TabViewModel.TabId"/> match) and every tab whose path is nested under a
+    /// removed/moved-away directory (prefix match, same containment idiom
+    /// <see cref="Accel.Orchestration.FileSystemEntryPlanner"/> uses). Git-change/git-diff tabs are
+    /// keyed on the same file-path <c>TabId</c> space (<see cref="TabsViewModel.AddGitChangeTab"/>/
+    /// <see cref="TabsViewModel.AddGitDiffTab"/>), so this closes those too with no extra handling.
+    ///
+    /// <para><see cref="TabsViewModel.CloseTabAsync(string)"/> still runs its existing dirty-tab save/
+    /// discard/cancel prompt for an unsaved editable tab - deliberate: "just close it" is about not
+    /// trying to re-point the buffer at a new path, not about silently discarding unsaved edits out
+    /// from under the user.</para>
+    /// </summary>
+    private void OnFilesPanelEntryRemovedOrMoved(string oldPath, bool wasDirectory)
+    {
+        if (Tabs is null)
+        {
+            return;
+        }
+
+        bool Matches(TabViewModel tab) => wasDirectory
+            ? tab.TabId.StartsWith(oldPath + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+              || tab.TabId.StartsWith(oldPath + Path.AltDirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+            : string.Equals(tab.TabId, oldPath, StringComparison.OrdinalIgnoreCase);
+
+        foreach (var tab in Tabs.Tabs.Where(Matches).ToArray())
+        {
+            _ = Tabs.CloseTabAsync(tab.TabId);
+        }
+    }
+
+    /// <summary>
+    /// Panel B's GIT section double-click gesture: opens (or selects, if already open) a tab for the
+    /// double-clicked row - a single-pane view for Added/Untracked/Deleted (editable when a
+    /// working-tree copy reads as text; Deleted stays read-only), a
     /// side-by-side diff for Modified (see <see cref="GitPanelEntryViewModel.IsOpenable"/> for exactly
     /// which statuses qualify at all). <see cref="GitChangeRowTemplate"/>'s root <c>Grid</c> is not a
     /// <c>Control</c>, so it has no <c>MouseDoubleClick</c> routed event to hook (unlike panel A/C's
@@ -1265,22 +1342,55 @@ public partial class MainWindow : Window
         Tabs?.AddGitChangeTab(entry.FullPath, title, entry.RepoRootPath, entry.Path);
     }
 
-    /// <summary>Frozen <see cref="SolidColorBrush"/> cache for <see cref="SyntaxToken.ColorHex"/> -
-    /// <see cref="SyntaxHighlighter"/>'s palette is a small fixed set, so this never grows unbounded
-    /// and avoids reparsing the same hex string for every token of every file.</summary>
-    private readonly Dictionary<string, SolidColorBrush> _syntaxBrushCache = new(StringComparer.Ordinal);
+    /// <summary>Colours <see cref="FileEditor"/> from <see cref="SyntaxHighlighter.Tokenize"/>; wired
+    /// into the editor's <c>LineTransformers</c> in the constructor and re-pointed at the current
+    /// document by <see cref="ShowFileTabAsync"/>.</summary>
+    private readonly SyntaxColorizer _fileSyntaxColorizer;
 
     /// <summary>
-    /// Reads <paramref name="tab"/>'s content and renders it read-only, coloured per
-    /// <see cref="SyntaxHighlighter.Tokenize"/> (resolved from the file's extension - see
-    /// <see cref="SourceLanguageResolver"/>), in panel D's file viewer - wired as
-    /// <see cref="TabsViewModel.ShowFileAsync"/>. Shared by both <see cref="TabKind.File"/> (panel B's
-    /// FILES tree) and <see cref="TabKind.GitChange"/> (panel B's GIT section) tabs: the only
-    /// difference is <see cref="ReadTabContentAsync"/>'s git-show fallback for a Deleted entry whose
-    /// working-tree copy is gone. A failed read (deleted file, permission denied, a binary file that
-    /// isn't valid text, `git show` failing) shows the error message in place of content rather than
-    /// throwing - <see cref="TabsViewModel"/>'s own safe-call wrapper would swallow an exception here
-    /// silently, which would leave the previous tab's content on screen with no explanation.
+    /// One <see cref="FileEditBuffer"/> per open <b>editable</b> file/git-change tab, keyed by
+    /// <see cref="TabViewModel.TabId"/> - which for those kinds is the file's own full path (see
+    /// <see cref="TabViewModel.ForFile"/>), hence the case-insensitive comparer that
+    /// <see cref="TabsViewModel"/>'s own tab lookup already uses for the same key space.
+    ///
+    /// <para><b>Why the window owns these.</b> <see cref="FileEditor"/> is a single shared control
+    /// re-pointed on every selection, so it cannot be where unsaved text or undo history lives - see
+    /// <see cref="FileEditBuffer"/>'s remarks. Entries are created lazily by
+    /// <see cref="ShowFileTabAsync"/> on a tab's first activation and removed by
+    /// <see cref="EvictFileEditBuffer"/> when the tab closes, so an open tab's buffer survives any
+    /// number of tab switches while a closed one is re-read from disk if it is opened again.</para>
+    ///
+    /// <para>Read-only content is deliberately <b>not</b> cached here: a Deleted GIT entry's
+    /// <c>git show</c> output, a non-text file and a failed read all have no file to save back to, so
+    /// a buffer for them would be a save target that cannot exist. They get a throwaway document
+    /// instead, exactly as the pre-edit viewer did.</para>
+    /// </summary>
+    private readonly Dictionary<string, FileEditBuffer> _fileEditBuffers = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The buffer <see cref="FileEditor"/> is currently pointed at, or <see langword="null"/>
+    /// when it is showing read-only content. Exists so caret/scroll can be captured back into the
+    /// right buffer when the tab is left, without having to know which tab is being left - see
+    /// <see cref="CaptureFileEditorViewState"/>.</summary>
+    private FileEditBuffer? _activeFileEditBuffer;
+
+    /// <summary>
+    /// Renders <paramref name="tab"/> in panel D's editor, coloured per
+    /// <see cref="SyntaxHighlighter.Tokenize"/> (language resolved from the file's extension - see
+    /// <see cref="SourceLanguageResolver"/>) - wired as <see cref="TabsViewModel.ShowFileAsync"/>.
+    /// Shared by both <see cref="TabKind.File"/> (panel B's FILES tree) and
+    /// <see cref="TabKind.GitChange"/> (panel B's GIT section) tabs.
+    ///
+    /// <para><b>Two outcomes.</b> If the tab has a working-tree file that reads as text, it gets (or
+    /// re-uses) a <see cref="FileEditBuffer"/> and the editor becomes writable: re-selecting the tab
+    /// restores its unsaved text, undo history, dirty state and caret/scroll, because all of those
+    /// live on the buffer's document rather than on the shared control. Otherwise the content is
+    /// shown read-only in a throwaway document - see <see cref="_fileEditBuffers"/> for which cases
+    /// those are and why they must not be editable.</para>
+    ///
+    /// <para>A failed read (permission denied, the path vanished between the click and here,
+    /// `git show` failing) shows the error message in place of content rather than throwing:
+    /// <see cref="TabsViewModel"/>'s own safe-call wrapper would swallow an exception here silently,
+    /// leaving the previous tab's content on screen with no explanation.</para>
     /// </summary>
     private async Task ShowFileTabAsync(TabViewModel tab)
     {
@@ -1296,23 +1406,735 @@ public partial class MainWindow : Window
             return;
         }
 
-        string content;
+        // Before anything re-points the editor: remember where the user was in the tab being left.
+        CaptureFileEditorViewState();
+
+        if (_fileEditBuffers.TryGetValue(tab.TabId, out var cached))
+        {
+            // Re-activation only: on first load the buffer *is* the current disk state, so there is
+            // nothing to compare against yet. Any outcome here (reloaded, kept, cancelled) still ends
+            // with the same tab being shown - the check changes what the buffer contains, never which
+            // tab wins the selection.
+            var outcome = await ResolveExternalFileChangeAsync(tab, cached, ExternalChangeTrigger.Activation)
+                .ConfigureAwait(true);
+
+            // A conflict prompt is modal, which means WPF pumped messages while it was up and the
+            // selection may have moved on. Re-pointing the editor at this tab's buffer now would show
+            // it under a different tab's header.
+            if (outcome != ExternalChangeOutcome.Unchanged
+                && Tabs?.SelectedTab is { } selected && !ReferenceEquals(selected, tab))
+            {
+                return;
+            }
+
+            ActivateFileEditBuffer(tab, cached);
+            return;
+        }
+
+        FileEditBuffer? buffer = null;
+        string? readOnlyContent = null;
         SourceLanguage language = SourceLanguage.PlainText;
         try
         {
-            content = await ReadTabContentAsync(tab).ConfigureAwait(true);
             language = SourceLanguageResolver.Resolve(tab.TabId);
+            buffer = await TryCreateFileEditBufferAsync(tab, language).ConfigureAwait(true);
+
+            if (buffer is null)
+            {
+                readOnlyContent = NormalizeLineEndings(await ReadTabContentAsync(tab).ConfigureAwait(true));
+            }
         }
         catch (Exception ex)
         {
-            content = $"Could not read file:\n{tab.TabId}\n\n{ex.Message}";
+            buffer = null;
+            readOnlyContent = $"Could not read file:\n{tab.TabId}\n\n{ex.Message}";
+            language = SourceLanguage.PlainText;
         }
 
-        content = NormalizeLineEndings(content);
-        FileViewerText.Document = BuildHighlightedDocument(content, language);
-        SetLineNumbers(FileViewerLineNumbers, CountLines(content));
-        ResetScroll(FileViewerText, FileViewerLineNumbersTransform);
+        if (buffer is not null)
+        {
+            _fileEditBuffers[tab.TabId] = buffer;
+            ActivateFileEditBuffer(tab, buffer);
+            return;
+        }
+
+        tab.IsEditable = false;
+        tab.IsDirty = false;
+        ShowFileEditorDocument(new TextDocument(readOnlyContent ?? string.Empty), language, isReadOnly: true);
+        _activeFileEditBuffer = null;
+
+        // Snap back to the top: read-only content is re-read on every activation, so there is no
+        // stored view state to return to, and the previous tab's offsets must not carry over.
+        FileEditor.CaretOffset = 0;
+        FileEditor.ScrollToHome();
         ShowFileViewerPane();
+    }
+
+    /// <summary>
+    /// Builds the edit buffer for <paramref name="tab"/>, or <see langword="null"/> when the tab must
+    /// stay read-only. Three independent reasons for null, all of them "there is nothing a save could
+    /// write to": the tab is not a single-pane file/git-change tab at all; its working-tree copy does
+    /// not exist (a Deleted GIT entry, whose content <see cref="ReadTabContentAsync"/> then pulls out
+    /// of <c>HEAD</c>); or the bytes are not safely editable as text
+    /// (<see cref="FileTextSnapshot.IsTextEditable"/> - saving decoded text back over those would
+    /// persist U+FFFD in place of the user's data).
+    /// </summary>
+    /// <remarks>
+    /// The read goes through <see cref="FileTextCodec"/>, not <see cref="File.ReadAllTextAsync(string)"/>
+    /// plus <see cref="NormalizeLineEndings"/>: the display text is LF-normalised either way, but the
+    /// codec is the only reader that also records the encoding/BOM/EOL shape a save has to reproduce.
+    /// It is synchronous, so it runs on the thread pool - a large file must not stall the UI thread
+    /// just because the old viewer's read happened to be async.
+    /// </remarks>
+    private static async Task<FileEditBuffer?> TryCreateFileEditBufferAsync(TabViewModel tab, SourceLanguage language)
+    {
+        if (!(tab.IsFileTab || tab.IsGitChangeTab) || tab.IsGitDiffTab || !File.Exists(tab.TabId))
+        {
+            return null;
+        }
+
+        var snapshot = await Task.Run(() => FileTextCodec.Read(tab.TabId)).ConfigureAwait(true);
+        if (!snapshot.IsTextEditable)
+        {
+            return null;
+        }
+
+        var document = new TextDocument(snapshot.Text);
+
+        // ClearAll before MarkAsOriginalFile: whatever the constructor's own text assignment did to
+        // the undo stack must not be undoable (Ctrl+Z on a freshly opened file would otherwise empty
+        // it), and "original file" has to mean "as loaded", measured from an empty stack.
+        document.UndoStack.ClearAll();
+        document.UndoStack.MarkAsOriginalFile();
+
+        return new FileEditBuffer(document, snapshot, language);
+    }
+
+    /// <summary>
+    /// Points <see cref="FileEditor"/> at <paramref name="buffer"/> and shows panel D's editor pane.
+    /// The document assignment is the whole tab switch: text, undo/redo history and dirty state come
+    /// back with it (see <see cref="FileEditBuffer"/>), so nothing here re-reads the file or replays
+    /// edits.
+    /// </summary>
+    private void ActivateFileEditBuffer(TabViewModel tab, FileEditBuffer buffer)
+    {
+        var undoStack = buffer.Document.UndoStack;
+
+        tab.IsEditable = true;
+        tab.IsDirty = !undoStack.IsOriginalFile;
+
+        // IsOriginalFile is AvalonEdit's own "the document is back at its loaded/saved state" flag -
+        // it flips both ways (undoing back past every edit clears the dirty state, which a naive
+        // "any TextChanged means dirty" listener would get wrong). Subscribed once per buffer, at
+        // first activation, and dropped in EvictFileEditBuffer.
+        if (buffer.DirtyListener is null)
+        {
+            buffer.DirtyListener = (_, e) =>
+            {
+                if (e.PropertyName == nameof(UndoStack.IsOriginalFile))
+                {
+                    tab.IsDirty = !undoStack.IsOriginalFile;
+                }
+            };
+            undoStack.PropertyChanged += buffer.DirtyListener;
+        }
+
+        ShowFileEditorDocument(buffer.Document, buffer.Language, isReadOnly: false);
+        _activeFileEditBuffer = buffer;
+        ShowFileViewerPane();
+
+        // Caret first (it is an offset into the document that is already in place), viewport after
+        // the pane has actually been laid out: a scroll offset applied while FileViewerHost was still
+        // Collapsed - or before the new document has been measured - is silently clamped to 0.
+        FileEditor.CaretOffset = Math.Min(buffer.CaretOffset, buffer.Document.TextLength);
+        double vertical = buffer.VerticalOffset;
+        double horizontal = buffer.HorizontalOffset;
+        Dispatcher.BeginInvoke(
+            () =>
+            {
+                if (!ReferenceEquals(_activeFileEditBuffer, buffer))
+                {
+                    // Selection moved on while this was queued - restoring now would scroll whatever
+                    // tab is showing instead.
+                    return;
+                }
+
+                FileEditor.ScrollToVerticalOffset(vertical);
+                FileEditor.ScrollToHorizontalOffset(horizontal);
+            },
+            DispatcherPriority.Loaded);
+    }
+
+    /// <summary>
+    /// The one place <see cref="FileEditor"/>'s document, read-only state and colouring are set
+    /// together - they have to move as a unit: a document swapped without re-pointing the colouriser
+    /// would render the previous tab's cached colours, and one swapped without the read-only flag
+    /// would let a Deleted GIT entry's <c>git show</c> text be typed into.
+    /// </summary>
+    /// <remarks>
+    /// The colouriser is re-pointed AFTER the document is in place because it tokenizes the whole
+    /// document on that call. Its own <c>SetDocument</c> also drops any pending debounced rebuild in
+    /// favour of an immediate one, so the first rendered frame is already coloured.
+    /// </remarks>
+    private void ShowFileEditorDocument(TextDocument document, SourceLanguage language, bool isReadOnly)
+    {
+        FileEditor.IsReadOnly = isReadOnly;
+        FileEditor.Document = document;
+        _fileSyntaxColorizer.SetDocument(document, language);
+
+        // Not colour-only, not glyph-only: the pane's own accessible name says which mode it is in
+        // (CLAUDE_DESIGN.md's accessibility rule - the same reason TabViewModel carries an
+        // EditStateSuffix).
+        System.Windows.Automation.AutomationProperties.SetName(
+            FileEditor, isReadOnly ? "File content (read-only)" : "File content (editable)");
+    }
+
+    /// <summary>
+    /// Copies the caret and scroll offsets out of the shared control into the buffer they belong to,
+    /// so returning to that tab puts the user back where they were. Called whenever panel D is about
+    /// to stop showing the current buffer - a tab switch, a flip to the terminal/diff/markdown-preview
+    /// pane - rather than on every caret move, since only the last position before leaving matters.
+    /// A no-op when the editor is showing read-only content, or when something has already re-pointed
+    /// it at another document (whose offsets are not this buffer's to record).
+    /// </summary>
+    private void CaptureFileEditorViewState()
+    {
+        if (_activeFileEditBuffer is not { } buffer || !ReferenceEquals(FileEditor.Document, buffer.Document))
+        {
+            return;
+        }
+
+        buffer.CaretOffset = FileEditor.CaretOffset;
+        buffer.VerticalOffset = FileEditor.VerticalOffset;
+        buffer.HorizontalOffset = FileEditor.HorizontalOffset;
+    }
+
+    /// <summary>
+    /// Drops a closed tab's edit buffer - wired as <see cref="TabsViewModel.ReleaseFileTab"/>. Keeping
+    /// it would pin the document (and its whole undo history) for a tab that no longer exists, and
+    /// would make re-opening the same path resurrect a stale buffer instead of reading the file as it
+    /// now is. A no-op for the tab kinds that never had one.
+    /// </summary>
+    private void EvictFileEditBuffer(TabViewModel tab)
+    {
+        if (!_fileEditBuffers.Remove(tab.TabId, out var buffer))
+        {
+            return;
+        }
+
+        buffer.Detach();
+
+        if (ReferenceEquals(_activeFileEditBuffer, buffer))
+        {
+            // The editor may still be pointed at this document until the next selection renders;
+            // forgetting it here is what stops CaptureFileEditorViewState writing into a dead buffer.
+            _activeFileEditBuffer = null;
+        }
+    }
+
+    /// <summary>
+    /// T6: writes <paramref name="tab"/>'s edit buffer back to disk - wired as
+    /// <see cref="TabsViewModel.SaveFileAsync"/>, called (through <see cref="TabsViewModel.SaveTabCommand"/>)
+    /// from Ctrl+S (<c>MainWindow.xaml</c>'s <c>Window.InputBindings</c>) and, later, the tab header's
+    /// Save button (T7). <see cref="TabsViewModel.SaveTabAsync"/> has already checked
+    /// <see cref="TabViewModel.IsEditable"/>/<see cref="TabViewModel.IsDirty"/>, so an editable buffer
+    /// for this tab is expected to exist; a missing one (should not happen) is treated as nothing to
+    /// save rather than crashing.
+    ///
+    /// <para><b>On success</b>: the buffer's <see cref="FileEditBuffer.Snapshot"/> is replaced with a
+    /// fresh <see cref="FileTextCodec.Read"/> of the file just written, so its tracked
+    /// <see cref="FileTextSnapshot.LastWriteUtc"/>/<see cref="FileTextSnapshot.Length"/> matches reality
+    /// (a later external-change check must not immediately think the save itself was an external
+    /// change), the undo stack is marked back to "original file" (flips
+    /// <see cref="TabViewModel.IsDirty"/> to false through <see cref="ActivateFileEditBuffer"/>'s
+    /// <c>DirtyListener</c>), and panel B's GIT section is refreshed through the exact same mechanism
+    /// <see cref="RemoveSession_Click"/> already uses after a disk-changing operation
+    /// (<see cref="RootsPanelViewModel.RefreshCommand"/> -&gt; <c>ITelemetryFeed.RequestRefresh</c> -&gt;
+    /// the same <c>SnapshotAvailable</c> event <see cref="GitPanelViewModel"/> already listens to) -
+    /// no second refresh mechanism is invented here.</para>
+    ///
+    /// <para><b>On failure</b> (read-only file, permission denied, the path removed underneath the
+    /// editor): a message dialog reports it and the buffer/tab are left exactly as they were - still
+    /// dirty, so the failure is never silently swallowed and the user can retry or copy their text out.</para>
+    /// </summary>
+    private async Task<bool> SaveFileTabAsync(TabViewModel tab)
+    {
+        if (!_fileEditBuffers.TryGetValue(tab.TabId, out var buffer))
+        {
+            return false;
+        }
+
+        // T9's guard, deliberately the last thing before the write: if something else (typically a
+        // Claude Code session) rewrote the file since this buffer read it, the user decides whether
+        // their text still gets to win. False means the save must not happen - either they cancelled,
+        // or they took the disk version and there is nothing left to save. Note that the text is read
+        // out of the document *after* this, since a "reload from disk" outcome replaces it.
+        if (!await ConfirmSaveOverExternalChangeAsync(tab, buffer).ConfigureAwait(true))
+        {
+            return false;
+        }
+
+        string text = buffer.Document.Text;
+
+        try
+        {
+            await FileTextCodec.WriteAsync(tab.TabId, text, buffer.Snapshot).ConfigureAwait(true);
+
+            // Re-read the just-written file rather than hand-rolling a new snapshot: this is the one
+            // way to be sure the tracked LastWriteUtc/Length match exactly what landed on disk (down to
+            // whatever FileInfo rounding/granularity the filesystem applies), not merely what this
+            // process believes it wrote.
+            buffer.Snapshot = await Task.Run(() => FileTextCodec.Read(tab.TabId)).ConfigureAwait(true);
+
+            // The conflict this buffer may have been carrying is settled - the disk now holds the
+            // version the user chose. Keeping the acknowledgement would have it compared against a
+            // state that can no longer recur.
+            buffer.AcknowledgedDiskState = null;
+        }
+        catch (Exception ex)
+        {
+            AccelMessageDialog.ShowMessage(
+                this,
+                $"Could not save this file:\n{tab.TabId}\n\n{ex.Message}",
+                "Save file",
+                AccelDialogIcon.Warning);
+            return false;
+        }
+
+        buffer.Document.UndoStack.MarkAsOriginalFile();
+
+        // Same refresh call RemoveSession_Click already uses after a disk-changing operation - this
+        // save just changed a tracked file's content, which panel B's GIT section must pick up too.
+        RootsPanel?.RefreshCommand.Execute(null);
+
+        return true;
+    }
+
+    /// <summary>
+    /// T6: reverts <paramref name="tab"/>'s edit buffer to what is currently on disk - wired as
+    /// <see cref="TabsViewModel.DiscardFileAsync"/>, called from
+    /// <see cref="TabsViewModel.DiscardTabChangesCommand"/> (the tab header's Discard button, T7).
+    /// Same "nothing to do without a buffer" posture as <see cref="SaveFileTabAsync"/>.
+    ///
+    /// <para>The re-read text replaces the document's contents inside a single AvalonEdit undo group
+    /// (<see cref="UndoStack.StartUndoGroup()"/>/<see cref="UndoStack.EndUndoGroup()"/>) rather than
+    /// clearing the undo stack - so Ctrl+Z immediately after a discard undoes the discard itself and
+    /// restores the pre-discard text, exactly like any other single edit would.</para>
+    ///
+    /// <para>A failed re-read (path deleted, permission denied) reports the error the same way
+    /// <see cref="SaveFileTabAsync"/> does and leaves the buffer/tab untouched - still dirty, so the
+    /// user is never left thinking a discard silently happened when it did not.</para>
+    /// </summary>
+    private async Task DiscardFileTabChangesAsync(TabViewModel tab)
+    {
+        if (!_fileEditBuffers.TryGetValue(tab.TabId, out var buffer))
+        {
+            return;
+        }
+
+        FileTextSnapshot snapshot;
+        try
+        {
+            snapshot = await Task.Run(() => FileTextCodec.Read(tab.TabId)).ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            AccelMessageDialog.ShowMessage(
+                this,
+                $"Could not discard changes to this file:\n{tab.TabId}\n\n{ex.Message}",
+                "Discard changes",
+                AccelDialogIcon.Warning);
+            return;
+        }
+
+        if (!snapshot.IsTextEditable)
+        {
+            AccelMessageDialog.ShowMessage(
+                this,
+                $"This file can no longer be read as text, so its changes could not be discarded:\n{tab.TabId}",
+                "Discard changes",
+                AccelDialogIcon.Warning);
+            return;
+        }
+
+        var document = buffer.Document;
+        var undoStack = document.UndoStack;
+        undoStack.StartUndoGroup();
+        try
+        {
+            document.Replace(0, document.TextLength, snapshot.Text);
+        }
+        finally
+        {
+            undoStack.EndUndoGroup();
+        }
+
+        undoStack.MarkAsOriginalFile();
+        buffer.Snapshot = snapshot;
+
+        // A discard re-reads the file, so any external change the user had chosen to overwrite is now
+        // simply the buffer's content - there is no conflict left to remember (T9).
+        buffer.AcknowledgedDiskState = null;
+
+        if (ReferenceEquals(_activeFileEditBuffer, buffer))
+        {
+            // The replace above may have shortened the text out from under the editor's current caret/
+            // scroll - clamp rather than let AvalonEdit fault on a now out-of-range offset.
+            FileEditor.CaretOffset = Math.Min(FileEditor.CaretOffset, document.TextLength);
+        }
+    }
+
+    /// <summary>
+    /// T8's per-tab close guard - wired as <see cref="TabsViewModel.ConfirmCloseDirtyTabAsync"/>.
+    /// Asks Save/Discard/Cancel for one dirty, editable tab, reusing the exact same three-way shell
+    /// (<see cref="AccelMessageDialog.ShowChoice"/>) T9's external-change conflict prompt already
+    /// established, rather than inventing a fourth button shape for what is fundamentally the same
+    /// "two real actions plus a safe do-nothing default" prompt.
+    /// </summary>
+    private Task<AccelDialogChoice> ConfirmCloseDirtyTabAsync(TabViewModel tab)
+    {
+        string name = Path.GetFileName(tab.TabId);
+        var choice = AccelMessageDialog.ShowChoice(
+            this,
+            $"{name} has unsaved changes.\n\nSave writes them to disk before closing. Discard closes the tab " +
+            "and throws the changes away. Cancel leaves the tab open.",
+            "Unsaved changes",
+            primaryText: "Save",
+            secondaryText: "Discard",
+            cancelText: "Cancel",
+            icon: AccelDialogIcon.Warning);
+
+        return Task.FromResult(choice);
+    }
+
+    /// <summary>
+    /// T8's shutdown guard: <c>Window.Closing</c> is the one place every quit path (the title bar's
+    /// close box, Alt+F4, <c>Application.Current.Shutdown()</c>, and <c>Program.cs</c>'s Ctrl+C ->
+    /// <c>window.Close()</c>) converges on - unlike <see cref="Window.Closed"/> (already used by
+    /// <c>Program.cs</c> for its own teardown), <c>Closing</c> is cancelable, which is what lets this
+    /// actually stop a quit rather than merely react to one.
+    ///
+    /// <para><b>Why a single summary dialog instead of one prompt per dirty tab.</b> A user who is
+    /// quitting with several dirty tabs open almost always wants the same answer for all of them, and a
+    /// user in a hurry to quit is exactly the user N sequential modal prompts would train to blindly
+    /// mash through - the opposite of what a "did you mean to lose this" guard is for. One dialog that
+    /// names every affected file and offers Save All / Discard All / Cancel says the same thing with one
+    /// click instead of N, and Cancel still aborts the whole quit atomically (no tab gets saved while
+    /// another is left hanging mid-decision).</para>
+    ///
+    /// <para>Deliberately synchronous-looking but is not: <see cref="CancelEventArgs.Cancel"/> is set
+    /// <see langword="true"/> immediately, before anything async runs (a synchronous <c>Closing</c>
+    /// handler cannot await and still control whether the close proceeds), and then this method
+    /// re-invokes <see cref="Window.Close"/> from a dispatcher callback if the user's answer says the
+    /// quit should actually happen - <see cref="_closeConfirmed"/> is what stops that second call from
+    /// re-entering this same guard.</para>
+    /// </summary>
+    private bool _closeConfirmed;
+
+    private async void MainWindow_Closing(object? sender, CancelEventArgs e)
+    {
+        if (_closeConfirmed)
+        {
+            // The re-entrant Close() below, already confirmed - let it proceed without asking again.
+            return;
+        }
+
+        var dirtyTabs = (Tabs?.Tabs ?? Enumerable.Empty<TabViewModel>())
+            .Where(t => t.IsEditable && t.IsDirty)
+            .ToList();
+
+        if (dirtyTabs.Count == 0)
+        {
+            return;
+        }
+
+        // Stop the quit here and now; a later Close() (once the user has actually answered) is what
+        // lets it proceed. Set before anything async runs, per this method's own remarks.
+        e.Cancel = true;
+
+        string list = string.Join('\n', dirtyTabs.Select(t => " - " + Path.GetFileName(t.TabId)));
+        var choice = AccelMessageDialog.ShowChoice(
+            this,
+            $"{dirtyTabs.Count} tab(s) have unsaved changes:\n\n{list}\n\n" +
+            "Save All writes every one of them to disk before quitting. Discard All quits and throws " +
+            "all of these changes away. Cancel keeps Accel open.",
+            "Unsaved changes",
+            primaryText: "Save All",
+            secondaryText: "Discard All",
+            cancelText: "Cancel",
+            icon: AccelDialogIcon.Warning);
+
+        if (choice == AccelDialogChoice.Cancel)
+        {
+            return;
+        }
+
+        if (choice == AccelDialogChoice.Primary)
+        {
+            // Save All: the same write path a single Ctrl+S uses, one tab at a time. A failure (reported
+            // by SaveFileTabAsync itself, same as T6's own posture) leaves that tab dirty and aborts the
+            // quit - the same never-silently-swallow rule as the per-tab close guard, applied across the
+            // whole set: quitting must not go on to discard tabs the user just failed to save.
+            foreach (var tab in dirtyTabs)
+            {
+                if (!await SaveFileTabAsync(tab).ConfigureAwait(true))
+                {
+                    return;
+                }
+            }
+        }
+
+        // Discard All (or every save above succeeded): nothing left to lose, so the quit can proceed.
+        // Re-invoking Close() re-raises Closing - _closeConfirmed is what keeps that second pass from
+        // asking the same question again.
+        _closeConfirmed = true;
+        await Dispatcher.BeginInvoke(new Action(Close)).Task.ConfigureAwait(true);
+    }
+
+    /// <summary>What prompted an external-change check. Only affects wording and what "cancel" means
+    /// to the caller: the detection and the three outcomes are identical either way.</summary>
+    private enum ExternalChangeTrigger
+    {
+        /// <summary>A cached buffer is being re-shown by <see cref="ShowFileTabAsync"/>.</summary>
+        Activation,
+
+        /// <summary>A save is about to write over the file.</summary>
+        BeforeSave,
+    }
+
+    /// <summary>How an external-change check resolved. Four cases, none of them collapsible: a caller
+    /// about to write to disk has to distinguish "nothing happened" from "the user chose to overwrite"
+    /// from "the buffer no longer holds the edits you were going to save".</summary>
+    private enum ExternalChangeOutcome
+    {
+        /// <summary>The file on disk still matches what the buffer read (or the conflict had already
+        /// been acknowledged). Nothing was shown and nothing changed.</summary>
+        Unchanged,
+
+        /// <summary>The buffer was re-read from disk and is now clean - silently when it had no
+        /// unsaved edits to lose, or because the user chose to discard them.</summary>
+        Reloaded,
+
+        /// <summary>The user chose to keep their unsaved version and overwrite what is on disk.</summary>
+        KeepMine,
+
+        /// <summary>The user dismissed the conflict prompt. The buffer is untouched and still dirty;
+        /// whatever triggered the check must not proceed.</summary>
+        Cancelled,
+    }
+
+    /// <summary>How long <see cref="ShowFileEditorNotice"/> leaves its message up.</summary>
+    private static readonly TimeSpan FileEditorNoticeDuration = TimeSpan.FromSeconds(6);
+
+    /// <summary>Hides <see cref="FileEditorNotice"/> again; created on first use so the designer
+    /// constructor does not spin up a timer nobody will stop.</summary>
+    private DispatcherTimer? _fileEditorNoticeTimer;
+
+    /// <summary>
+    /// Detects - and, when it must, asks the user how to resolve - the case this whole editor is most
+    /// exposed to: <b>the file changed on disk while a tab was holding it open</b>.
+    ///
+    /// <para><b>Why this matters more here than in a normal editor.</b> Accel exists to watch Claude
+    /// Code sessions, and those sessions rewrite exactly the files a user is most likely to have open
+    /// in panel D, while they are open. Writing a stale buffer back over an agent's edit would delete
+    /// work the user never saw and never authorised. So: a clean buffer quietly follows the file, and
+    /// a dirty one never resolves itself - the user picks, or nothing happens.</para>
+    ///
+    /// <para><b>Why polling (activation + save) rather than a <see cref="System.IO.FileSystemWatcher"/>.</b>
+    /// A watcher buys live detection, and pays for it with a per-open-file OS handle whose lifetime
+    /// has to be tied to tab open/close/rename and to the window's own teardown - the classic place
+    /// this app would leak handles - plus a debounce for the burst of events a single agent write
+    /// emits, plus deciding what a mid-typing notification is even allowed to do to the document. The
+    /// only two moments where staleness can actually cause harm are the two where a stale buffer gets
+    /// used: when it is put back on screen, and when it is written to disk. Checking exactly there is
+    /// two <c>FileInfo</c> stats, has no lifetime at all, and cannot leak. The gap it leaves - a file
+    /// rewritten while its tab sits visible and untouched shows old text until the next activation or
+    /// save - is cosmetic, never data-losing, because the save-time check runs before any write.
+    /// A watcher stays a strictly additive upgrade if live refresh is ever wanted: it would feed this
+    /// same method rather than replace it.</para>
+    /// </summary>
+    private async Task<ExternalChangeOutcome> ResolveExternalFileChangeAsync(
+        TabViewModel tab, FileEditBuffer buffer, ExternalChangeTrigger trigger)
+    {
+        var current = await Task.Run(() => ExternalFileChangeDetector.Probe(tab.TabId)).ConfigureAwait(true);
+
+        if (!ExternalFileChangeDetector.HasChangedOnDisk(buffer.Snapshot, current))
+        {
+            return ExternalChangeOutcome.Unchanged;
+        }
+
+        if (!tab.IsDirty)
+        {
+            // Nothing of the user's to lose, so following the file is strictly better than showing
+            // text that is already wrong - but it still has to be *said*, or the tab would silently
+            // disagree with what the user last typed into it from somewhere else.
+            if (!await TryReloadFileEditBufferAsync(tab, buffer).ConfigureAwait(true))
+            {
+                return ExternalChangeOutcome.Unchanged;
+            }
+
+            ShowFileEditorNotice($"Reloaded {Path.GetFileName(tab.TabId)} - it changed on disk.");
+            return ExternalChangeOutcome.Reloaded;
+        }
+
+        if (buffer.AcknowledgedDiskState == current)
+        {
+            // Already answered for this exact on-disk state - see FileEditBuffer.AcknowledgedDiskState.
+            return ExternalChangeOutcome.KeepMine;
+        }
+
+        string name = Path.GetFileName(tab.TabId);
+        string message =
+            $"{name} was changed on disk after Accel read it, and you have unsaved changes here.\n\n" +
+            "This usually means a Claude Code session (or another editor) rewrote the file. " +
+            "Whichever version you pick, the other one is lost.\n\n" +
+            (trigger == ExternalChangeTrigger.BeforeSave
+                ? "Keep my version saves your text over the file on disk. Reload from disk throws your unsaved changes away and does not save. Cancel leaves everything as it is."
+                : "Keep my version leaves your unsaved text in the tab. Reload from disk throws your unsaved changes away. Cancel leaves everything as it is.");
+
+        var choice = AccelMessageDialog.ShowChoice(
+            this,
+            message,
+            "File changed on disk",
+            primaryText: "Keep my version",
+            secondaryText: "Reload from disk",
+            cancelText: "Cancel",
+            icon: AccelDialogIcon.Warning);
+
+        switch (choice)
+        {
+            case AccelDialogChoice.Primary:
+                buffer.AcknowledgedDiskState = current;
+                return ExternalChangeOutcome.KeepMine;
+
+            case AccelDialogChoice.Secondary:
+                if (!await TryReloadFileEditBufferAsync(tab, buffer).ConfigureAwait(true))
+                {
+                    // The re-read failed after the user agreed to drop their edits; keeping those
+                    // edits is the only outcome left that does not destroy both versions - and it has
+                    // to be said, or the tab would look like the discard succeeded.
+                    AccelMessageDialog.ShowMessage(
+                        this,
+                        $"This file could not be re-read, so your unsaved changes were kept instead of being discarded:\n{tab.TabId}",
+                        "File changed on disk",
+                        AccelDialogIcon.Warning);
+                    return ExternalChangeOutcome.Cancelled;
+                }
+
+                // Not silent, unlike the clean-buffer reload: the user gave up work here, so the tab
+                // says so rather than just quietly changing content under them.
+                ShowFileEditorNotice($"Discarded your unsaved changes and reloaded {name} from disk.");
+                return ExternalChangeOutcome.Reloaded;
+
+            default:
+                return ExternalChangeOutcome.Cancelled;
+        }
+    }
+
+    /// <summary>
+    /// The guard a save has to pass: re-checks the file immediately before the write and returns
+    /// whether writing is still the right thing to do. <see langword="false"/> means the save must be
+    /// abandoned - either the user cancelled (the tab stays dirty, exactly as it was) or they chose to
+    /// take the version on disk instead (the buffer has already been re-read and is now clean, so
+    /// there is nothing left to save).
+    /// </summary>
+    /// <remarks>
+    /// Runs immediately before the write rather than at the start of the save command: everything in
+    /// between - a dialog, an await - is time for another writer to land, and the whole value of this
+    /// check is that it is the last thing to happen before the bytes go out.
+    /// </remarks>
+    private async Task<bool> ConfirmSaveOverExternalChangeAsync(TabViewModel tab, FileEditBuffer buffer)
+    {
+        var outcome = await ResolveExternalFileChangeAsync(tab, buffer, ExternalChangeTrigger.BeforeSave)
+            .ConfigureAwait(true);
+
+        return outcome is ExternalChangeOutcome.Unchanged or ExternalChangeOutcome.KeepMine;
+    }
+
+    /// <summary>
+    /// Replaces <paramref name="buffer"/>'s text with what is on disk now, resetting it to clean, and
+    /// returns whether that succeeded. Best-effort caret/scroll preservation: the offsets are clamped
+    /// to the new length rather than mapped through the change, because there is no meaningful mapping
+    /// from an offset in one version of a file to an offset in a version somebody else wrote.
+    /// </summary>
+    /// <remarks>
+    /// The undo stack is cleared rather than made undoable. A reload is not the user's edit to take
+    /// back, and the entries below it describe a document that no longer exists - replaying them onto
+    /// the new text would splice two unrelated versions together. <see cref="UndoStack.ClearAll"/>
+    /// before <see cref="UndoStack.MarkAsOriginalFile"/>, for the same reason the initial load does it
+    /// in that order: "not dirty" has to be measured from an empty stack.
+    /// </remarks>
+    private async Task<bool> TryReloadFileEditBufferAsync(TabViewModel tab, FileEditBuffer buffer)
+    {
+        FileTextSnapshot snapshot;
+        try
+        {
+            snapshot = await Task.Run(() => FileTextCodec.Read(tab.TabId)).ConfigureAwait(true);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            // Locked or unreadable right now. Leave the buffer alone and say nothing: the check will
+            // run again on the next activation or save, and a failed refresh is not a reason to
+            // disturb - let alone empty - a tab the user can still read.
+            return false;
+        }
+
+        if (!snapshot.IsTextEditable)
+        {
+            // Whatever is there now is not text. Replacing the buffer with a decode full of U+FFFD
+            // would make a save write those replacement characters back over it.
+            return false;
+        }
+
+        // Capture before the replace moves the caret; a no-op unless this buffer is the one on screen.
+        CaptureFileEditorViewState();
+
+        var document = buffer.Document;
+        document.Replace(0, document.TextLength, snapshot.Text);
+        document.UndoStack.ClearAll();
+        document.UndoStack.MarkAsOriginalFile();
+
+        buffer.Snapshot = snapshot;
+        buffer.AcknowledgedDiskState = null;
+        buffer.CaretOffset = Math.Min(buffer.CaretOffset, document.TextLength);
+        tab.IsDirty = false;
+
+        // On the activation path ActivateFileEditBuffer restores the view right after this returns;
+        // on the save path nothing else is going to, and the replace has already scrolled the editor.
+        if (ReferenceEquals(_activeFileEditBuffer, buffer) && ReferenceEquals(FileEditor.Document, document))
+        {
+            FileEditor.CaretOffset = buffer.CaretOffset;
+            FileEditor.ScrollToVerticalOffset(buffer.VerticalOffset);
+            FileEditor.ScrollToHorizontalOffset(buffer.HorizontalOffset);
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Puts a short, self-dismissing message over the top-right of the editor. The deliberately
+    /// non-modal half of the external-change story: a silent reload had nothing at risk, so it owes
+    /// the user an explanation but not an interruption - a dialog there would train them to dismiss
+    /// dialogs, which is precisely the reflex the conflict prompt cannot afford.
+    /// </summary>
+    private void ShowFileEditorNotice(string message)
+    {
+        FileEditorNoticeText.Text = message;
+        System.Windows.Automation.AutomationProperties.SetName(FileEditorNotice, message);
+        FileEditorNotice.Visibility = Visibility.Visible;
+
+        _fileEditorNoticeTimer ??= new DispatcherTimer(DispatcherPriority.Normal, Dispatcher);
+        _fileEditorNoticeTimer.Stop();
+        _fileEditorNoticeTimer.Interval = FileEditorNoticeDuration;
+        _fileEditorNoticeTimer.Tick -= HideFileEditorNotice;
+        _fileEditorNoticeTimer.Tick += HideFileEditorNotice;
+        _fileEditorNoticeTimer.Start();
+    }
+
+    private void HideFileEditorNotice(object? sender, EventArgs e)
+    {
+        _fileEditorNoticeTimer?.Stop();
+        FileEditorNotice.Visibility = Visibility.Collapsed;
     }
 
     /// <summary>
@@ -1320,10 +2142,15 @@ public partial class MainWindow : Window
     /// diff - <see cref="TabViewModel.IsMarkdown"/> is already false for one) as rendered HTML in
     /// <see cref="MarkdownPreviewHost"/>, instead of <see cref="ShowFileTabAsync"/>'s usual
     /// highlighted-text path - branched to from there when
-    /// <see cref="TabViewModel.IsPreviewMode"/> is set. Reuses <see cref="ReadTabContentAsync"/>
-    /// (same disk-read/git-show-fallback rules, same content both views would show) and reports a
-    /// failed read as rendered text in place of content, same posture as
-    /// <see cref="ShowFileTabAsync"/>'s own try/catch.
+    /// <see cref="TabViewModel.IsPreviewMode"/> is set. If an editable <see cref="FileEditBuffer"/>
+    /// already exists for this tab (the same <see cref="_fileEditBuffers"/> lookup
+    /// <see cref="ShowFileTabAsync"/> uses), renders that buffer's current (possibly unsaved) text so
+    /// preview never shows stale disk content for a dirty tab. Otherwise falls back to
+    /// <see cref="ReadTabContentAsync"/> (same disk-read/git-show-fallback rules, same content both
+    /// views would show) and reports a failed read as rendered text in place of content, same posture
+    /// as <see cref="ShowFileTabAsync"/>'s own try/catch. Neither path touches
+    /// <see cref="_fileEditBuffers"/> or <see cref="FileEditor"/>'s document - this method only
+    /// decides where the text handed to the renderer comes from.
     /// </summary>
     private async Task ShowMarkdownPreviewAsync(TabViewModel tab)
     {
@@ -1335,13 +2162,20 @@ public partial class MainWindow : Window
         ShowMarkdownPreviewPane();
 
         string content;
-        try
+        if (_fileEditBuffers.TryGetValue(tab.TabId, out var buffer))
         {
-            content = await ReadTabContentAsync(tab).ConfigureAwait(true);
+            content = buffer.Document.Text;
         }
-        catch (Exception ex)
+        else
         {
-            content = $"Could not read file:\n{tab.TabId}\n\n{ex.Message}";
+            try
+            {
+                content = await ReadTabContentAsync(tab).ConfigureAwait(true);
+            }
+            catch (Exception ex)
+            {
+                content = $"Could not read file:\n{tab.TabId}\n\n{ex.Message}";
+            }
         }
 
         string bodyHtml = Markdig.Markdown.ToHtml(content);
@@ -1422,6 +2256,10 @@ public partial class MainWindow : Window
     /// </summary>
     private void ShowTerminalPane()
     {
+        // Leaving the editor pane: remember the caret/scroll of whatever buffer it was showing (see
+        // CaptureFileEditorViewState). The three "leave" helpers each do this; ShowFileViewerPane
+        // deliberately does not - it is only ever reached after the incoming buffer is already active.
+        CaptureFileEditorViewState();
         FileViewerHost.Visibility = Visibility.Collapsed;
         DiffViewerHost.Visibility = Visibility.Collapsed;
         MarkdownPreviewHost.Visibility = Visibility.Collapsed;
@@ -1440,6 +2278,8 @@ public partial class MainWindow : Window
     /// <summary>See <see cref="ShowTerminalPane"/>'s remarks.</summary>
     private void ShowDiffViewerPane()
     {
+        // See ShowTerminalPane.
+        CaptureFileEditorViewState();
         Terminal.Visibility = Visibility.Collapsed;
         FileViewerHost.Visibility = Visibility.Collapsed;
         MarkdownPreviewHost.Visibility = Visibility.Collapsed;
@@ -1449,6 +2289,9 @@ public partial class MainWindow : Window
     /// <summary>See <see cref="ShowTerminalPane"/>'s remarks.</summary>
     private void ShowMarkdownPreviewPane()
     {
+        // See ShowTerminalPane - toggling to preview must not lose the caret/scroll the user had in
+        // the very same file's text view (nor, T10 aside, its buffer: that stays in _fileEditBuffers).
+        CaptureFileEditorViewState();
         Terminal.Visibility = Visibility.Collapsed;
         FileViewerHost.Visibility = Visibility.Collapsed;
         DiffViewerHost.Visibility = Visibility.Collapsed;
@@ -1506,33 +2349,16 @@ public partial class MainWindow : Window
     });
 
     /// <summary>Normalizes line endings to <c>'\n'</c> - shared by every reader of a file/diff tab's
-    /// content, so the line count fed to <see cref="SetLineNumbers"/> and the arrays fed to
+    /// content, so the line counts fed to <see cref="SetLineNumbers"/> and the arrays fed to
     /// <see cref="ComputeDiffMarks"/> agree exactly with what <see cref="BuildHighlightedDocument"/>
     /// renders (its own normalization below is therefore a no-op on already-normalized input).</summary>
     private static string NormalizeLineEndings(string content) => content.Replace("\r\n", "\n").Replace("\r", "\n");
 
-    /// <summary>Counts the visual lines <see cref="BuildHighlightedDocument"/>/<see cref="AppendToken"/>
-    /// will render for already-normalized <paramref name="content"/>: one <see cref="LineBreak"/> per
-    /// <c>'\n'</c>, so line count is always <c>'\n'</c> count + 1 (an empty file still renders as one
-    /// blank line).</summary>
-    private static int CountLines(string content)
-    {
-        int count = 1;
-        foreach (char c in content)
-        {
-            if (c == '\n')
-            {
-                count++;
-            }
-        }
-
-        return count;
-    }
-
     /// <summary>Fills a line-number gutter <see cref="TextBlock"/> with <c>1..lineCount</c>, one number
-    /// per line - see <see cref="FileViewerLineNumbers"/>/<see cref="DiffOldLineNumbers"/>/
-    /// <see cref="DiffNewLineNumbers"/>'s XAML remarks for how it then stays visually aligned with its
-    /// paired <see cref="RichTextBox"/> as that box scrolls.</summary>
+    /// per line - see <see cref="DiffOldLineNumbers"/>/<see cref="DiffNewLineNumbers"/>'s XAML remarks
+    /// for how it then stays visually aligned with its paired <see cref="RichTextBox"/> as that box
+    /// scrolls. Only the diff viewer still needs this; the single-pane file view's gutter is
+    /// AvalonEdit's own (<c>FileEditor.ShowLineNumbers</c>).</summary>
     private static void SetLineNumbers(TextBlock gutter, int lineCount)
     {
         gutter.Text = string.Join('\n', Enumerable.Range(1, lineCount));
@@ -1548,18 +2374,11 @@ public partial class MainWindow : Window
         gutterTransform.Y = 0;
     }
 
-    /// <summary>Kept in lock-step with <see cref="FileViewerText"/>'s scroll via a
-    /// <see cref="TranslateTransform"/> rather than a second <see cref="ScrollViewer"/>: the gutter is
+    /// <summary>Keeps the "Before" pane's gutter in lock-step with <see cref="DiffOldText"/>'s scroll via
+    /// a <see cref="TranslateTransform"/> rather than a second <see cref="ScrollViewer"/>: the gutter is
     /// plain text with no scrolling concerns of its own, so mirroring the RichTextBox's own vertical
     /// offset pixel-for-pixel keeps it aligned without a second scroll position to ever drift out of
-    /// sync.</summary>
-    private void FileViewerText_ScrollChanged(object sender, ScrollChangedEventArgs e)
-    {
-        FileViewerLineNumbersTransform.Y = -e.VerticalOffset;
-    }
-
-    /// <summary>Mirrors <see cref="FileViewerText_ScrollChanged"/>'s gutter-sync trick for the "Before"
-    /// pane, and also drives <see cref="DiffNewText"/> to the same offset (the TODO's "synchronize the
+    /// sync. Also drives <see cref="DiffNewText"/> to the same offset (the TODO's "synchronize the
     /// scroll between the two panes") - guarded by <see cref="_isSyncingDiffScroll"/> so that mirrored
     /// scroll doesn't bounce back and re-drive this side.</summary>
     private void DiffOldText_ScrollChanged(object sender, ScrollChangedEventArgs e)
@@ -1760,8 +2579,9 @@ public partial class MainWindow : Window
         // PageWidth genuinely caps where a line wraps within the document (unlike the RichTextBox's
         // own ActualWidth, which only governs the visible viewport/horizontal scrollbar) - 4000 was
         // wide enough for ordinary source lines but not for a long, never-hard-wrapped markdown
-        // paragraph, which would silently wrap inside the FlowDocument while CountLines/SetLineNumbers
-        // still counted it as one line, permanently desyncing every line number below it. A line this
+        // paragraph, which would silently wrap inside the FlowDocument while the caller's own line
+        // count (SetLineNumbers) still counted it as one line, permanently desyncing every line number
+        // below it. A line this
         // long is essentially unreachable in practice, so there is no real downside to sizing for it.
         return new FlowDocument(paragraph) { PageWidth = 1_000_000 };
     }
@@ -1807,18 +2627,10 @@ public partial class MainWindow : Window
         return lineIndex;
     }
 
-    private SolidColorBrush GetSyntaxBrush(string colorHex)
-    {
-        if (_syntaxBrushCache.TryGetValue(colorHex, out var cached))
-        {
-            return cached;
-        }
-
-        var brush = new SolidColorBrush((Color)ColorConverter.ConvertFromString(colorHex));
-        brush.Freeze();
-        _syntaxBrushCache[colorHex] = brush;
-        return brush;
-    }
+    /// <summary>The hex-to-frozen-brush cache lives in <see cref="SyntaxBrushCache"/> so this path and
+    /// <see cref="SyntaxColorizer"/> share one set of brushes for one palette - see that class's
+    /// remarks.</summary>
+    private static SolidColorBrush GetSyntaxBrush(string colorHex) => SyntaxBrushCache.Get(colorHex);
 
     /// <summary>
     /// Panel A's session-row double-click gesture: a sleeping (not <see cref="RootsPanelNodeViewModel.IsRunning"/>)

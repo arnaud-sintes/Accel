@@ -35,6 +35,15 @@
             <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,24,0,0">
                 <Button x:Name="NoButton" Content="No" Click="NoButton_Click"
                         MinWidth="88" Margin="0,0,10,0" IsCancel="True" />
+                <!--
+                    Third button, shown only by the ThreeWay shape (AccelMessageDialog.ShowChoice) -
+                    the external-change conflict prompt needs two real "do something" outcomes plus
+                    Cancel, which a Yes/No box cannot express without silently collapsing one of
+                    them into a default. Sits between the cancel button and the primary one so the
+                    row still reads least-committal -> most-committal left to right.
+                -->
+                <Button x:Name="AltButton" Content="Alt" Click="AltButton_Click"
+                        MinWidth="88" Margin="0,0,10,0" Visibility="Collapsed" />
                 <Button x:Name="YesButton" Content="Yes" Click="YesButton_Click"
                         Style="{StaticResource PrimaryButtonStyle}" MinWidth="88" />
                 <Button x:Name="OkButton" Content="OK" Click="OkButton_Click"

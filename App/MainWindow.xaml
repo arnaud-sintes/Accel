@@ -3,6 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:conv="clr-namespace:Accel.App.Converters"
         xmlns:controls="clr-namespace:Accel.App.Controls"
+        xmlns:avalonEdit="http://icsharpcode.net/sharpdevelop/avalonedit"
         Title="Accel" Height="720" Width="1200" WindowState="Maximized" WindowStyle="None"
         Icon="pack://application:,,,/App/accel.ico">
     <!--
@@ -21,6 +22,8 @@
         <conv:HexToBrushConverter x:Key="HexToBrush" />
         <conv:CountToVisibilityConverter x:Key="CountToVis" />
         <conv:StringToVisibilityConverter x:Key="StringToVis" />
+        <conv:InverseBooleanConverter x:Key="InverseBool" />
+        <conv:InverseBooleanToVisibilityConverter x:Key="InverseBoolToVis" />
         <BooleanToVisibilityConverter x:Key="BoolToVis" />
 
         <!--
@@ -41,18 +44,45 @@
         -->
         <DataTemplate x:Key="GitChangeRowTemplate">
             <!--
-                Double-click opens a read-only tab for a new/removed entry (see
-                GitPanelEntryViewModel.IsOpenable and MainWindow.GitChangeRow_MouseLeftButtonDown,
-                which no-ops for a non-openable status, e.g. Modified/Renamed). This Grid is not a
+                Double-click opens a tab for an openable entry - a single-pane view (editable when a
+                working-tree copy reads as text) for Added/Untracked/Deleted, a read-only diff for
+                Modified (see GitPanelEntryViewModel.IsOpenable and
+                MainWindow.GitChangeRow_MouseLeftButtonDown, which no-ops for a non-openable status,
+                e.g. Renamed/Conflict). This Grid is not a
                 Control, so it has no MouseDoubleClick routed event - ClickCount is checked manually
                 instead.
             -->
             <Grid Margin="8,3" ToolTip="{Binding Path}" AutomationProperties.Name="{Binding AutomationDescription}"
-                  MouseLeftButtonDown="GitChangeRow_MouseLeftButtonDown">
+                  MouseLeftButtonDown="GitChangeRow_MouseLeftButtonDown"
+                  Tag="{Binding RelativeSource={RelativeSource AncestorType=ItemsControl}, Path=DataContext}">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
+                <!--
+                    Stage/Unstage/Discard - each bound straight to a GitPanelViewModel command via
+                    PlacementTarget.Tag (this Grid's own Tag, set above to the ItemsControl's
+                    DataContext) since a ContextMenu opens its own popup, outside this Grid's visual
+                    tree - a plain RelativeSource lookup from inside the menu wouldn't find
+                    GitPanelViewModel. Same indirection the FILES tree's row context menus use via
+                    TreeViewItem.Tag.
+                -->
+                <Grid.ContextMenu>
+                    <ContextMenu>
+                        <MenuItem Header="Stage"
+                                  Command="{Binding PlacementTarget.Tag.StageFileCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                  CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                  Visibility="{Binding IsStaged, Converter={StaticResource InverseBoolToVis}}" />
+                        <MenuItem Header="Unstage"
+                                  Command="{Binding PlacementTarget.Tag.UnstageFileCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                  CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                  Visibility="{Binding IsStaged, Converter={StaticResource BoolToVis}}" />
+                        <Separator />
+                        <MenuItem Header="Discard changes…"
+                                  Command="{Binding PlacementTarget.Tag.DiscardFileCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                  CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
+                    </ContextMenu>
+                </Grid.ContextMenu>
                 <TextBlock Grid.Column="0" Text="{Binding Path}" TextTrimming="CharacterEllipsis"
                            VerticalAlignment="Center" Style="{StaticResource SecondaryTextStyle}" />
                 <TextBlock Grid.Column="1" Text="{Binding StatusLetter}" Margin="8,0,0,0"
@@ -193,6 +223,23 @@
         </Style>
         </ResourceDictionary>
     </Window.Resources>
+    <!--
+        T6: Ctrl+S saves the currently selected FILE/GIT tab's edit buffer. Routed to
+        TabsViewModel.SaveTabCommand (set as PanelC's DataContext - see MainWindow.xaml.cs) with the
+        currently selected tab as CommandParameter, rather than a Window-level DataContext binding,
+        for the same "no point-to-point panel bindings, no shared Window.DataContext" reason every
+        other panel binding in this file goes through its own scoped root. The command's own
+        IsEditable/IsDirty guard (TabsViewModel.SaveTabAsync) already makes this a no-op when a
+        Session/Shell tab is selected (its SelectedTab.IsEditable is false), so it never fights the
+        terminal's own Ctrl+S handling (WebView2/xterm.js do not bind Ctrl+S themselves, and even if a
+        future one did, this Window-level binding only fires when nothing inside the terminal's own
+        HWND-backed control has already consumed the key first).
+    -->
+    <Window.InputBindings>
+        <KeyBinding Key="S" Modifiers="Ctrl"
+                    Command="{Binding DataContext.SaveTabCommand, ElementName=PanelC}"
+                    CommandParameter="{Binding DataContext.SelectedTab, ElementName=PanelC}" />
+    </Window.InputBindings>
     <!--
         P1-T1b scaffolding only: placeholder panels, no data binding, no behavior. Layout per the
         project plan - menu bar across the top; below it a horizontal split into panel A (left,
@@ -912,10 +959,30 @@
                                                             <DataTrigger Binding="{Binding IsShellTab}" Value="True">
                                                                 <Setter Property="Foreground" Value="{StaticResource WarningTextBrush}" />
                                                             </DataTrigger>
+                                                            <!-- T7: unsaved edits read as bold, paired with the ●
+                                                                 marker beside the title - weight+glyph, never
+                                                                 colour-only. -->
+                                                            <DataTrigger Binding="{Binding IsDirty}" Value="True">
+                                                                <Setter Property="FontWeight" Value="Bold" />
+                                                                <Setter Property="ToolTip" Value="Unsaved changes" />
+                                                            </DataTrigger>
                                                         </Style.Triggers>
                                                     </Style>
                                                 </TextBlock.Style>
                                             </TextBlock>
+                                            <!--
+                                                Dirty marker (T7): a literal ● plus a bold title so the
+                                                unsaved-edits state is glyph+weight, never colour-only.
+                                                The text form of the same state already reaches
+                                                assistive tech through the ListBoxItem's
+                                                AutomationProperties.Name (TabViewModel.
+                                                AutomationDescription folds in EditStateSuffix), so the
+                                                marker itself only needs a ToolTip for sighted hover.
+                                            -->
+                                            <TextBlock Text="●" Margin="4,0,0,0" VerticalAlignment="Center"
+                                                       FontSize="{StaticResource FontSizeCaption}"
+                                                       ToolTip="Unsaved changes"
+                                                       Visibility="{Binding IsDirty, Converter={StaticResource BoolToVis}}" />
                                             <TextBlock Text="{Binding StatusSuffix}" Margin="8,0,0,0"
                                                        FontSize="{StaticResource FontSizeCaption}"
                                                        Foreground="{StaticResource TextMutedBrush}" VerticalAlignment="Center" />
@@ -951,6 +1018,32 @@
                                                 </Button.Style>
                                             </Button>
                                             <!--
+                                                Save / Discard (T7) - only visible for an editable
+                                                FILE/GIT tab (IsEditable stays false for session, shell,
+                                                read-only and diff tabs, so a terminal tab never shows
+                                                them), and only enabled while there is actually
+                                                something to save/revert (IsDirty). Same
+                                                RelativeSource=ListBox command routing as the preview
+                                                toggle above: the commands live on TabsViewModel, the
+                                                tab itself travels as the parameter.
+                                            -->
+                                            <Button Content="&#xE74E;" Margin="8,0,0,0" FontFamily="Segoe MDL2 Assets"
+                                                    Style="{StaticResource TabCloseButtonStyle}"
+                                                    ToolTip="Save file (Ctrl+S)"
+                                                    AutomationProperties.Name="Save file"
+                                                    Visibility="{Binding IsEditable, Converter={StaticResource BoolToVis}}"
+                                                    IsEnabled="{Binding IsDirty}"
+                                                    Command="{Binding DataContext.SaveTabCommand, RelativeSource={RelativeSource AncestorType=ListBox}}"
+                                                    CommandParameter="{Binding}" />
+                                            <Button Content="&#xE7A7;" Margin="8,0,0,0" FontFamily="Segoe MDL2 Assets"
+                                                    Style="{StaticResource TabCloseButtonStyle}"
+                                                    ToolTip="Discard changes (revert to file on disk)"
+                                                    AutomationProperties.Name="Discard changes"
+                                                    Visibility="{Binding IsEditable, Converter={StaticResource BoolToVis}}"
+                                                    IsEnabled="{Binding IsDirty}"
+                                                    Command="{Binding DataContext.DiscardTabChangesCommand, RelativeSource={RelativeSource AncestorType=ListBox}}"
+                                                    CommandParameter="{Binding}" />
+                                            <!--
                                                 Close goes through TabsViewModel.CloseTabCommand, which
                                                 branches on Kind: a session tab closes through
                                                 PtyRegistry.CloseAsync (nothing in the ViewModel layer
@@ -983,7 +1076,7 @@
                             <controls:TerminalView x:Name="Terminal" />
 
                             <!--
-                                Read-only file viewer (panel B's FILES tree double-click gesture - see
+                                File viewer/editor (panel B's FILES tree double-click gesture - see
                                 MainWindow.FilesTreeViewItem_MouseDoubleClick / TabsViewModel.ShowFileAsync).
                                 Declared after Terminal so it paints on top, fully covering it, while
                                 Collapsed; toggled Visible instead of swapping Terminal out, since the
@@ -991,55 +1084,67 @@
                                 and reattached on every flip between a file tab and a session tab.
                             -->
                             <Border x:Name="FileViewerHost" Background="{StaticResource BackgroundBaseBrush}" Visibility="Collapsed">
+                                <!--
+                                    AvalonEdit's TextEditor replaces the previous RichTextBox + hand-rolled
+                                    line-number gutter (a TextBlock in a Canvas, slid by a TranslateTransform
+                                    from the RichTextBox's ScrollChanged): ShowLineNumbers renders the gutter
+                                    inside the editor's own TextView, so it is measured and scrolled by the
+                                    same layout pass as the text and can no longer drift out of alignment.
+                                    IsReadOnly=True here is only the initial (no-tab-shown-yet) state:
+                                    ShowFileEditorDocument flips it per tab - editable for a working-tree
+                                    file that reads as text, read-only for a Deleted entry's git-show
+                                    fallback / a diff side / a non-text file (and flips the automation
+                                    name with it). Syntax
+                                    colours come from SyntaxColorizer, a line transformer added to this
+                                    editor's TextView in MainWindow.xaml.cs (fed by the same
+                                    SyntaxHighlighter.Tokenize the diff viewer uses - deliberately no
+                                    .xshd definition). The brushes that
+                                    are dependency properties are bound here; the ones AvalonEdit only exposes
+                                    behind the read-only TextArea/TextView properties (selection, current-line
+                                    highlight) are themed in MainWindow.xaml.cs's constructor instead, since
+                                    XAML cannot set through a read-only property.
+                                -->
                                 <Grid>
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="64" />
-                                        <ColumnDefinition Width="*" />
-                                    </Grid.ColumnDefinitions>
+                                <avalonEdit:TextEditor x:Name="FileEditor"
+                                                       IsReadOnly="True"
+                                                       ShowLineNumbers="True"
+                                                       WordWrap="False"
+                                                       VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
+                                                       FontFamily="Consolas" FontSize="{StaticResource FontSizeBody}"
+                                                       Padding="8,16,16,16" BorderThickness="0"
+                                                       Background="{StaticResource BackgroundBaseBrush}"
+                                                       Foreground="{StaticResource TextPrimaryBrush}"
+                                                       LineNumbersForeground="{StaticResource TextMutedBrush}"
+                                                       AutomationProperties.Name="File content (read-only)">
+                                    <avalonEdit:TextEditor.Options>
+                                        <avalonEdit:TextEditorOptions HighlightCurrentLine="True"
+                                                                      EnableHyperlinks="False"
+                                                                      EnableEmailHyperlinks="False"
+                                                                      ConvertTabsToSpaces="False" />
+                                    </avalonEdit:TextEditor.Options>
+                                </avalonEdit:TextEditor>
 
-                                    <!--
-                                        Line-number gutter. Kept in lock-step with FileViewerText's scroll
-                                        position via the TranslateTransform below, updated in
-                                        MainWindow.xaml.cs's FileViewerText_ScrollChanged - see that
-                                        handler's remarks for why a transform offset (not a second
-                                        ScrollViewer) is used to sync it. The TextBlock is wrapped in a
-                                        Canvas (rather than sitting directly in this Border) so it is
-                                        measured with unconstrained height: a Border/Grid cell would
-                                        otherwise arrange - and WPF would then auto-clip - the TextBlock to
-                                        the (much shorter) viewport height, baking that clip into the
-                                        TextBlock's own visual before TranslateTransform is applied, so
-                                        scrolling would only ever slide that already-truncated first
-                                        "page" of numbers around instead of revealing the rest of the
-                                        file. The column's fixed width (rather than Auto) is required by
-                                        the same fix: an Auto column would size itself from the Canvas's
-                                        own (always-zero) desired size instead of the TextBlock's.
-                                    -->
-                                    <Border Grid.Column="0" ClipToBounds="True" Background="{StaticResource SurfaceElevatedBrush}"
-                                            BorderBrush="{StaticResource StrokeSubtleBrush}" BorderThickness="0,0,1,0">
-                                        <Canvas>
-                                            <TextBlock x:Name="FileViewerLineNumbers" FontFamily="Consolas"
-                                                       FontSize="{StaticResource FontSizeBody}" Padding="8,16,8,16"
-                                                       TextAlignment="Right" Foreground="{StaticResource TextMutedBrush}"
-                                                       IsHitTestVisible="False" Width="64">
-                                                <TextBlock.RenderTransform>
-                                                    <TranslateTransform x:Name="FileViewerLineNumbersTransform" />
-                                                </TextBlock.RenderTransform>
-                                            </TextBlock>
-                                        </Canvas>
-                                    </Border>
-
-                                    <!--
-                                        RichTextBox (not a plain TextBox) so MainWindow.ShowFileTabAsync can
-                                        colour tokens per SyntaxHighlighter.Tokenize - a TextBox has no way
-                                        to colour part of its own text. Its own scrollbars are used directly
-                                        (no wrapping ScrollViewer) since RichTextBox already provides both.
-                                    -->
-                                    <RichTextBox x:Name="FileViewerText" Grid.Column="1" IsReadOnly="True" IsReadOnlyCaretVisible="True"
-                                                 VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
-                                                 FontFamily="Consolas" FontSize="{StaticResource FontSizeBody}"
-                                                 Padding="16" Background="Transparent" BorderThickness="0"
-                                                 Foreground="{StaticResource TextPrimaryBrush}"
-                                                 AutomationProperties.Name="File content (read-only)" />
+                                <!--
+                                    Transient "this file was reloaded" notice, floated over the top-right
+                                    of the editor and hidden again by a timer (see
+                                    MainWindow.ShowFileEditorNotice). Deliberately NOT a dialog: the case
+                                    it reports - a clean buffer silently re-read because a Claude Code
+                                    session rewrote the file - is the one where nothing was at risk, and
+                                    a modal there would interrupt the user for news they did not need to
+                                    act on. IsHitTestVisible=False so it cannot swallow a click meant for
+                                    the text underneath it.
+                                -->
+                                <Border x:Name="FileEditorNotice" Visibility="Collapsed"
+                                        HorizontalAlignment="Right" VerticalAlignment="Top"
+                                        Margin="0,10,20,0" Padding="10,5"
+                                        IsHitTestVisible="False"
+                                        Background="{StaticResource SurfaceElevatedBrush}"
+                                        BorderBrush="{StaticResource WindowBorderBrush}" BorderThickness="1"
+                                        CornerRadius="{StaticResource RadiusSmall}">
+                                    <TextBlock x:Name="FileEditorNoticeText" Style="{StaticResource BodyTextStyle}"
+                                               Foreground="{StaticResource TextMutedBrush}"
+                                               AutomationProperties.LiveSetting="Polite" />
+                                </Border>
                                 </Grid>
                             </Border>
 
@@ -1075,7 +1180,26 @@
                                         <TextBlock Text="After" Style="{StaticResource SecondaryTextStyle}" FontWeight="Bold" />
                                     </Border>
 
-                                    <!-- "Before" side's line-number gutter - see FileViewerLineNumbers's comment for how it stays in sync. -->
+                                    <!--
+                                        "Before" side's line-number gutter. Kept in lock-step with
+                                        DiffOldText's scroll position via the TranslateTransform below,
+                                        updated in MainWindow.xaml.cs's DiffOldText_ScrollChanged - see that
+                                        handler's remarks for why a transform offset (not a second
+                                        ScrollViewer) is used to sync it. The TextBlock is wrapped in a
+                                        Canvas (rather than sitting directly in this Border) so it is
+                                        measured with unconstrained height: a Border/Grid cell would
+                                        otherwise arrange - and WPF would then auto-clip - the TextBlock to
+                                        the (much shorter) viewport height, baking that clip into the
+                                        TextBlock's own visual before TranslateTransform is applied, so
+                                        scrolling would only ever slide that already-truncated first "page"
+                                        of numbers around instead of revealing the rest of the file. The
+                                        column's fixed width (rather than Auto) is required by the same fix:
+                                        an Auto column would size itself from the Canvas's own (always-zero)
+                                        desired size instead of the TextBlock's. (The single-pane file view
+                                        no longer needs any of this - it uses AvalonEdit's built-in
+                                        ShowLineNumbers gutter; only this diff viewer still hand-rolls one,
+                                        because its two RichTextBox panes are staying as they are.)
+                                    -->
                                     <Border Grid.Row="1" Grid.Column="0" ClipToBounds="True" Background="{StaticResource SurfaceElevatedBrush}"
                                             BorderBrush="{StaticResource StrokeSubtleBrush}" BorderThickness="0,0,1,0">
                                         <Canvas>
@@ -1208,8 +1332,9 @@
                         FilesSectionRoot's DataContext): a read-only hierarchy rooted at whichever
                         folder is currently focused (a session's cwd, or panel A's own tree
                         selection - see FilesPanelViewModel's remarks). No context menu, no
-                        IsSelected binding, no file-open action - the only interaction this tree
-                        supports is a folder's own expand/collapse. The bottom "focused folder"
+                        IsSelected binding - a folder row's own expand/collapse plus a file row's
+                        double-click (opens its tab in panel C/D, see the EventSetter below) are the
+                        only interactions this tree supports. The bottom "focused folder"
                         status caption Phase 5 originally had here was dropped once the git section
                         below took over naming the focused root for panel B as a whole.
                     -->
@@ -1220,6 +1345,29 @@
 
                         <TreeView x:Name="FilesTreeView" ItemsSource="{Binding Nodes}" BorderThickness="0" Background="Transparent"
                                   Padding="8,0,8,8" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                            <!--
+                                Right-clicking empty tree background (no TreeViewItem under the
+                                cursor - WPF resolves ContextMenu by walking up from the hit-test
+                                point) falls through to this panel-level menu: New File/New Folder
+                                created at CurrentRootPath, since nothing is selected. Right-clicking
+                                an actual row shows the per-item menu below instead.
+                            -->
+                            <TreeView.ContextMenu>
+                                <ContextMenu>
+                                    <MenuItem Header="New File…"
+                                              Command="{Binding PlacementTarget.DataContext.NewFileCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}">
+                                        <MenuItem.Icon>
+                                            <TextBlock Text="&#xE710;" FontFamily="Segoe MDL2 Assets" FontSize="14" />
+                                        </MenuItem.Icon>
+                                    </MenuItem>
+                                    <MenuItem Header="New Folder…"
+                                              Command="{Binding PlacementTarget.DataContext.NewFolderCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}">
+                                        <MenuItem.Icon>
+                                            <TextBlock Text="&#xE8B7;" FontFamily="Segoe MDL2 Assets" FontSize="14" />
+                                        </MenuItem.Icon>
+                                    </MenuItem>
+                                </ContextMenu>
+                            </TreeView.ContextMenu>
                             <TreeView.ItemContainerStyle>
                                 <Style TargetType="TreeViewItem" BasedOn="{StaticResource {x:Type TreeViewItem}}">
                                     <!-- Two-way: the user's own expand/collapse gestures are the only
@@ -1229,14 +1377,105 @@
                                     <Setter Property="AutomationProperties.Name" Value="{Binding AutomationDescription}" />
                                     <Setter Property="ToolTip" Value="{Binding Key}" />
                                     <!--
-                                        Double-clicking a file row opens (or selects) its read-only tab
-                                        in panel C/D - see MainWindow.FilesTreeViewItem_MouseDoubleClick,
+                                        Tag is stashed with the panel's own DataContext (the
+                                        FilesPanelViewModel) purely so the per-item ContextMenu below -
+                                        a separate visual tree that can't see this TreeViewItem's
+                                        ancestors - can still reach the New/Rename/Delete commands via
+                                        PlacementTarget.Tag. Same pattern as RootsTreeView's.
+                                    -->
+                                    <Setter Property="Tag" Value="{Binding RelativeSource={RelativeSource AncestorType=TreeView}, Path=DataContext}" />
+                                    <!--
+                                        Double-clicking a file row opens (or selects) its tab in panel
+                                        C/D (editable there when the file reads as text) - see
+                                        MainWindow.FilesTreeViewItem_MouseDoubleClick,
                                         which guards on IsDirectory so a folder row's double-click still
                                         only expands/collapses it (this event bubbles through every
                                         ancestor TreeViewItem, same tolerant pattern as panel A's
                                         SessionRow_MouseDoubleClick).
                                     -->
                                     <EventSetter Event="MouseDoubleClick" Handler="FilesTreeViewItem_MouseDoubleClick" />
+                                    <Setter Property="ContextMenu">
+                                        <Setter.Value>
+                                            <ContextMenu>
+                                                <!--
+                                                    New File/New Folder only make sense over a
+                                                    directory row - gated the same DataTrigger idiom
+                                                    RootsTreeView's Kind-gated items use, on IsDirectory
+                                                    instead.
+                                                -->
+                                                <MenuItem Header="New File…"
+                                                          Command="{Binding PlacementTarget.Tag.NewFileCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                          CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}">
+                                                    <MenuItem.Icon>
+                                                        <TextBlock Text="&#xE710;" FontFamily="Segoe MDL2 Assets" FontSize="14" />
+                                                    </MenuItem.Icon>
+                                                    <MenuItem.Style>
+                                                        <Style TargetType="MenuItem" BasedOn="{StaticResource {x:Type MenuItem}}">
+                                                            <Setter Property="Visibility" Value="Collapsed" />
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding PlacementTarget.DataContext.IsDirectory, RelativeSource={RelativeSource AncestorType=ContextMenu}}" Value="True">
+                                                                    <Setter Property="Visibility" Value="Visible" />
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </MenuItem.Style>
+                                                </MenuItem>
+                                                <MenuItem Header="New Folder…"
+                                                          Command="{Binding PlacementTarget.Tag.NewFolderCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                          CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}">
+                                                    <MenuItem.Icon>
+                                                        <TextBlock Text="&#xE8B7;" FontFamily="Segoe MDL2 Assets" FontSize="14" />
+                                                    </MenuItem.Icon>
+                                                    <MenuItem.Style>
+                                                        <Style TargetType="MenuItem" BasedOn="{StaticResource {x:Type MenuItem}}">
+                                                            <Setter Property="Visibility" Value="Collapsed" />
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding PlacementTarget.DataContext.IsDirectory, RelativeSource={RelativeSource AncestorType=ContextMenu}}" Value="True">
+                                                                    <Setter Property="Visibility" Value="Visible" />
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </MenuItem.Style>
+                                                </MenuItem>
+                                                <Separator>
+                                                    <Separator.Style>
+                                                        <Style TargetType="Separator" BasedOn="{StaticResource {x:Type Separator}}">
+                                                            <Setter Property="Visibility" Value="Collapsed" />
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding PlacementTarget.DataContext.IsDirectory, RelativeSource={RelativeSource AncestorType=ContextMenu}}" Value="True">
+                                                                    <Setter Property="Visibility" Value="Visible" />
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </Separator.Style>
+                                                </Separator>
+                                                <MenuItem Header="Rename / Move…"
+                                                          Command="{Binding PlacementTarget.Tag.MoveRenameCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                          CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}">
+                                                    <MenuItem.Icon>
+                                                        <TextBlock Text="&#xE70F;" FontFamily="Segoe MDL2 Assets" FontSize="14" />
+                                                    </MenuItem.Icon>
+                                                </MenuItem>
+                                                <Separator />
+                                                <MenuItem Header="Delete"
+                                                          Command="{Binding PlacementTarget.Tag.DeleteCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                          CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}">
+                                                    <MenuItem.Icon>
+                                                        <TextBlock Text="&#xE74D;" FontFamily="Segoe MDL2 Assets" FontSize="14"
+                                                                   Foreground="{StaticResource WarningTextBrush}" />
+                                                    </MenuItem.Icon>
+                                                </MenuItem>
+                                                <MenuItem Header="Delete Permanently"
+                                                          Command="{Binding PlacementTarget.Tag.DeletePermanentlyCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                          CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}">
+                                                    <MenuItem.Icon>
+                                                        <TextBlock Text="&#xE74D;" FontFamily="Segoe MDL2 Assets" FontSize="14"
+                                                                   Foreground="{StaticResource DangerBrush}" />
+                                                    </MenuItem.Icon>
+                                                </MenuItem>
+                                            </ContextMenu>
+                                        </Setter.Value>
+                                    </Setter>
                                 </Style>
                             </TreeView.ItemContainerStyle>
                             <TreeView.ItemTemplate>
@@ -1312,9 +1551,20 @@
                                            Foreground="{StaticResource TextPrimaryBrush}" FontWeight="Bold" />
                                 <TextBlock Text="&#xE7BB;" FontFamily="Segoe MDL2 Assets" FontSize="12" Margin="10,0,0,0"
                                            VerticalAlignment="Center" Foreground="{StaticResource TealBrush}" />
-                                <TextBlock Text="{Binding RemoteBranchText}" Margin="4,0,0,0"
-                                           FontSize="{StaticResource FontSizeCaption}" Foreground="{StaticResource TextPrimaryBrush}"
-                                           FontWeight="Bold" />
+                                <!--
+                                    Branch switcher: replaces what used to be a plain RemoteBranchText
+                                    label. ItemsSource is local branch names only (AvailableBranches) -
+                                    RemoteBranchText (the upstream + "no upstream" hint) still has its
+                                    own separate spot below via ToolTip, since a branch name and its
+                                    upstream are two different pieces of information a combo's single
+                                    line can't show at once. Selecting a different branch drives
+                                    GitPanelViewModel.OnSelectedBranchChanged -> SwitchBranchCommand.
+                                -->
+                                <ComboBox ItemsSource="{Binding AvailableBranches}" SelectedItem="{Binding SelectedBranch}"
+                                          ToolTip="{Binding RemoteBranchText}"
+                                          Margin="4,0,0,0" Padding="6,2" MinHeight="0" FontSize="{StaticResource FontSizeCaption}"
+                                          FontWeight="Bold" Background="Transparent" BorderThickness="0"
+                                          IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}" />
                             </StackPanel>
                             <StackPanel Orientation="Horizontal" Margin="0,4,0,0"
                                         Visibility="{Binding HasRepo, Converter={StaticResource BoolToVis}}">
@@ -1330,6 +1580,30 @@
                                            Visibility="{Binding PendingPushSummaryText, Converter={StaticResource StringToVis}}">
                                     <Run Text="{Binding PendingPushCountText, Mode=OneWay}" Foreground="{StaticResource TextPrimaryBrush}" FontWeight="Bold" /><Run Text=" commit(s) to push" />
                                 </TextBlock>
+                            </StackPanel>
+
+                            <!--
+                                Action toolbar: Stage all / Commit / Push / Pull, plus a busy
+                                indicator while any of GitPanelViewModel's mutating commands is
+                                in flight. Only shown once a repo is actually focused - matches
+                                the two summary rows above.
+                            -->
+                            <StackPanel Orientation="Horizontal" Margin="0,10,0,0"
+                                        Visibility="{Binding HasRepo, Converter={StaticResource BoolToVis}}"
+                                        IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}">
+                                <Button Content="Stage all" Command="{Binding StageAllCommand}"
+                                        Style="{StaticResource SecondaryButtonStyle}" Padding="10,4" MinHeight="0" />
+                                <Button Content="Commit…" Command="{Binding CommitCommand}"
+                                        Style="{StaticResource PrimaryButtonStyle}" Padding="10,4" MinHeight="0" Margin="8,0,0,0" />
+                                <Button Content="Push" Command="{Binding PushCommand}"
+                                        Padding="10,4" MinHeight="0" Margin="8,0,0,0" />
+                                <Button Content="Pull" Command="{Binding PullCommand}"
+                                        Padding="10,4" MinHeight="0" Margin="8,0,0,0" />
+                                <ProgressBar IsIndeterminate="True" Width="60" Height="4" Margin="10,0,0,0" VerticalAlignment="Center"
+                                             Visibility="{Binding IsBusy, Converter={StaticResource BoolToVis}}" />
+                                <TextBlock Text="{Binding BusyStatusText}" Margin="8,0,0,0" VerticalAlignment="Center"
+                                           FontSize="{StaticResource FontSizeCaption}" Foreground="{StaticResource TextMutedBrush}"
+                                           Visibility="{Binding IsBusy, Converter={StaticResource BoolToVis}}" />
                             </StackPanel>
                         </StackPanel>
 

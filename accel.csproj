@@ -23,7 +23,7 @@
       Assembly.GetName().Version, and by publish.ps1 (installer/artifact naming). No git tags exist
       yet for this repo, so this starts pre-1.0; bump it by hand per release.
     -->
-    <Version>0.1.8</Version>
+    <Version>0.1.9</Version>
     <TargetFramework>net8.0-windows</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
     <UseWPF>true</UseWPF>
@@ -81,6 +81,7 @@
     <Using Include="System.Net.Http" />
   </ItemGroup>
   <ItemGroup>
+    <PackageReference Include="AvalonEdit" Version="6.3.1.120" />
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.0" />
 
     <!--

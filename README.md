@@ -4,7 +4,7 @@
 
 ## What is Accel?
 
-Native Windows C# tool that monitors Claude Code local session activity. Running `accel` with no arguments does everything in one combined process: it auto-installs itself into Claude Code hooks (`%USERPROFILE%\.claude\settings.json`) so Claude Code events are forwarded to Accel by self-invoking `accel.exe notify` (no `curl.exe` involved), starts a local, non-HTTPS HTTP server (default port **40010**, overridable via `--port`) to receive them in-process, and opens a WPF monitor window showing the configured root folders → Claude Code sessions → running sub-agents, plus a file tree, `git status`, MCP-tool/Skill usage, a PTY terminal with tabs, and an agent graph — refreshing live as events arrive (no polling).
+Native Windows C# tool that monitors Claude Code local session activity. Running `accel` with no arguments does everything in one combined process: it auto-installs itself into Claude Code hooks (`%USERPROFILE%\.claude\settings.json`) so Claude Code events are forwarded to Accel by self-invoking `accel.exe notify` (no `curl.exe` involved), starts a local, non-HTTPS HTTP server (default port **40010**, overridable via `--port`) to receive them in-process, and opens a WPF monitor window showing the configured root folders → Claude Code sessions → running sub-agents, plus a file tree, `git status`, MCP-tool/Skill usage, a PTY terminal with tabs, an in-window file editor/diff viewer, and an agent graph — refreshing live as events arrive (no polling).
 
 ## Building
 
@@ -124,7 +124,7 @@ The monitor window is split into five panels (`A`–`E`), each bound to its own 
 
 - **Panel A — MCP / Skills usage** (`McpSkillsPanelViewModel`, left column, bottom 1/4): two flat, most-used-first lists of the focused session's MCP-tool and Skill hit counts. Accel only counts `PostToolUse` hits observed while it was running, so a historical (not-currently-open) session always shows empty lists here.
 
-- **Panel B — Files / Git** (right column, top/bottom split): a read-only file tree for whichever folder is currently focused (top, with per-file-type icons), and a flat `git status` list for that same folder grouped into "Staged Changes"/"Changes" (bottom, VS Code Source Control style). Expand/collapse only — no file-open, no stage/commit/push actions yet.
+- **Panel B — Files / Git** (right column, top/bottom split): a read-only file tree for whichever folder is currently focused (top, with per-file-type icons), and a flat `git status` list for that same folder grouped into "Staged Changes"/"Changes" (bottom, VS Code Source Control style). Double-clicking a file in the tree (or an Added/Untracked/Deleted git entry) opens it in a Panel C/D tab — editable right in the window, see Panel D below; double-clicking a Modified git entry opens a read-only side-by-side diff. No stage/commit/push actions yet.
 
   ![Panel B — Files and Git status](docs/screenshots/panel-b-files-git.png)
 
@@ -135,6 +135,15 @@ The monitor window is split into five panels (`A`–`E`), each bound to its own 
 - **Panel C — Tab Strip** (`TabsViewModel`, top of the center column) and **Panel D — Terminal** (`TerminalView`, below the tab strip): one tab per open PTY session; double-clicking a tab renames it; selecting a tab focuses it across the whole window (Panel A highlights the matching session, Panel D reattaches its terminal — a single shared WebView2/xterm.js instance — to it over a `ws://…/pty/{tabId}` connection, Panel E rebuilds around it). The screenshot below shows a freshly created `claude-haiku` session right after launch.
 
   ![Panel C/D — tab strip and terminal](docs/screenshots/panel-cd-tabs-terminal.png)
+
+- **Panel D — File editor** (shares Panel D with the terminal): a file or git-change tab opened from Panel B shows the file's content with syntax highlighting and line numbers — and, when the file exists on disk and reads as text, it is **editable**: type directly, undo/redo, then save. Saves preserve the file's original encoding, BOM, and line-ending style (LF/CRLF/mixed, trailing newline) — only your text changes, never the file's byte shape. Unsaved changes are marked with a `●` and a bold tab title, plus Save/Discard buttons in the tab header; closing a dirty tab (or quitting with dirty tabs open) prompts before anything is lost. If another writer (e.g. a running Claude Code session) changes the file on disk while you have it open, a clean tab silently reloads and a dirty one asks whether to keep your version, reload, or cancel. Deleted git entries, Modified-entry diffs, and non-text files stay read-only; markdown tabs also offer a read-only rendered-HTML preview toggle.
+
+  Keyboard shortcuts (when a file tab is selected):
+  | Shortcut | Action |
+  |---|---|
+  | `Ctrl+S` | Save the current file tab |
+  | `Ctrl+Z` | Undo |
+  | `Ctrl+Y` / `Ctrl+Shift+Z` | Redo |
 
 - **Panel E — Agent Graph** (`AgentGraphViewModel`, bottom of the center column): a left-to-right node graph of the focused session's currently running sub-agents (parent first, bezier connectors), each card showing model badge and an `EffortBarsControl` radial gauge for its effort level (five tiers: low/medium/high/xhigh/max). Visible but empty ("no session focused" / "no longer in the tree") in the screenshot above, since that session had no focus and no sub-agents running yet — a genuine sub-agent graph capture is still pending a session that spawns Task sub-agents while under the monitor.
 

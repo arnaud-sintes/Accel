@@ -28,6 +28,10 @@ public interface IDebounceTimer : IDisposable
 /// same 250 ms interval <c>MonitorForm</c>'s <c>System.Windows.Forms.Timer</c> uses. This is the
 /// only throttling mechanism in the WPF telemetry path - there is deliberately no second timer,
 /// no polling loop, and no HTTP refresh tick anywhere in <see cref="TelemetryFeed"/>.
+///
+/// <para>The interval is overridable only so an unrelated debounced path can reuse this same timer
+/// implementation at its own window (<see cref="SyntaxColorizer.RebuildDebounce"/>). The telemetry
+/// path always uses the default, which stays exactly as it is today.</para>
 /// </summary>
 public sealed class DispatcherDebounceTimer : IDebounceTimer
 {
@@ -41,11 +45,11 @@ public sealed class DispatcherDebounceTimer : IDebounceTimer
     private readonly DispatcherTimer _timer;
     private bool _disposed;
 
-    public DispatcherDebounceTimer(Dispatcher dispatcher)
+    public DispatcherDebounceTimer(Dispatcher dispatcher, TimeSpan? interval = null)
     {
         ArgumentNullException.ThrowIfNull(dispatcher);
 
-        _timer = new DispatcherTimer(DispatcherPriority.Normal, dispatcher) { Interval = Interval };
+        _timer = new DispatcherTimer(DispatcherPriority.Normal, dispatcher) { Interval = interval ?? Interval };
         _timer.Tick += OnTick;
     }
 

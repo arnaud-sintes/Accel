@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Accel.App;
 using Accel.App.Services;
 using Accel.App.ViewModels;
 using Accel.Orchestration;
@@ -771,5 +772,126 @@ public class TabsViewModelTests
 
         Assert.True(other.IsPreviewMode);
         Assert.Equal(0, renderCount);
+    }
+
+    // --- T8: the close guard for a dirty, editable tab -----------------------------------------
+
+    [Fact]
+    public async Task CloseTabAsync_OnADirtyTab_Cancel_LeavesTheTabOpenAndStillDirty()
+    {
+        var (tabs, _, _, _) = Build();
+        var tab = tabs.AddFileTab(@"C:\project\README.md");
+        tab.IsEditable = true;
+        tab.IsDirty = true;
+
+        tabs.ConfirmCloseDirtyTabAsync = _ => Task.FromResult(AccelDialogChoice.Cancel);
+        var saveCalled = false;
+        tabs.SaveFileAsync = _ =>
+        {
+            saveCalled = true;
+            return Task.FromResult(true);
+        };
+
+        await tabs.CloseTabAsync(tab);
+
+        Assert.Contains(tab, tabs.Tabs);
+        Assert.True(tab.IsDirty);
+        Assert.False(saveCalled);
+    }
+
+    [Fact]
+    public async Task CloseTabAsync_OnADirtyTab_Save_SavesThenClosesTheTab()
+    {
+        var (tabs, _, _, _) = Build();
+        var tab = tabs.AddFileTab(@"C:\project\README.md");
+        tab.IsEditable = true;
+        tab.IsDirty = true;
+
+        tabs.ConfirmCloseDirtyTabAsync = _ => Task.FromResult(AccelDialogChoice.Primary);
+        var savedTabs = new List<TabViewModel>();
+        tabs.SaveFileAsync = t =>
+        {
+            savedTabs.Add(t);
+            return Task.FromResult(true);
+        };
+
+        await tabs.CloseTabAsync(tab);
+
+        Assert.Same(tab, Assert.Single(savedTabs));
+        Assert.DoesNotContain(tab, tabs.Tabs);
+    }
+
+    [Fact]
+    public async Task CloseTabAsync_OnADirtyTab_SaveThatFails_LeavesTheTabOpenAndDoesNotClose()
+    {
+        var (tabs, _, _, _) = Build();
+        var tab = tabs.AddFileTab(@"C:\project\README.md");
+        tab.IsEditable = true;
+        tab.IsDirty = true;
+
+        tabs.ConfirmCloseDirtyTabAsync = _ => Task.FromResult(AccelDialogChoice.Primary);
+        tabs.SaveFileAsync = _ => Task.FromResult(false);
+
+        await tabs.CloseTabAsync(tab);
+
+        Assert.Contains(tab, tabs.Tabs);
+    }
+
+    [Fact]
+    public async Task CloseTabAsync_OnADirtyTab_Discard_ClosesTheTabWithoutSaving()
+    {
+        var (tabs, _, _, _) = Build();
+        var tab = tabs.AddFileTab(@"C:\project\README.md");
+        tab.IsEditable = true;
+        tab.IsDirty = true;
+
+        tabs.ConfirmCloseDirtyTabAsync = _ => Task.FromResult(AccelDialogChoice.Secondary);
+        var saveCalled = false;
+        tabs.SaveFileAsync = _ =>
+        {
+            saveCalled = true;
+            return Task.FromResult(true);
+        };
+
+        await tabs.CloseTabAsync(tab);
+
+        Assert.False(saveCalled);
+        Assert.DoesNotContain(tab, tabs.Tabs);
+    }
+
+    [Fact]
+    public async Task CloseTabAsync_OnADirtyTab_WithNoConfirmHookWired_ClosesUnprompted()
+    {
+        // Mirrors every other Tabs-optional hook in this ViewModel (ShowFileAsync, SaveFileAsync, ...):
+        // a null hook (tests, the pure-scaffolding construction path) must not block a close outright.
+        var (tabs, _, _, _) = Build();
+        var tab = tabs.AddFileTab(@"C:\project\README.md");
+        tab.IsEditable = true;
+        tab.IsDirty = true;
+
+        await tabs.CloseTabAsync(tab);
+
+        Assert.DoesNotContain(tab, tabs.Tabs);
+    }
+
+    [Fact]
+    public async Task CloseTabAsync_OnACleanEditableTab_NeverAsksTheConfirmHook()
+    {
+        var (tabs, _, _, _) = Build();
+        var tab = tabs.AddFileTab(@"C:\project\README.md");
+        tab.IsEditable = true;
+        tab.IsDirty = false;
+
+        var confirmCalled = false;
+        tabs.ConfirmCloseDirtyTabAsync = _ =>
+        {
+            confirmCalled = true;
+            return Task.FromResult(AccelDialogChoice.Cancel);
+        };
+
+        await tabs.CloseTabAsync(tab);
+
+        Assert.False(confirmCalled);
+        Assert.DoesNotContain(tab, tabs.Tabs);
     }
 }

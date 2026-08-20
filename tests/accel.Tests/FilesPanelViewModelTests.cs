@@ -7,6 +7,19 @@ using Accel.App.Services;
 using Accel.App.ViewModels;
 using Xunit;
 
+/// <summary>Fake <see cref="IFilesEntryDialogService"/>: returns fixed strings (or null, for
+/// "cancelled") instead of showing a real dialog - same role
+/// <see cref="RecordingUiThreadDispatcher"/>/<see cref="FakeTelemetryFeed"/> play elsewhere in this
+/// file.</summary>
+internal sealed class FakeFilesEntryDialogService : IFilesEntryDialogService
+{
+    public string? NewEntryName { get; set; }
+    public string? MoveDestination { get; set; }
+
+    public string? PromptForNewEntryName(NewFileSystemEntryKind kind, string parentDirectoryPath) => NewEntryName;
+    public string? PromptForMoveDestination(string currentFullPath, bool isDirectory) => MoveDestination;
+}
+
 /// <summary>
 /// Unit tests for panel B's <see cref="FilesPanelViewModel"/> - driven exactly like
 /// <see cref="AgentGraphViewModelTests"/> (<see cref="FakeTelemetryFeed"/> +
@@ -40,6 +53,25 @@ public sealed class FilesPanelViewModelTests : IDisposable
         var selection = new SessionSelectionService();
         var writer = selection.AcquireWriter();
         return (new FilesPanelViewModel(feed, dispatcher, selection, rootsPanel), feed, selection, writer);
+    }
+
+    private static (FilesPanelViewModel Vm, FakeTelemetryFeed Feed, ISessionSelectionWriter Writer, FakeFilesEntryDialogService Dialogs, FakeFilesEntryConfirmationService Confirmation) BuildWithExplorerFakes()
+    {
+        var feed = new FakeTelemetryFeed();
+        var dispatcher = new RecordingUiThreadDispatcher();
+        var selection = new SessionSelectionService();
+        var writer = selection.AcquireWriter();
+        var dialogs = new FakeFilesEntryDialogService();
+        var confirmation = new FakeFilesEntryConfirmationService();
+        var vm = new FilesPanelViewModel(feed, dispatcher, selection, null, dialogs, confirmation);
+        return (vm, feed, writer, dialogs, confirmation);
+    }
+
+    private static void FocusRoot(FilesPanelViewModel vm, FakeTelemetryFeed feed, ISessionSelectionWriter writer, string root)
+    {
+        var session = TelemetryFixtures.Session("session-1", isLive: true) with { Cwd = root };
+        writer.SetFocused("session-1");
+        feed.Publish(TelemetryFixtures.Tree(new[] { TelemetryFixtures.Root(root, session) }));
     }
 
     [Fact]
@@ -208,5 +240,81 @@ public sealed class FilesPanelViewModelTests : IDisposable
         vm.Nodes.Single().IsExpanded = true;
 
         Assert.Equal(Path.Combine(_root, "child"), raised);
+    }
+
+    [Fact]
+    public async System.Threading.Tasks.Task NewFileCommand_CreatesFileOnDisk_AndRequestsRefresh()
+    {
+        var (vm, feed, writer, dialogs, _) = BuildWithExplorerFakes();
+        FocusRoot(vm, feed, writer, _root);
+        dialogs.NewEntryName = "new.txt";
+
+        await vm.NewFileCommand.ExecuteAsync(null);
+
+        Assert.True(File.Exists(Path.Combine(_root, "new.txt")));
+        Assert.True(feed.RefreshRequestCount > 0);
+    }
+
+    [Fact]
+    public async System.Threading.Tasks.Task NewFolderCommand_OnDirectoryNode_CreatesInsideThatDirectory()
+    {
+        Directory.CreateDirectory(Path.Combine(_root, "child"));
+        var (vm, feed, writer, dialogs, _) = BuildWithExplorerFakes();
+        FocusRoot(vm, feed, writer, _root);
+        var childNode = vm.Nodes.Single(n => n.Name == "child");
+        dialogs.NewEntryName = "nested";
+
+        await vm.NewFolderCommand.ExecuteAsync(childNode);
+
+        Assert.True(Directory.Exists(Path.Combine(_root, "child", "nested")));
+    }
+
+    [Fact]
+    public async System.Threading.Tasks.Task NewFileCommand_CancelledDialog_IsANoOp()
+    {
+        var (vm, feed, writer, dialogs, _) = BuildWithExplorerFakes();
+        FocusRoot(vm, feed, writer, _root);
+        dialogs.NewEntryName = null;
+
+        await vm.NewFileCommand.ExecuteAsync(null);
+
+        Assert.Empty(Directory.GetFileSystemEntries(_root));
+        Assert.False(feed.RefreshRequestCount > 0);
+    }
+
+    [Fact]
+    public async System.Threading.Tasks.Task DeleteCommand_ConfirmedOnFile_RemovesItAndRaisesEntryRemovedOrMoved()
+    {
+        string target = Path.Combine(_root, "doomed.txt");
+        File.WriteAllText(target, "bye");
+        var (vm, feed, writer, dialogs, confirmation) = BuildWithExplorerFakes();
+        FocusRoot(vm, feed, writer, _root);
+        var node = vm.Nodes.Single(n => n.Name == "doomed.txt");
+        confirmation.ConfirmDeleteResult = true;
+
+        (string Path, bool WasDirectory)? raised = null;
+        vm.EntryRemovedOrMoved += (path, wasDirectory) => raised = (path, wasDirectory);
+
+        await vm.DeleteCommand.ExecuteAsync(node);
+
+        Assert.False(File.Exists(target));
+        Assert.Equal((target, false), raised);
+        Assert.True(feed.RefreshRequestCount > 0);
+    }
+
+    [Fact]
+    public async System.Threading.Tasks.Task DeleteCommand_DeclinedConfirmation_IsANoOp()
+    {
+        string target = Path.Combine(_root, "spared.txt");
+        File.WriteAllText(target, "hi");
+        var (vm, feed, writer, dialogs, confirmation) = BuildWithExplorerFakes();
+        FocusRoot(vm, feed, writer, _root);
+        var node = vm.Nodes.Single(n => n.Name == "spared.txt");
+        confirmation.ConfirmDeleteResult = false;
+
+        await vm.DeleteCommand.ExecuteAsync(node);
+
+        Assert.True(File.Exists(target));
+        Assert.False(feed.RefreshRequestCount > 0);
     }
 }
