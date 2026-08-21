@@ -19,7 +19,7 @@ Native Windows C# tool that monitors Claude Code local session activity. Running
 dotnet build accel.sln
 ```
 
-This builds the main `accel` project and the `accel.Tests` project (xUnit, 977 tests).
+This builds the main `accel` project and the `accel.Tests` project (xUnit, 1289 tests).
 
 ## Publishing
 
@@ -88,7 +88,7 @@ No other user-facing verbs are recognized (there is no separate `run`/`install`/
        }
      }
      ```
-     Adding/removing a root folder from the UI ("Add root folder…" / "Stop monitoring this folder…") reads and rewrites this same file (always upgrading it to v2 on save, via `RootFoldersConfig.Save`) — it is **not** a separate settings file. The `sessions` map is the storage format reserved for per-session overrides (rename, pin, hide); as of this writing no context-menu action other than root add/remove writes to it yet, so it stays empty in practice until that wiring lands. This file is unrelated to Claude Code's own `%USERPROFILE%\.claude\settings.json` (the hooks file `InstallCommand`/`SettingsMerger` manage) — the two must not be confused or merged.
+     Adding/removing a root folder from the UI ("Add root folder…" / "Stop monitoring this folder…") reads and rewrites this same file (always upgrading it to v2 on save, via `RootFoldersConfig.Save`) — it is **not** a separate settings file. The `sessions` map holds per-session overrides. Panel A's *Rename…* writes `displayName` through it today; `pinned`/`hidden`/`lastOpenedUtc` are part of the persisted shape but not yet driven by any UI action, so they stay at their defaults in practice. This file is unrelated to Claude Code's own `%USERPROFILE%\.claude\settings.json` (the hooks file `InstallCommand`/`SettingsMerger` manage) — the two must not be confused or merged.
 
    If no config file is found or it is malformed, Accel treats it as an empty config (no roots, no session overrides).
 
@@ -100,7 +100,7 @@ No other user-facing verbs are recognized (there is no separate `run`/`install`/
 
 ## UI Panels
 
-The monitor window is split into five panels (`A`–`E`), each bound to its own view model — see `CLAUDE_ARCHITECTURE.md` §2.7 for the implementation details. Screenshots below are real captures of a running window (`docs/screenshots/panel-*.png`).
+The monitor window is split into five panels (`A`–`E`), each bound to its own view model — see `CLAUDE_ARCHITECTURE.md` §2.7 for the implementation details.
 
 ```
 +------------------+---------------------------------------+------------------+
@@ -114,29 +114,22 @@ The monitor window is split into five panels (`A`–`E`), each bound to its own 
 ```
 
 - **Panel A — Roots / Sessions / Sub-agents** (`RootsPanelViewModel`, left column, top 3/4): a tree of the configured root folders (sorted alphabetically), every Claude Code session found under them (live or historical), and, for a live session, its currently running sub-agents. Right-clicking a row opens a context menu whose items are gated by the row's kind:
-  - **On a root folder:** *Create session…* (opens the "Create session" dialog with that folder pre-filled as the working directory), *Stop monitoring this folder…* (removes the root from `folder.json`/`accel-folders.json` — see [Root Folders Configuration](#how-it-works) above).
+  - **On a root folder:** *Create session…* (opens the "Create session" dialog with that folder pre-filled as the working directory), *Open terminal here…* (launches a plain `cmd.exe` PTY tab rooted at that folder — no dialog, since unlike a `claude` session there is nothing to configure), *Reveal in File Explorer*, and *Stop monitoring this folder…* (dereferences the root from `accel-folders.json` — see [Root Folders Configuration](#how-it-works) above; it never deletes the folder or its contents).
+  - **On a session:** *Rename…* (persisted as that session's `displayName` in the config's `sessions` override map, so it survives a restart), *Resume*, *Resume as fork…*, *Edit launch args…*, *Remove…* (only enabled for a session that's currently open in a tab).
 
-    ![Panel A — root folder context menu](docs/screenshots/panel-a-root-context-menu.png)
-
-  - **On a session:** *Rename…*, *Resume*, *Resume as fork…*, *Edit launch args…*, *Remove…* (only enabled for a session that's currently open in a tab; see the same section above for what does/doesn't currently persist to disk).
-
-    ![Panel A — session context menu](docs/screenshots/panel-a-roots-context-menu.png)
+  The panel also has a filter box at the top — typing narrows the tree to matching rows (auto-expanding to reveal a match under a collapsed row, and collapsing back when you clear it) — plus *Refresh* and *Collapse all*.
 
 - **Panel A — MCP / Skills usage** (`McpSkillsPanelViewModel`, left column, bottom 1/4): two flat, most-used-first lists of the focused session's MCP-tool and Skill hit counts. Accel only counts `PostToolUse` hits observed while it was running, so a historical (not-currently-open) session always shows empty lists here.
 
-- **Panel B — Files / Git** (right column, top/bottom split): a read-only file tree for whichever folder is currently focused (top, with per-file-type icons), and a flat `git status` list for that same folder grouped into "Merge Conflicts"/"Staged Changes"/"Changes" (bottom, VS Code Source Control style), with stage/unstage/discard, commit, push/pull and a branch switcher. Double-clicking a file in the tree (or an Added/Untracked/Deleted git entry) opens it in a Panel C/D tab — editable right in the window, see Panel D below; double-clicking a Modified git entry opens a side-by-side diff.
+- **Panel B — Files / Git** (right column, top/bottom split): a file tree for whichever folder is currently focused (top, with per-file-type icons and its own filter box), and a flat `git status` list for that same folder grouped into "Merge Conflicts"/"Staged Changes"/"Changes" (bottom, VS Code Source Control style), with stage/unstage/stage-all/discard, commit, push/pull and a branch switcher. Double-clicking a file in the tree (or an Added/Untracked/Deleted git entry) opens it in a Panel C/D tab — editable right in the window, see Panel D below; double-clicking a Modified git entry opens a side-by-side diff.
+
+  The tree is **not** read-only: its context menu offers *New File…* and *New Folder…* (also available on the tree's blank background, targeting the focused root), *Rename / Move…* (a path-editing dialog with a folder picker, so a rename and a move are the same operation), *Delete* (to the Windows Recycle Bin) and *Delete Permanently*. Both deletes confirm first, with distinct wording and icon for the irreversible one. Any tab holding an affected file is reconciled after the operation rather than left pointing at a stale path.
 
   **Merge conflicts** get their own group at the top of the list, plus a banner showing which operation the repo is stopped in the middle of (merge/rebase/cherry-pick/revert) with Continue and Abort buttons. Double-clicking a conflicted row opens the same side-by-side view with the incoming side on the left and the marker-bearing working-tree file, editable, on the right — conflict regions highlighted — so a conflict is resolved by editing and saving in place. Per-row context menu: Accept ours, Accept theirs, or Mark resolved (which warns if the file still contains conflict markers).
 
-  ![Panel B — Files and Git status](docs/screenshots/panel-b-files-git.png)
-
 - **"Create session…" dialog**: opened from Panel A's root context menu. Lets you set a display name, model, effort, permission mode, working directory, and (advanced/unvalidated) extra CLI arguments before spawning the PTY session. Effort is a 5-tier scale (low/medium/high/xhigh/max) gated per model family — Haiku has no reasoning-effort knob at all, so the control hides/disables itself rather than offering a setting the CLI would reject.
 
-  ![Create session dialog](docs/screenshots/panel-create-session-dialog.png)
-
-- **Panel C — Tab Strip** (`TabsViewModel`, top of the center column) and **Panel D — Terminal** (`TerminalView`, below the tab strip): one tab per open PTY session; double-clicking a tab renames it; selecting a tab focuses it across the whole window (Panel A highlights the matching session, Panel D reattaches its terminal — a single shared WebView2/xterm.js instance — to it over a `ws://…/pty/{tabId}` connection, Panel E rebuilds around it). The screenshot below shows a freshly created `claude-haiku` session right after launch.
-
-  ![Panel C/D — tab strip and terminal](docs/screenshots/panel-cd-tabs-terminal.png)
+- **Panel C — Tab Strip** (`TabsViewModel`, top of the center column) and **Panel D — Terminal** (`TerminalView`, below the tab strip): one tab per open PTY session; double-clicking a tab renames it; selecting a tab focuses it across the whole window (Panel A highlights the matching session, Panel D reattaches its terminal — a single shared WebView2/xterm.js instance — to it over a `ws://…/pty/{tabId}` connection, Panel E rebuilds around it). Tabs also host plain shell sessions (from a root's *Open terminal here…*) and file/diff viewers, not just `claude` sessions.
 
 - **Panel D — File editor** (shares Panel D with the terminal): a file or git-change tab opened from Panel B shows the file's content with syntax highlighting and line numbers — and, when the file exists on disk and reads as text, it is **editable**: type directly, undo/redo, then save. Saves preserve the file's original encoding, BOM, and line-ending style (LF/CRLF/mixed, trailing newline) — only your text changes, never the file's byte shape. Unsaved changes are marked with a `●` and a bold tab title, plus Save/Discard buttons in the tab header; closing a dirty tab (or quitting with dirty tabs open) prompts before anything is lost. If another writer (e.g. a running Claude Code session) changes the file on disk while you have it open, a clean tab silently reloads and a dirty one asks whether to keep your version, reload, or cancel. Deleted git entries, Modified-entry diffs, and non-text files stay read-only; markdown tabs also offer a read-only rendered-HTML preview toggle.
 
@@ -154,7 +147,7 @@ The monitor window is split into five panels (`A`–`E`), each bound to its own 
   | `Alt+C` / `Alt+W` | Toggle match case / whole word |
   | `Esc` | Close the find bar |
 
-- **Panel E — Agent Graph** (`AgentGraphViewModel`, bottom of the center column): a left-to-right node graph of the focused session's currently running sub-agents (parent first, bezier connectors), each card showing model badge and an `EffortBarsControl` radial gauge for its effort level (five tiers: low/medium/high/xhigh/max). Visible but empty ("no session focused" / "no longer in the tree") in the screenshot above, since that session had no focus and no sub-agents running yet — a genuine sub-agent graph capture is still pending a session that spawns Task sub-agents while under the monitor.
+- **Panel E — Agent Graph** (`AgentGraphViewModel`, bottom of the center column): a left-to-right node graph of the focused session's currently running sub-agents (parent first, bezier connectors), each card showing model badge and an `EffortBarsControl` radial gauge for its effort level (five tiers: low/medium/high/xhigh/max). It renders an explicit empty state ("no session focused" / "no longer in the tree") rather than a blank pane when there is nothing to draw.
 
 ## Example Usage
 
@@ -178,4 +171,4 @@ accel doctor
 dotnet test Accel.sln
 ```
 
-Runs 977 unit tests covering settings merge/diff, hook registration, state management, CLI parsing, session/folder tree enumeration, the file/git/MCP-Skills panels, and per-model effort gating.
+Runs 1289 unit tests covering settings merge/diff, hook registration, state management, CLI parsing, session/folder tree enumeration, the file/git/MCP-Skills panels, git actions and merge-conflict handling, filesystem create/rename/move/delete planning, document search, file-edit buffers and encoding/line-ending round-trips, and per-model effort gating.
