@@ -23,7 +23,7 @@
       Assembly.GetName().Version, and by publish.ps1 (installer/artifact naming). No git tags exist
       yet for this repo, so this starts pre-1.0; bump it by hand per release.
     -->
-    <Version>0.1.9</Version>
+    <Version>0.2.0</Version>
     <TargetFramework>net8.0-windows</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
     <UseWPF>true</UseWPF>
