@@ -143,6 +143,100 @@ public static class GitActionsService
     public static Task<GitActionResult> CheckoutBranchAsync(string repoRootPath, string branchName, CancellationToken ct = default) =>
         RunSimple(repoRootPath, new[] { "checkout", branchName }, ct);
 
+    /// <summary>
+    /// Marks a conflicted path resolved exactly as git itself defines it: `git add` collapses the
+    /// three unmerged index stages back down to one. Deliberately the same command
+    /// <see cref="StageAsync"/> runs — the distinction is entirely in the caller's UX (a separate
+    /// menu item, only offered once the user has actually edited the file), which is why panel B
+    /// hides plain "Stage" on a conflicted row: staging a file whose conflict markers are still in it
+    /// tells git the conflict is settled when it isn't.
+    /// </summary>
+    public static Task<GitActionResult> MarkResolvedAsync(string repoRootPath, string relativePath, CancellationToken ct = default) =>
+        RunSimple(repoRootPath, new[] { "add", "--", relativePath }, ct);
+
+    /// <summary>
+    /// Resolves a conflicted path wholesale in favour of one side: checks out that stage over the
+    /// working-tree file and immediately marks it resolved, so the row leaves the conflict list in
+    /// one action rather than sitting in a half-resolved state the panel would have to explain.
+    /// <paramref name="ours"/> selects stage 2 (`--ours`) versus stage 3 (`--theirs`).
+    /// </summary>
+    /// <remarks>Fails with git's own message for the pairs where the requested side has no version of
+    /// the file at all (a "deleted by us"/"deleted by them" conflict — `git checkout` reports
+    /// <c>does not have our version</c>), rather than silently doing something else: those cases are a
+    /// choice between keeping and removing the file, not between two contents, and belong to a
+    /// deliberate user action, not to this shortcut.</remarks>
+    public static async Task<GitActionResult> AcceptConflictSideAsync(
+        string repoRootPath,
+        string relativePath,
+        bool ours,
+        CancellationToken ct = default)
+    {
+        string sideFlag = ours ? "--ours" : "--theirs";
+        var checkout = await RunSimple(repoRootPath, new[] { "checkout", sideFlag, "--", relativePath }, ct).ConfigureAwait(false);
+        if (checkout.Outcome != GitActionOutcome.Success)
+        {
+            return checkout;
+        }
+
+        return await MarkResolvedAsync(repoRootPath, relativePath, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>Abandons the in-progress operation and returns the working tree to where it was
+    /// before it started (`&lt;operation&gt; --abort`). <see cref="GitInProgressOperation.None"/> is
+    /// <see cref="GitActionOutcome.NothingToDo"/> rather than an error — the panel's Abort button can
+    /// race a refresh that already saw the operation finish.</summary>
+    public static Task<GitActionResult> AbortOperationAsync(
+        string repoRootPath,
+        GitInProgressOperation operation,
+        CancellationToken ct = default)
+    {
+        string? verb = OperationVerb(operation);
+        return verb is null
+            ? Task.FromResult(GitActionResult.Failed(GitActionOutcome.NothingToDo, "No merge, rebase, cherry-pick or revert is in progress."))
+            : RunSimple(repoRootPath, new[] { verb, "--abort" }, ct);
+    }
+
+    /// <summary>
+    /// Carries the in-progress operation forward now that its conflicts are resolved.
+    /// </summary>
+    /// <remarks>
+    /// <para>A merge is completed by committing, not by a <c>--continue</c> subcommand in the sense
+    /// the other three have one: `git merge --continue` is a thin alias for `git commit` that still
+    /// insists on an editor. This runs `commit --no-edit` directly, which takes the merge message git
+    /// already prepared in <c>MERGE_MSG</c> — the same commit `--continue` would make, minus the
+    /// editor this app has no terminal to host.</para>
+    /// <para>The other three get <c>-c core.editor=true</c> for the same reason: `rebase --continue`
+    /// wants to open the commit message for editing, and a git that cannot launch an editor here
+    /// would hang until <see cref="GitCommandRunner.LocalOperationTimeout"/> killed it, leaving the
+    /// rebase stopped. <c>true</c> as the editor exits 0 immediately, accepting the message as-is.</para>
+    /// </remarks>
+    public static Task<GitActionResult> ContinueOperationAsync(
+        string repoRootPath,
+        GitInProgressOperation operation,
+        CancellationToken ct = default)
+    {
+        if (operation == GitInProgressOperation.Merge)
+        {
+            return RunSimple(repoRootPath, new[] { "commit", "--no-edit" }, ct);
+        }
+
+        string? verb = OperationVerb(operation);
+        return verb is null
+            ? Task.FromResult(GitActionResult.Failed(GitActionOutcome.NothingToDo, "No merge, rebase, cherry-pick or revert is in progress."))
+            : RunSimple(repoRootPath, new[] { "-c", "core.editor=true", verb, "--continue" }, ct);
+    }
+
+    /// <summary>The git subcommand name for an in-progress operation, or <see langword="null"/> for
+    /// <see cref="GitInProgressOperation.None"/>.</summary>
+    private static string? OperationVerb(GitInProgressOperation operation) => operation switch
+    {
+        GitInProgressOperation.Merge => "merge",
+        GitInProgressOperation.Rebase => "rebase",
+        GitInProgressOperation.CherryPick => "cherry-pick",
+        GitInProgressOperation.Revert => "revert",
+        _ => null,
+    };
+
     /// <summary>Whether the working tree has any uncommitted changes (staged, unstaged, or
     /// untracked) — reuses <see cref="GitStatusBuilder.Build"/> rather than adding a second status
     /// call, since that method already answers exactly this question.</summary>

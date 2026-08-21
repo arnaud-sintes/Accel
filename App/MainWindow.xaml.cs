@@ -234,6 +234,30 @@ public partial class MainWindow : Window
         _diffAddedLineHighlighter = new DiffLineHighlighter();
         DiffNewEditor.TextArea.TextView.LineTransformers.Add(_diffAddedLineHighlighter);
 
+        // Second, independent highlighter over the same pane for a merge-conflict view's marker
+        // regions (see ConflictMarkerScanner). A separate instance rather than reusing the one above
+        // because a conflict view is still a diff - the added-line highlight stays meaningful - and
+        // the two sets are computed from different inputs; added last of the two so a conflict region
+        // wins the overlap, being the thing the user has to act on.
+        _diffConflictHighlighter = new DiffLineHighlighter();
+        DiffNewEditor.TextArea.TextView.LineTransformers.Add(_diffConflictHighlighter);
+
+        // Ctrl+F find support for panel D's document panes. The three views are created once and kept:
+        // each wraps a control, not a document, so they survive every tab switch (see
+        // IDocumentSearchView). Deliberately constructed AFTER the syntax/diff colorizers above -
+        // SearchMatchColorizer appends itself to the same LineTransformers list, and being last is what
+        // makes a search hit paint on top of the syntax and added-line colours.
+        var matchBrush = (Brush)FindResource("SearchMatchBrush");
+        var currentMatchBrush = (Brush)FindResource("SearchCurrentMatchBrush");
+        _fileEditorSearchView = new TextEditorSearchView(FileEditor, matchBrush, currentMatchBrush);
+        _diffEditorSearchView = new TextEditorSearchView(DiffNewEditor, matchBrush, currentMatchBrush);
+        _diffTextSearchView = new RichTextBoxSearchView(DiffNewText);
+
+        // FileEditor is the single-pane viewer's one and only control, so its bar can be attached for
+        // good here. The diff bar cannot: which control holds the "After" side depends on whether that
+        // side is editable, so ShowGitDiffTabAsync attaches it per tab.
+        FileSearchBar.Attach(_fileEditorSearchView);
+
         RootsPanel = rootsPanel;
         Tabs = tabs;
         _ptyRouteRegistry = ptyRouteRegistry;
@@ -335,6 +359,13 @@ public partial class MainWindow : Window
             // the row highlight itself (IsWaiting) is panel A's own concern; this is the
             // out-of-band signal for when the user isn't even looking at Accel.
             rootsPanel.SessionWaitingForAttention += OnSessionWaitingForAttention;
+
+            // A selected tab only counts as "the user has seen this session" while Accel is the
+            // active window - see RootsPanelViewModel.IsWindowActive for why tab selection alone
+            // silently killed both the highlight and this flash. Coming back to the window is what
+            // acknowledges the row, hence the Activated re-run.
+            rootsPanel.IsWindowActive = () => IsActive;
+            Activated += (_, _) => rootsPanel.RefreshWaitingAcknowledgment();
         }
 
         Closed += (_, _) =>
@@ -1370,6 +1401,10 @@ public partial class MainWindow : Window
     /// necessarily the current disk file, which may have drifted further since staging). An unstaged
     /// modification compares the working tree against the index - "before" is the index blob and
     /// "after" is the current disk file.</para>
+    ///
+    /// <para><b>A conflicted row</b> opens the same side-by-side view with the incoming side
+    /// (<see cref="GitDiffSide.ConflictTheirs"/>) on the left and the marker-bearing working-tree file,
+    /// editable, on the right - see <see cref="ShowGitDiffTabAsync"/>'s remarks.</para>
     /// </summary>
     private void GitChangeRow_MouseLeftButtonDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
@@ -1381,6 +1416,13 @@ public partial class MainWindow : Window
         }
 
         string title = Path.GetFileName(entry.Path);
+
+        if (entry.IsConflicted)
+        {
+            Tabs?.AddGitDiffTab(
+                entry.FullPath, title, entry.RepoRootPath, entry.Path, GitDiffSide.ConflictTheirs, GitDiffSide.WorkingTree);
+            return;
+        }
 
         if (entry.IsModified)
         {
@@ -1408,6 +1450,29 @@ public partial class MainWindow : Window
     /// <summary>Paints <see cref="DiffNewEditor"/>'s added-line background - see
     /// <see cref="DiffLineHighlighter"/>. Refreshed by <see cref="ShowGitDiffTabAsync"/>.</summary>
     private readonly DiffLineHighlighter _diffAddedLineHighlighter;
+
+    /// <summary>Paints <see cref="DiffNewEditor"/>'s conflict-marker regions in a merge-conflict view -
+    /// see the constructor for why this is a second <see cref="DiffLineHighlighter"/> rather than a
+    /// reuse of <see cref="_diffAddedLineHighlighter"/>. Cleared (given an empty line set) for every
+    /// tab that isn't a conflict view.</summary>
+    private readonly DiffLineHighlighter _diffConflictHighlighter;
+
+    /// <summary>The Ctrl+F search target for the single-pane file viewer - see
+    /// <see cref="IDocumentSearchView"/>. One per control, not per document: <see cref="FileEditor"/>
+    /// is re-pointed on every tab switch, so this is attached to <see cref="FileSearchBar"/> once in
+    /// the constructor and only ever needs its query re-run (<see cref="DocumentSearchBar.Refresh"/>).</summary>
+    private readonly TextEditorSearchView _fileEditorSearchView;
+
+    /// <summary>The diff view's search target while its "After" side is editable
+    /// (<see cref="DiffNewEditor"/>).</summary>
+    private readonly TextEditorSearchView _diffEditorSearchView;
+
+    /// <summary>The diff view's search target while its "After" side is read-only
+    /// (<see cref="DiffNewText"/>). A separate implementation because that pane is a
+    /// <c>RichTextBox</c> over a <c>FlowDocument</c>, not an AvalonEdit document - see
+    /// <see cref="RichTextBoxSearchView"/>. <see cref="ShowGitDiffTabAsync"/> attaches whichever of
+    /// the two matches the pane it just made visible.</summary>
+    private readonly RichTextBoxSearchView _diffTextSearchView;
 
     /// <summary>
     /// One <see cref="FileEditBuffer"/> per open <b>editable</b> file/git-change tab, keyed by
@@ -1708,6 +1773,11 @@ public partial class MainWindow : Window
         // EditStateSuffix).
         System.Windows.Automation.AutomationProperties.SetName(
             FileEditor, isReadOnly ? "File content (read-only)" : "File content (editable)");
+
+        // An open find bar is holding offsets into the document that was just replaced - re-run its
+        // query against the new one rather than leaving it highlighting positions that now mean
+        // something else. No-op while the bar is closed.
+        FileSearchBar.Refresh();
     }
 
     /// <summary>
@@ -2260,6 +2330,11 @@ public partial class MainWindow : Window
     {
         FileEditorNoticeText.Text = message;
         System.Windows.Automation.AutomationProperties.SetName(FileEditorNotice, message);
+
+        // The notice and the find bar both float over this pane's top-right corner. Drop the notice
+        // below the bar while it is open rather than letting the (later-declared, so higher) bar hide
+        // it - the notice is the one of the two that reports something the user did not ask for.
+        FileEditorNotice.Margin = FileSearchBar.IsOpen ? new Thickness(0, 46, 20, 0) : new Thickness(0, 10, 20, 0);
         FileEditorNotice.Visibility = Visibility.Visible;
 
         _fileEditorNoticeTimer ??= new DispatcherTimer(DispatcherPriority.Normal, Dispatcher);
@@ -2337,6 +2412,16 @@ public partial class MainWindow : Window
     /// same <see cref="TabViewModel"/> to begin with, see <see cref="TabsViewModel.AddGitDiffTab"/>).
     /// A staged entry's "After" side is the index blob (<see cref="GitDiffSide.Index"/>), which has no
     /// disk file behind it, so it stays read-only in <see cref="DiffNewText"/> like before.</para>
+    ///
+    /// <para><b>A merge conflict is this same view, with different sides.</b> A conflicted row opens
+    /// with "Before" = the incoming side's blob (<see cref="GitDiffSide.ConflictTheirs"/>, index stage
+    /// 3) and "After" = the working-tree file - which for an unmerged path is git's own merged output
+    /// <i>with the conflict markers in it</i>. That is already exactly the "read-only git object on
+    /// the left, editable working tree on the right" shape above, so resolving a conflict needs no
+    /// second viewer: the user edits the markers away in <see cref="DiffNewEditor"/>, saves through
+    /// the same <see cref="FileEditBuffer"/> path as any other edit, then marks the row resolved in
+    /// panel B. The only additions are the marker highlight (<see cref="ConflictMarkerScanner"/> into
+    /// <see cref="_diffConflictHighlighter"/>) and the pane captions.</para>
     /// </summary>
     private async Task ShowGitDiffTabAsync(TabViewModel tab)
     {
@@ -2403,6 +2488,10 @@ public partial class MainWindow : Window
         string[] newLines = newContent.Split('\n');
         _diffMarks = ComputeDiffMarks(oldLines, newLines, out var removedOldLines, out var addedNewLines);
 
+        bool isConflictView = tab.GitDiffOldSide is GitDiffSide.ConflictTheirs or GitDiffSide.ConflictOurs or GitDiffSide.ConflictBase;
+        DiffOldCaption.Text = isConflictView ? DescribeConflictSide(tab.GitDiffOldSide!.Value) : "Before";
+        DiffNewCaption.Text = isConflictView ? "Working tree (conflict markers)" : "After";
+
         var removedLineBrush = (Brush)FindResource("DiffRemovedLineBrush");
         var addedLineBrush = (Brush)FindResource("DiffAddedLineBrush");
         DiffOldText.Document = BuildHighlightedDocument(oldContent, language, i => removedOldLines.Contains(i) ? removedLineBrush : null);
@@ -2414,12 +2503,24 @@ public partial class MainWindow : Window
         {
             _fileEditBuffers[tab.TabId] = buffer;
             _diffAddedLineHighlighter.SetHighlightedLines(addedNewLines, addedLineBrush);
+
+            // Scanned from the buffer's own lines, not from git: what matters is whether the markers
+            // are still there right now (see ConflictMarkerScanner's remarks). Non-conflict tabs clear
+            // the set rather than leaving the previous tab's regions painted.
+            var conflictScan = isConflictView ? ConflictMarkerScanner.Scan(newLines) : ConflictMarkerScan.Empty;
+            _diffConflictHighlighter.SetHighlightedLines(conflictScan.Lines, (Brush)FindResource("DiffConflictLineBrush"));
+
             ActivateDiffEditBuffer(tab, buffer);
             DiffNewEditor.TextArea.TextView.Redraw();
 
             DiffNewText.Visibility = Visibility.Collapsed;
             DiffNewLineNumbers.Visibility = Visibility.Collapsed;
             DiffNewEditor.Visibility = Visibility.Visible;
+
+            // Point the find bar at the control that is now actually showing the "After" side. Attach
+            // is a no-op when it is already this one (the common case of consecutive editable diff
+            // tabs), and re-runs an open bar's query otherwise.
+            DiffSearchBar.Attach(_diffEditorSearchView);
         }
         else
         {
@@ -2434,6 +2535,11 @@ public partial class MainWindow : Window
             DiffNewText.Visibility = Visibility.Visible;
             DiffNewLineNumbers.Visibility = Visibility.Visible;
             _activeDiffEditBuffer = null;
+
+            // See the editable branch above. This side always gets a brand-new FlowDocument, so even
+            // when the bar was already attached here its offsets are stale - hence the Refresh.
+            DiffSearchBar.Attach(_diffTextSearchView);
+            DiffSearchBar.Refresh();
         }
 
         _diffMarkTotalLines = newLines.Length;
@@ -2505,6 +2611,78 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
+    /// The find bar belonging to whichever of panel D's document panes is currently up, or
+    /// <see langword="null"/> when panel D is showing the terminal or the markdown preview - neither
+    /// of which has a searchable document (the preview is a WebView2 and has the browser's own Ctrl+F).
+    /// </summary>
+    private Accel.App.Controls.DocumentSearchBar? ActiveDocumentSearchBar()
+    {
+        if (FileViewerHost.Visibility == Visibility.Visible)
+        {
+            return FileSearchBar;
+        }
+
+        return DiffViewerHost.Visibility == Visibility.Visible ? DiffSearchBar : null;
+    }
+
+    /// <summary>
+    /// Window-wide Ctrl+F / F3 / Escape for panel D's find bar. Handled at the window rather than on
+    /// the panes themselves because Ctrl+F has to work straight after a tab is opened, when keyboard
+    /// focus is still on the tab strip (or anywhere else) and has never been inside the document - a
+    /// handler on the pane would only ever see the key once the user had already clicked into the text.
+    ///
+    /// <para>The one thing it will not do is steal Ctrl+F from a text box the user is typing in - panel
+    /// A's and panel B's own filter boxes - since opening the find bar also moves focus, which would
+    /// interrupt a search the user was in the middle of typing. Focus inside the bar itself is
+    /// explicitly not that case: that is the "Ctrl+F again to get back to the query box" gesture.</para>
+    /// </summary>
+    private void Window_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (ActiveDocumentSearchBar() is not { } bar)
+        {
+            return;
+        }
+
+        var modifiers = System.Windows.Input.Keyboard.Modifiers;
+        bool control = (modifiers & System.Windows.Input.ModifierKeys.Control) != 0;
+        bool shift = (modifiers & System.Windows.Input.ModifierKeys.Shift) != 0;
+
+        switch (e.Key)
+        {
+            case System.Windows.Input.Key.F when control:
+                if (System.Windows.Input.Keyboard.FocusedElement is System.Windows.Controls.Primitives.TextBoxBase focused
+                    && !bar.IsAncestorOf(focused))
+                {
+                    return;
+                }
+
+                bar.Open();
+                break;
+
+            // F3 with the bar closed opens it, so the conventional "search again" key is never a
+            // silent no-op.
+            case System.Windows.Input.Key.F3 when !bar.IsOpen:
+                bar.Open();
+                break;
+            case System.Windows.Input.Key.F3 when shift:
+                bar.FindPrevious();
+                break;
+            case System.Windows.Input.Key.F3:
+                bar.FindNext();
+                break;
+
+            case System.Windows.Input.Key.Escape when bar.IsOpen:
+                bar.Close();
+                break;
+
+            default:
+                return;
+        }
+
+        e.Handled = true;
+    }
+
+    /// <summary>
     /// A plain disk read for a <see cref="TabKind.File"/> tab, or for a <see cref="TabKind.GitChange"/>
     /// tab whose working-tree copy is still there (Added/Untracked). Falls back to
     /// <see cref="GitStatusBuilder.ReadCommittedContent"/> (off the UI thread - it shells out to
@@ -2524,6 +2702,16 @@ public partial class MainWindow : Window
 
     /// <summary>Reads one side of a <see cref="TabKind.GitChange"/> diff tab's comparison - see
     /// <see cref="GitDiffSide"/> for what each value means.</summary>
+    /// <summary>The "Before" pane caption for a merge-conflict view - names which of git's three
+    /// index stages is on the left, since "Before" says nothing useful about a conflict. Matches the
+    /// wording panel B's conflict context menu uses for the same sides.</summary>
+    private static string DescribeConflictSide(GitDiffSide side) => side switch
+    {
+        GitDiffSide.ConflictOurs => "Ours (current branch)",
+        GitDiffSide.ConflictBase => "Merge base (common ancestor)",
+        _ => "Theirs (incoming)",
+    };
+
     private static Task<string> ReadGitDiffSideAsync(TabViewModel tab, GitDiffSide side)
     {
         if (side == GitDiffSide.WorkingTree)
@@ -2533,7 +2721,18 @@ public partial class MainWindow : Window
 
         string repoRootPath = tab.GitRepoRootPath ?? throw new InvalidOperationException("A git diff tab must carry a repo root.");
         string relativePath = tab.GitRelativePath ?? throw new InvalidOperationException("A git diff tab must carry a relative path.");
-        string gitObjectSpec = side == GitDiffSide.Index ? $":{relativePath}" : $"HEAD:{relativePath}";
+
+        // The three conflict stages are the same `git show :<n>:<path>` shape as the index blob, just
+        // with a stage number - which is what lets a conflict view reuse this whole diff pipeline
+        // unchanged (see ShowGitDiffTabAsync's remarks).
+        string gitObjectSpec = side switch
+        {
+            GitDiffSide.Index => $":{relativePath}",
+            GitDiffSide.ConflictBase => $":1:{relativePath}",
+            GitDiffSide.ConflictOurs => $":2:{relativePath}",
+            GitDiffSide.ConflictTheirs => $":3:{relativePath}",
+            _ => $"HEAD:{relativePath}",
+        };
 
         return ReadGitObjectAsync(repoRootPath, gitObjectSpec);
     }

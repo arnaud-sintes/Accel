@@ -217,4 +217,97 @@ public sealed class GitActionsServiceTests : IDisposable
 
         Assert.Equal(GitActionOutcome.CommandFailed, result.Outcome);
     }
+
+    [Fact]
+    public async Task MarkResolvedAsync_ClearsTheUnmergedState()
+    {
+        GitTestRepo.CreateMergeConflict(_root);
+        File.WriteAllText(Path.Combine(_root, "conflict.txt"), "hand-merged\n");
+
+        var result = await GitActionsService.MarkResolvedAsync(_root, "conflict.txt");
+
+        Assert.Equal(GitActionOutcome.Success, result.Outcome);
+        Assert.DoesNotContain(GitStatusBuilder.Build(_root)!, e => e.IsConflicted);
+    }
+
+    [Fact]
+    public async Task AcceptConflictSideAsync_Ours_TakesTheCurrentBranchVersionAndResolves()
+    {
+        GitTestRepo.CreateMergeConflict(_root);
+
+        var result = await GitActionsService.AcceptConflictSideAsync(_root, "conflict.txt", ours: true);
+
+        Assert.Equal(GitActionOutcome.Success, result.Outcome);
+        Assert.Equal("ours\n", GitTestRepo.ReadNormalized(_root, "conflict.txt"));
+        Assert.DoesNotContain(GitStatusBuilder.Build(_root)!, e => e.IsConflicted);
+    }
+
+    [Fact]
+    public async Task AcceptConflictSideAsync_Theirs_TakesTheIncomingVersionAndResolves()
+    {
+        GitTestRepo.CreateMergeConflict(_root);
+
+        var result = await GitActionsService.AcceptConflictSideAsync(_root, "conflict.txt", ours: false);
+
+        Assert.Equal(GitActionOutcome.Success, result.Outcome);
+        Assert.Equal("theirs\n", GitTestRepo.ReadNormalized(_root, "conflict.txt"));
+        Assert.DoesNotContain(GitStatusBuilder.Build(_root)!, e => e.IsConflicted);
+    }
+
+    [Fact]
+    public async Task AbortOperationAsync_Merge_RestoresTheWorkingTree()
+    {
+        GitTestRepo.CreateMergeConflict(_root);
+
+        var result = await GitActionsService.AbortOperationAsync(_root, GitInProgressOperation.Merge);
+
+        Assert.Equal(GitActionOutcome.Success, result.Outcome);
+        Assert.Equal("ours\n", GitTestRepo.ReadNormalized(_root, "conflict.txt"));
+        Assert.Equal(GitInProgressOperation.None, GitStatusBuilder.BuildSummary(_root)!.InProgressOperation);
+    }
+
+    [Fact]
+    public async Task AbortOperationAsync_NoOperationInProgress_ReportsNothingToDo()
+    {
+        InitRepoWithCommit();
+
+        var result = await GitActionsService.AbortOperationAsync(_root, GitInProgressOperation.None);
+
+        Assert.Equal(GitActionOutcome.NothingToDo, result.Outcome);
+    }
+
+    /// <summary>Completing a merge is a commit, and it must not need an editor - see
+    /// <see cref="GitActionsService.ContinueOperationAsync"/>'s remarks. A timeout here would mean
+    /// git stopped waiting for one.</summary>
+    [Fact]
+    public async Task ContinueOperationAsync_Merge_CommitsTheMergeWithoutAnEditor()
+    {
+        GitTestRepo.CreateMergeConflict(_root);
+        File.WriteAllText(Path.Combine(_root, "conflict.txt"), "hand-merged\n");
+        await GitActionsService.MarkResolvedAsync(_root, "conflict.txt");
+
+        var result = await GitActionsService.ContinueOperationAsync(_root, GitInProgressOperation.Merge);
+
+        Assert.Equal(GitActionOutcome.Success, result.Outcome);
+        Assert.Equal(GitInProgressOperation.None, GitStatusBuilder.BuildSummary(_root)!.InProgressOperation);
+        Assert.Empty(GitStatusBuilder.Build(_root)!);
+    }
+
+    [Fact]
+    public async Task ContinueOperationAsync_Rebase_CompletesWithoutAnEditor()
+    {
+        GitTestRepo.CreateMergeConflict(_root);
+        GitTestRepo.RunGit(_root, "merge --abort");
+        GitTestRepo.RunGit(_root, "rebase incoming");
+
+        Assert.Equal(GitInProgressOperation.Rebase, GitStatusBuilder.BuildSummary(_root)!.InProgressOperation);
+
+        File.WriteAllText(Path.Combine(_root, "conflict.txt"), "hand-merged\n");
+        await GitActionsService.MarkResolvedAsync(_root, "conflict.txt");
+
+        var result = await GitActionsService.ContinueOperationAsync(_root, GitInProgressOperation.Rebase);
+
+        Assert.Equal(GitActionOutcome.Success, result.Outcome);
+        Assert.Equal(GitInProgressOperation.None, GitStatusBuilder.BuildSummary(_root)!.InProgressOperation);
+    }
 }

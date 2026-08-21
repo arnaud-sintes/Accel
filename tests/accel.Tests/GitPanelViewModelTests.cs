@@ -517,6 +517,204 @@ public sealed class GitPanelViewModelTests : IDisposable
         Assert.Equal("0 change(s)", vm.ChangesSummaryText);
     }
 
+    // -------------------------------------------------------------------------------------------
+    // Merge conflicts. An unmerged path used to be split into a "staged" row and an "unstaged" row
+    // for the same file, offered Stage/Discard (neither of which means anything on an unmerged path),
+    // and could not be opened at all.
+    // -------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void ConflictedPath_IsOneRowInItsOwnGroup()
+    {
+        GitTestRepo.CreateMergeConflict(_root);
+
+        var (vm, feed, _, writer) = Build();
+        Focus(feed, writer, _root);
+
+        var conflict = Assert.Single(vm.Conflicts);
+        Assert.Equal("conflict.txt", conflict.Path);
+        Assert.True(conflict.IsConflicted);
+        Assert.Equal("U", conflict.StatusLetter);
+        Assert.DoesNotContain(vm.StagedChanges, e => e.Path == "conflict.txt");
+        Assert.DoesNotContain(vm.Changes, e => e.Path == "conflict.txt");
+    }
+
+    [Fact]
+    public void ConflictedRow_IsOpenableButOffersResolutionActionsInsteadOfStaging()
+    {
+        GitTestRepo.CreateMergeConflict(_root);
+
+        var (vm, feed, _, writer) = Build();
+        Focus(feed, writer, _root);
+
+        var conflict = Assert.Single(vm.Conflicts);
+        Assert.True(conflict.IsOpenable);
+        Assert.False(conflict.IsModified);
+        Assert.False(conflict.CanStage);
+        Assert.False(conflict.CanUnstage);
+    }
+
+    [Fact]
+    public void ConflictedPath_CountsTowardsTheChangesSummary()
+    {
+        GitTestRepo.CreateMergeConflict(_root);
+
+        var (vm, feed, _, writer) = Build();
+        Focus(feed, writer, _root);
+
+        int expected = vm.StagedChanges.Count + vm.Changes.Count + vm.Conflicts.Count;
+        Assert.Equal($"{expected} change(s)", vm.ChangesSummaryText);
+        Assert.True(expected >= 1);
+    }
+
+    [Fact]
+    public void UntrackedFile_KeepsItsOwnBadgeRatherThanTheConflictLetter()
+    {
+        InitRepo(_root);
+        File.WriteAllText(Path.Combine(_root, "new.txt"), "content");
+
+        var (vm, feed, _, writer) = Build();
+        Focus(feed, writer, _root);
+
+        var entry = Assert.Single(vm.Changes);
+        Assert.Equal("?", entry.StatusLetter);
+        Assert.True(entry.IsUntracked);
+        Assert.False(entry.IsConflicted);
+    }
+
+    [Fact]
+    public void MergeInProgress_ShowsTheBannerAndBlocksContinueWhileConflictsRemain()
+    {
+        GitTestRepo.CreateMergeConflict(_root);
+
+        var (vm, feed, _, writer) = Build();
+        Focus(feed, writer, _root);
+
+        Assert.True(vm.HasInProgressOperation);
+        Assert.Equal("Merging — 1 conflict(s) to resolve", vm.InProgressOperationText);
+        Assert.False(vm.CanContinueOperation);
+    }
+
+    [Fact]
+    public async Task MarkResolvedCommand_NoMarkersLeft_ResolvesWithoutPrompting()
+    {
+        GitTestRepo.CreateMergeConflict(_root);
+        File.WriteAllText(Path.Combine(_root, "conflict.txt"), "hand-merged\n");
+
+        var (vm, feed, _, writer, _, confirmation) = BuildWithActionFakes();
+        Focus(feed, writer, _root);
+
+        await vm.MarkResolvedCommand.ExecuteAsync(Assert.Single(vm.Conflicts));
+
+        Assert.Null(confirmation.LastMarkerRegionCount);
+        Assert.Empty(vm.Conflicts);
+        Assert.True(vm.CanContinueOperation);
+        Assert.Equal("Merging — all conflicts resolved", vm.InProgressOperationText);
+    }
+
+    [Fact]
+    public async Task MarkResolvedCommand_MarkersStillPresentAndCancelled_LeavesTheConflict()
+    {
+        GitTestRepo.CreateMergeConflict(_root);
+
+        var (vm, feed, _, writer, _, confirmation) = BuildWithActionFakes();
+        confirmation.ConfirmMarkResolvedWithMarkersResult = false;
+        Focus(feed, writer, _root);
+
+        await vm.MarkResolvedCommand.ExecuteAsync(Assert.Single(vm.Conflicts));
+
+        Assert.Equal(1, confirmation.LastMarkerRegionCount);
+        Assert.Single(vm.Conflicts);
+    }
+
+    [Fact]
+    public async Task AcceptTheirsCommand_ResolvesTheRowWithTheIncomingContent()
+    {
+        GitTestRepo.CreateMergeConflict(_root);
+
+        var (vm, feed, _, writer) = Build();
+        Focus(feed, writer, _root);
+
+        await vm.AcceptTheirsCommand.ExecuteAsync(Assert.Single(vm.Conflicts));
+
+        Assert.Empty(vm.Conflicts);
+        Assert.Equal("theirs\n", GitTestRepo.ReadNormalized(_root, "conflict.txt"));
+    }
+
+    [Fact]
+    public async Task AcceptOursCommand_ResolvesTheRowWithTheCurrentBranchContent()
+    {
+        GitTestRepo.CreateMergeConflict(_root);
+
+        var (vm, feed, _, writer) = Build();
+        Focus(feed, writer, _root);
+
+        await vm.AcceptOursCommand.ExecuteAsync(Assert.Single(vm.Conflicts));
+
+        Assert.Empty(vm.Conflicts);
+        Assert.Equal("ours\n", GitTestRepo.ReadNormalized(_root, "conflict.txt"));
+    }
+
+    [Fact]
+    public async Task ContinueOperationCommand_WhileConflictsRemain_DoesNothing()
+    {
+        GitTestRepo.CreateMergeConflict(_root);
+
+        var (vm, feed, _, writer) = Build();
+        Focus(feed, writer, _root);
+
+        await vm.ContinueOperationCommand.ExecuteAsync(null);
+
+        Assert.True(vm.HasInProgressOperation);
+        Assert.Single(vm.Conflicts);
+    }
+
+    [Fact]
+    public async Task ContinueOperationCommand_AfterResolving_CompletesTheMerge()
+    {
+        GitTestRepo.CreateMergeConflict(_root);
+
+        var (vm, feed, _, writer) = Build();
+        Focus(feed, writer, _root);
+
+        await vm.AcceptTheirsCommand.ExecuteAsync(Assert.Single(vm.Conflicts));
+        await vm.ContinueOperationCommand.ExecuteAsync(null);
+
+        Assert.False(vm.HasInProgressOperation);
+        Assert.Equal(string.Empty, vm.InProgressOperationText);
+        Assert.Equal("0 change(s)", vm.ChangesSummaryText);
+    }
+
+    [Fact]
+    public async Task AbortOperationCommand_Confirmed_ClearsTheConflictAndTheBanner()
+    {
+        GitTestRepo.CreateMergeConflict(_root);
+
+        var (vm, feed, _, writer, _, _) = BuildWithActionFakes();
+        Focus(feed, writer, _root);
+
+        await vm.AbortOperationCommand.ExecuteAsync(null);
+
+        Assert.False(vm.HasInProgressOperation);
+        Assert.Empty(vm.Conflicts);
+        Assert.Equal("ours\n", GitTestRepo.ReadNormalized(_root, "conflict.txt"));
+    }
+
+    [Fact]
+    public async Task AbortOperationCommand_Cancelled_LeavesTheMergeInProgress()
+    {
+        GitTestRepo.CreateMergeConflict(_root);
+
+        var (vm, feed, _, writer, _, confirmation) = BuildWithActionFakes();
+        confirmation.ConfirmAbortOperationResult = false;
+        Focus(feed, writer, _root);
+
+        await vm.AbortOperationCommand.ExecuteAsync(null);
+
+        Assert.True(vm.HasInProgressOperation);
+        Assert.Single(vm.Conflicts);
+    }
+
     [Fact]
     public void Dispose_DisposesTheWatcher()
     {

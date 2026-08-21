@@ -9,13 +9,38 @@ using System.IO;
 /// working tree (unstaged) side of a line - a line with changes on both sides yields two entries,
 /// one per side, matching how VS Code's Source Control view groups the same path under both
 /// "Staged Changes" and "Changes" when it differs in both places.</summary>
-public sealed record GitChangeEntry(string Path, char StatusCode, string StatusDescription, bool IsStaged);
+/// <remarks><paramref name="IsConflicted"/> marks an <i>unmerged</i> path (a merge/rebase/cherry-pick
+/// conflict). Such a path is neither staged nor unstaged - git holds up to three competing blobs for
+/// it in the index (stages 1/2/3) instead of the usual single one - so it yields exactly ONE entry
+/// with <paramref name="IsStaged"/> false, never the two an ordinary both-sides-changed line would.
+/// See <see cref="GitStatusBuilder.UnmergedDescription"/> for the seven code pairs that qualify.</remarks>
+public sealed record GitChangeEntry(
+    string Path, char StatusCode, string StatusDescription, bool IsStaged, bool IsConflicted = false);
+
+/// <summary>The multi-step git operation a repository is currently stopped in the middle of, as
+/// implied by the marker files git leaves in its git directory. <see cref="None"/> is the ordinary
+/// case; anything else means the working tree may hold unmerged paths and that the operation has to
+/// be either completed or aborted before normal work can resume.</summary>
+public enum GitInProgressOperation
+{
+    None,
+    Merge,
+    Rebase,
+    CherryPick,
+    Revert,
+}
 
 /// <summary>Panel B's git header summary: the repo's folder name, its current branch's upstream
-/// (when one is configured), and how many local commits on that branch haven't been pushed to it
-/// yet. <see cref="RemoteBranch"/> is <c>null</c> when the branch has no upstream configured, in
+/// (when one is configured), how many local commits on that branch haven't been pushed to it
+/// yet, and whether a merge/rebase/cherry-pick/revert is currently in progress.
+/// <see cref="RemoteBranch"/> is <c>null</c> when the branch has no upstream configured, in
 /// which case <see cref="AheadCount"/> is always 0 (there's nothing to compare against).</summary>
-public sealed record GitRepoSummary(string RepoName, string? Branch, string? RemoteBranch, int AheadCount);
+public sealed record GitRepoSummary(
+    string RepoName,
+    string? Branch,
+    string? RemoteBranch,
+    int AheadCount,
+    GitInProgressOperation InProgressOperation = GitInProgressOperation.None);
 
 /// <summary>
 /// Pure, WPF-free builder for panel B's git status list - the git-status counterpart to
@@ -99,7 +124,59 @@ public static class GitStatusBuilder
             int.TryParse(aheadText, out aheadCount);
         }
 
-        return new GitRepoSummary(repoName, branch, remoteBranch, aheadCount);
+        return new GitRepoSummary(repoName, branch, remoteBranch, aheadCount, ReadInProgressOperation(repoRootPath));
+    }
+
+    /// <summary>
+    /// Which multi-step operation, if any, the repository is stopped in the middle of - read from the
+    /// marker files/directories git itself uses for exactly this purpose (the same ones the stock
+    /// bash prompt and `git status`'s own header inspect). Deliberately a file-existence check rather
+    /// than a sixth `git` subprocess per refresh: this is read on every watcher tick (see
+    /// <see cref="Accel.App.ViewModels.GitPanelViewModel"/>'s remarks on refresh cost), and
+    /// `--absolute-git-dir` is the only process call it needs, which the summary would be making
+    /// anyway.
+    ///
+    /// <para>Order matters: a `git rebase` that stops on a conflict leaves both <c>REBASE_HEAD</c>
+    /// and (for a merge-strategy rebase) a <c>MERGE_MSG</c>, and a cherry-pick/revert also writes
+    /// <c>MERGE_MSG</c> - so the more specific markers are tested before the plain merge one, or
+    /// every rebase conflict would be reported as a merge and offered `git merge --abort`, which
+    /// would fail.</para>
+    /// </summary>
+    private static GitInProgressOperation ReadInProgressOperation(string repoRootPath)
+    {
+        string? gitDir = RunGitCommand(repoRootPath, "rev-parse --absolute-git-dir");
+        if (string.IsNullOrEmpty(gitDir))
+        {
+            return GitInProgressOperation.None;
+        }
+
+        try
+        {
+            if (Directory.Exists(Path.Combine(gitDir, "rebase-merge")) || Directory.Exists(Path.Combine(gitDir, "rebase-apply")))
+            {
+                return GitInProgressOperation.Rebase;
+            }
+
+            if (File.Exists(Path.Combine(gitDir, "CHERRY_PICK_HEAD")))
+            {
+                return GitInProgressOperation.CherryPick;
+            }
+
+            if (File.Exists(Path.Combine(gitDir, "REVERT_HEAD")))
+            {
+                return GitInProgressOperation.Revert;
+            }
+
+            return File.Exists(Path.Combine(gitDir, "MERGE_HEAD"))
+                ? GitInProgressOperation.Merge
+                : GitInProgressOperation.None;
+        }
+        catch (Exception)
+        {
+            // Same "never propagate" rule as every other method here - an unreadable git directory
+            // just means "no operation detected", not a broken panel.
+            return GitInProgressOperation.None;
+        }
     }
 
     /// <summary>
@@ -252,6 +329,18 @@ public static class GitStatusBuilder
                 continue;
             }
 
+            // Unmerged paths are checked as a PAIR, before the per-side split below, because the two
+            // characters are not an index status and a worktree status for such a line - they name
+            // which side did what to the file. Splitting them positionally listed one conflict twice
+            // (once as "staged", once as "unstaged") and, for the pairs that contain no 'U' at all
+            // (AA/DD), reported it as an ordinary Added/Deleted change indistinguishable from a real
+            // one.
+            if (UnmergedDescription(indexStatus, worktreeStatus) is { } conflictDescription)
+            {
+                result.Add(new GitChangeEntry(path, 'U', conflictDescription, IsStaged: false, IsConflicted: true));
+                continue;
+            }
+
             if (indexStatus != ' ')
             {
                 result.Add(new GitChangeEntry(path, indexStatus, DescribeStatus(indexStatus), IsStaged: true));
@@ -265,6 +354,27 @@ public static class GitStatusBuilder
 
         return result.ToArray();
     }
+
+    /// <summary>
+    /// The human-readable conflict kind for an <i>unmerged</i> porcelain v1 code pair, or
+    /// <see langword="null"/> when the pair is an ordinary index/worktree status combination.
+    /// These seven pairs are the complete set git documents as unmerged (git-status(1),
+    /// "Short Format"); "us"/"them" read from the perspective the pair is recorded in - during a
+    /// rebase that is inverted relative to the branch the user started on, which is why the panel
+    /// pairs this text with the operation from <see cref="GitRepoSummary.InProgressOperation"/>
+    /// rather than claiming a branch name.
+    /// </summary>
+    internal static string? UnmergedDescription(char indexStatus, char worktreeStatus) => (indexStatus, worktreeStatus) switch
+    {
+        ('U', 'U') => "Conflict: both modified",
+        ('A', 'A') => "Conflict: both added",
+        ('D', 'D') => "Conflict: both deleted",
+        ('A', 'U') => "Conflict: added by us",
+        ('U', 'A') => "Conflict: added by them",
+        ('D', 'U') => "Conflict: deleted by us",
+        ('U', 'D') => "Conflict: deleted by them",
+        _ => null,
+    };
 
     private static string DescribeStatus(char code) => code switch
     {

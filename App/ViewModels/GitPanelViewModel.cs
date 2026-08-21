@@ -22,7 +22,12 @@ public sealed class GitPanelEntryViewModel
     public GitPanelEntryViewModel(GitChangeEntry entry, string repoRootPath)
     {
         Path = entry.Path;
-        StatusLetter = entry.StatusCode == '?' ? "U" : char.ToUpperInvariant(entry.StatusCode).ToString();
+
+        // Untracked keeps git's own '?', it is NOT folded into "U": 'U' is git's letter for an
+        // unmerged (conflicted) path, and mapping untracked onto it made the two states render as the
+        // same red "U" badge - indistinguishable in the one list where confusing "git doesn't know
+        // about this file" with "this file has a merge conflict" matters most.
+        StatusLetter = char.ToUpperInvariant(entry.StatusCode).ToString();
         StatusDescription = entry.StatusDescription;
         RepoRootPath = repoRootPath;
 
@@ -34,11 +39,13 @@ public sealed class GitPanelEntryViewModel
         // This row's own double-click gesture (MainWindow.GitChangeRow_MouseLeftButtonDown) is
         // deliberately narrower than every status this list can show: Added/Untracked/Deleted open a
         // single-pane view (MainWindow.ShowFileTabAsync - editable when a working-tree copy reads as
-        // text, read-only for Deleted's git-show fallback), Modified opens a side-by-side diff
-        // (MainWindow.ShowGitDiffTabAsync) - Renamed/Copied/Conflict have no well-defined "before" or
-        // "after" this Phase's viewer can show cleanly yet.
-        IsOpenable = entry.StatusCode is 'A' or '?' or 'D' or 'M';
-        IsModified = entry.StatusCode == 'M';
+        // text, read-only for Deleted's git-show fallback), Modified and Conflict open a side-by-side
+        // diff (MainWindow.ShowGitDiffTabAsync) - Renamed/Copied still have no well-defined "before"
+        // or "after" this viewer can show cleanly.
+        IsConflicted = entry.IsConflicted;
+        IsOpenable = IsConflicted || entry.StatusCode is 'A' or '?' or 'D' or 'M';
+        IsModified = entry.StatusCode == 'M' && !IsConflicted;
+        IsUntracked = entry.StatusCode == '?';
         IsStaged = entry.IsStaged;
     }
 
@@ -74,8 +81,32 @@ public sealed class GitPanelEntryViewModel
 
     /// <summary>Staged (index vs. HEAD) or unstaged (working tree vs. index) - which side of a
     /// Modified row's comparison is the working-tree file vs. a git revision. See
-    /// <c>MainWindow.GitChangeRow_MouseLeftButtonDown</c> for how this picks the diff's two sides.</summary>
+    /// <c>MainWindow.GitChangeRow_MouseLeftButtonDown</c> for how this picks the diff's two sides.
+    /// Always false for a conflicted row: an unmerged path is neither staged nor unstaged (see
+    /// <see cref="GitChangeEntry"/>).</summary>
     public bool IsStaged { get; }
+
+    /// <summary>Whether this is an unmerged (conflicted) path - lives in
+    /// <see cref="GitPanelViewModel.Conflicts"/> rather than either of the other two lists, opens the
+    /// conflict view on double-click, and gets the resolution context menu instead of
+    /// Stage/Unstage/Discard (staging a file whose markers are still in it would tell git the
+    /// conflict is settled when it is not).</summary>
+    public bool IsConflicted { get; }
+
+    /// <summary>Whether git has never tracked this path ('?') - the discard action removes such a
+    /// file rather than restoring it (<see cref="GitActionsService.DiscardAsync"/>). A real property
+    /// rather than a <see cref="StatusLetter"/> comparison, which is what it used to be back when
+    /// untracked was rendered as "U".</summary>
+    public bool IsUntracked { get; }
+
+    /// <summary>Whether the row's context menu offers "Stage"/"Unstage" - the plain staging pair is
+    /// hidden entirely on a conflicted row in favour of the resolution actions (see
+    /// <see cref="IsConflicted"/>). Computed here rather than composed in XAML, which has no
+    /// multi-condition visibility converter in this codebase.</summary>
+    public bool CanStage => !IsConflicted && !IsStaged;
+
+    /// <summary>See <see cref="CanStage"/>.</summary>
+    public bool CanUnstage => !IsConflicted && IsStaged;
 
     public string AutomationDescription => $"{StatusDescription}: {Path}.";
 }
@@ -87,8 +118,9 @@ public sealed class GitPanelEntryViewModel
 /// the file tree and the git list above/below each other always agree on which folder they
 /// describe.
 ///
-/// <para>Entries are split into <see cref="StagedChanges"/> and <see cref="Changes"/> (unstaged +
-/// untracked), matching VS Code's Source Control view grouping. Every mutating command below shells
+/// <para>Entries are split into <see cref="Conflicts"/>, <see cref="StagedChanges"/> and
+/// <see cref="Changes"/> (unstaged + untracked), matching VS Code's Source Control view grouping.
+/// Every mutating command below shells
 /// out via <see cref="GitActionsService"/> and, on success, re-runs <see cref="RefreshDisplay"/>
 /// rather than mutating <see cref="StagedChanges"/>/<see cref="Changes"/> directly - the list is
 /// always a whole fresh `git status`, never a locally patched-up guess at what git did.</para>
@@ -122,6 +154,14 @@ public sealed class GitPanelEntryViewModel
 /// watching the subfolder would miss <c>.git</c>, i.e. exactly the commits, pushes and branch
 /// switches this panel most needs to notice.</para>
 ///
+/// <para><b>Conflicts are a third state, not a third list of changes.</b> An unmerged path is
+/// neither staged nor unstaged (see <see cref="GitChangeEntry"/>), cannot be discarded, and must not
+/// be plain-staged - so it gets its own group, its own context menu (accept-ours/accept-theirs/
+/// mark-resolved) and, through <see cref="HasInProgressOperation"/>, a header banner offering the
+/// only two things that end the operation it belongs to. The <i>editing</i> half of resolving one is
+/// not here at all: it reuses panel D's existing side-by-side viewer verbatim, see
+/// <c>MainWindow.ShowGitDiffTabAsync</c>.</para>
+///
 /// <para><b>Follows the file tree's expanded folder, when it is itself a repo.</b> The default
 /// context is the resolved root above (e.g. "C:/projects", which typically isn't a repo itself),
 /// but <see cref="OnFilesPanelFolderExpanded"/> - wired to <see cref="FilesPanelViewModel.FolderExpanded"/>
@@ -147,6 +187,11 @@ public sealed partial class GitPanelViewModel : ObservableObject, IDisposable
     private string? _resolvedRootPath;
     private string? _expandedFolderPath;
     private string? _effectiveRepoPath;
+
+    /// <summary>Which operation the Abort/Continue buttons act on - captured from the last summary so
+    /// the commands don't have to re-read git (and can't disagree with the banner the user clicked).</summary>
+    private GitInProgressOperation _inProgressOperation = GitInProgressOperation.None;
+
     private bool _suppressBranchSelectionEcho;
     private bool _rootResolvedOnce;
     private bool _refreshInFlight;
@@ -197,6 +242,13 @@ public sealed partial class GitPanelViewModel : ObservableObject, IDisposable
     /// <summary>Sorted by path - see <see cref="StagedChanges"/>.</summary>
     public ObservableCollection<GitPanelEntryViewModel> Changes { get; } = new();
 
+    /// <summary>Unmerged paths, shown as their own group above the other two (VS Code's "Merge
+    /// Changes"). Separate rather than folded into <see cref="Changes"/> because a conflict is not an
+    /// unstaged change: it needs the resolution actions, not Stage/Discard, and being listed first is
+    /// what makes "this repo is mid-merge" impossible to miss. See <see cref="GitChangeEntry"/> for
+    /// why each conflict is exactly one row here, never one per side.</summary>
+    public ObservableCollection<GitPanelEntryViewModel> Conflicts { get; } = new();
+
     /// <summary>The focused folder's path (when it is a git repository), or a "nothing focused"/
     /// "not a repository"/error hint - panel B's git section caption, same role as
     /// <see cref="FilesPanelViewModel.StatusText"/>.</summary>
@@ -236,6 +288,25 @@ public sealed partial class GitPanelViewModel : ObservableObject, IDisposable
     /// the view can bold only the count, not the "commit(s) to push" label.</summary>
     [ObservableProperty]
     private string _pendingPushCountText = string.Empty;
+
+    /// <summary>Whether a merge/rebase/cherry-pick/revert is stopped part-way through - drives the
+    /// header's merge banner (and its Abort/Continue buttons). True even with zero
+    /// <see cref="Conflicts"/>: every conflict resolved but the operation not yet concluded is exactly
+    /// the state in which the user needs the Continue button.</summary>
+    [ObservableProperty]
+    private bool _hasInProgressOperation;
+
+    /// <summary>The merge banner's text, e.g. "Merging — 2 conflict(s) to resolve" or
+    /// "Rebasing — all conflicts resolved" - empty when <see cref="HasInProgressOperation"/> is
+    /// false.</summary>
+    [ObservableProperty]
+    private string _inProgressOperationText = string.Empty;
+
+    /// <summary>Whether the in-progress operation can be concluded now, i.e. nothing is still
+    /// unmerged. Continue is deliberately disabled rather than hidden while conflicts remain, so the
+    /// banner shows what the next step will be instead of the button appearing out of nowhere.</summary>
+    [ObservableProperty]
+    private bool _canContinueOperation;
 
     /// <summary>Local branch names for the header's branch-switcher ComboBox - repopulated by
     /// <see cref="RefreshBranchesAsync"/> after every <see cref="RefreshDisplay"/>.</summary>
@@ -476,6 +547,7 @@ public sealed partial class GitPanelViewModel : ObservableObject, IDisposable
     {
         StagedChanges.Clear();
         Changes.Clear();
+        Conflicts.Clear();
 
         string? effectivePath = state.EffectivePath;
 
@@ -504,7 +576,8 @@ public sealed partial class GitPanelViewModel : ObservableObject, IDisposable
         foreach (var entry in entries.OrderBy(e => e.Path, StringComparer.OrdinalIgnoreCase))
         {
             var row = new GitPanelEntryViewModel(entry, effectivePath!);
-            (entry.IsStaged ? StagedChanges : Changes).Add(row);
+            var target = entry.IsConflicted ? Conflicts : entry.IsStaged ? StagedChanges : Changes;
+            target.Add(row);
         }
 
         HasRepo = true;
@@ -518,9 +591,11 @@ public sealed partial class GitPanelViewModel : ObservableObject, IDisposable
             ? string.Empty
             : summary.RemoteBranch ?? $"{summary.Branch} (no upstream)";
 
-        int changeCount = StagedChanges.Count + Changes.Count;
+        int changeCount = StagedChanges.Count + Changes.Count + Conflicts.Count;
         ChangesCountText = changeCount.ToString(System.Globalization.CultureInfo.InvariantCulture);
         ChangesSummaryText = $"{changeCount} change(s)";
+
+        ApplyInProgressOperation(summary?.InProgressOperation ?? GitInProgressOperation.None);
 
         if (summary?.RemoteBranch is null)
         {
@@ -573,6 +648,36 @@ public sealed partial class GitPanelViewModel : ObservableObject, IDisposable
         ChangesCountText = string.Empty;
         PendingPushSummaryText = string.Empty;
         PendingPushCountText = string.Empty;
+        ApplyInProgressOperation(GitInProgressOperation.None);
+    }
+
+    /// <summary>Renders the merge banner's three properties (plus the field the Abort/Continue
+    /// commands read) from the operation the latest summary reported. Free of I/O - the count of
+    /// unresolved paths is just <see cref="Conflicts"/>, which the caller has already filled.</summary>
+    private void ApplyInProgressOperation(GitInProgressOperation operation)
+    {
+        _inProgressOperation = operation;
+        HasInProgressOperation = operation != GitInProgressOperation.None;
+
+        if (operation == GitInProgressOperation.None)
+        {
+            InProgressOperationText = string.Empty;
+            CanContinueOperation = false;
+            return;
+        }
+
+        string verb = operation switch
+        {
+            GitInProgressOperation.Merge => "Merging",
+            GitInProgressOperation.Rebase => "Rebasing",
+            GitInProgressOperation.CherryPick => "Cherry-picking",
+            _ => "Reverting",
+        };
+
+        CanContinueOperation = Conflicts.Count == 0;
+        InProgressOperationText = CanContinueOperation
+            ? $"{verb} — all conflicts resolved"
+            : $"{verb} — {Conflicts.Count} conflict(s) to resolve";
     }
 
     private void ClearBranches()
@@ -673,9 +778,110 @@ public sealed partial class GitPanelViewModel : ObservableObject, IDisposable
             return;
         }
 
-        bool isUntracked = entry.StatusLetter == "U";
         await RunGitActionAsync(entry.RepoRootPath, "Discard changes", "Discarding…",
-            ct => GitActionsService.DiscardAsync(entry.RepoRootPath, entry.Path, entry.IsStaged, isUntracked, ct)).ConfigureAwait(true);
+            ct => GitActionsService.DiscardAsync(entry.RepoRootPath, entry.Path, entry.IsStaged, entry.IsUntracked, ct)).ConfigureAwait(true);
+    }
+
+    /// <summary>Marks a conflicted path resolved (`git add`) - context-menu action on a
+    /// <see cref="Conflicts"/> row, offered only there. Warns first when the file still contains
+    /// conflict markers: doing this too early is the one mistake in this whole flow that git cannot
+    /// detect for the user, since a marker-bearing file is perfectly valid content as far as it is
+    /// concerned. Unreadable/binary files skip the check rather than blocking the action.</summary>
+    [RelayCommand]
+    private async Task MarkResolvedAsync(GitPanelEntryViewModel? entry)
+    {
+        if (entry is null || string.IsNullOrEmpty(entry.RepoRootPath))
+        {
+            return;
+        }
+
+        int remainingRegions = await Task.Run(() => CountConflictRegions(entry.FullPath)).ConfigureAwait(true);
+        if (remainingRegions > 0 && !_discardConfirmation.ConfirmMarkResolvedWithMarkers(entry.Path, remainingRegions))
+        {
+            return;
+        }
+
+        await RunGitActionAsync(entry.RepoRootPath, "Mark resolved", "Marking resolved…",
+            ct => GitActionsService.MarkResolvedAsync(entry.RepoRootPath, entry.Path, ct)).ConfigureAwait(true);
+    }
+
+    /// <summary>Resolves a conflicted path wholesale in favour of the current branch's version -
+    /// context-menu "Accept ours". No marker check: the file is being replaced outright, so whatever
+    /// it currently holds is irrelevant.</summary>
+    [RelayCommand]
+    private Task AcceptOursAsync(GitPanelEntryViewModel? entry) =>
+        RunGitActionAsync(entry?.RepoRootPath, "Accept ours", "Resolving…",
+            ct => GitActionsService.AcceptConflictSideAsync(entry!.RepoRootPath, entry.Path, ours: true, ct));
+
+    /// <summary>Resolves a conflicted path wholesale in favour of the incoming version -
+    /// context-menu "Accept theirs". See <see cref="AcceptOursAsync"/>.</summary>
+    [RelayCommand]
+    private Task AcceptTheirsAsync(GitPanelEntryViewModel? entry) =>
+        RunGitActionAsync(entry?.RepoRootPath, "Accept theirs", "Resolving…",
+            ct => GitActionsService.AcceptConflictSideAsync(entry!.RepoRootPath, entry.Path, ours: false, ct));
+
+    /// <summary>Concludes the in-progress merge/rebase/cherry-pick/revert - the merge banner's
+    /// "Continue" button. Guarded on <see cref="CanContinueOperation"/> as well as being disabled in
+    /// the view, since a watcher-driven refresh can flip that between render and click.</summary>
+    [RelayCommand]
+    private Task ContinueOperationAsync()
+    {
+        var operation = _inProgressOperation;
+        if (operation == GitInProgressOperation.None || Conflicts.Count > 0)
+        {
+            return Task.CompletedTask;
+        }
+
+        return RunGitActionAsync(_effectiveRepoPath, "Continue", "Continuing…",
+            ct => GitActionsService.ContinueOperationAsync(_effectiveRepoPath!, operation, ct));
+    }
+
+    /// <summary>Abandons the in-progress operation - the merge banner's "Abort" button. Confirmed
+    /// first: aborting a rebase throws away every conflict resolution made so far, and unlike a
+    /// discard it is not scoped to one file.</summary>
+    [RelayCommand]
+    private async Task AbortOperationAsync()
+    {
+        var operation = _inProgressOperation;
+        if (operation == GitInProgressOperation.None || string.IsNullOrEmpty(_effectiveRepoPath))
+        {
+            return;
+        }
+
+        if (!_discardConfirmation.ConfirmAbortOperation(DescribeOperation(operation)))
+        {
+            return;
+        }
+
+        await RunGitActionAsync(_effectiveRepoPath, "Abort", "Aborting…",
+            ct => GitActionsService.AbortOperationAsync(_effectiveRepoPath!, operation, ct)).ConfigureAwait(true);
+    }
+
+    /// <summary>The operation's name as it reads inside a sentence ("Abort the in-progress
+    /// rebase…") - distinct from the gerund <see cref="ApplyInProgressOperation"/> uses for the
+    /// banner's own headline.</summary>
+    private static string DescribeOperation(GitInProgressOperation operation) => operation switch
+    {
+        GitInProgressOperation.Merge => "merge",
+        GitInProgressOperation.Rebase => "rebase",
+        GitInProgressOperation.CherryPick => "cherry-pick",
+        _ => "revert",
+    };
+
+    /// <summary>How many conflict-marker regions <paramref name="fullPath"/> still holds, or 0 when it
+    /// cannot be read as text at all (missing, binary, locked) - see
+    /// <see cref="ConflictMarkerScanner"/>. Static and I/O-only, so <see cref="MarkResolvedAsync"/> can
+    /// run it off the UI thread.</summary>
+    private static int CountConflictRegions(string fullPath)
+    {
+        try
+        {
+            return ConflictMarkerScanner.Scan(System.IO.File.ReadAllText(fullPath)).RegionCount;
+        }
+        catch (Exception)
+        {
+            return 0;
+        }
     }
 
     /// <summary>Opens the commit-message dialog and, once confirmed, commits every currently staged

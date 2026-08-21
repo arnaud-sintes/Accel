@@ -425,6 +425,22 @@ and guarantees they don't outlive the app even across crashes.
     on `TabsViewModel`); closing the window with any dirty tabs shows one summary dialog (Save All /
     Discard All / Cancel). Syntax colours come from `App/Services/SyntaxColorizer.cs`, a debounced
     `DocumentColorizingTransformer` over the same `SyntaxHighlighter.Tokenize` the diff viewer uses.
+  - **Find in document** (`App/Controls/DocumentSearchBar.xaml`, one instance per document pane:
+    `FileSearchBar` over `FileViewerHost`, `DiffSearchBar` over the diff view's "After" columns) —
+    Ctrl+F/F3/Escape are handled at the *window* (`MainWindow.Window_PreviewKeyDown`), not on the panes,
+    so the gesture works straight after a tab is opened while focus is still on the tab strip; it backs
+    off only when focus sits in another text box (panel A's/panel B's filter boxes). The searching
+    itself is `App/Services/TextSearchEngine.cs` — pure, WPF-free, offset-based, unit-tested. Three
+    layers sit between it and the controls, because panel D shows documents in two structurally
+    different ones: `IDocumentSearchView` (the "control I am searching" abstraction),
+    `TextEditorSearchView` (AvalonEdit — `FileEditor` and the diff's editable `DiffNewEditor`; highlights
+    every hit via `SearchMatchColorizer`, a third `DocumentColorizingTransformer` appended *after* the
+    syntax and diff ones so hits paint on top), and `RichTextBoxSearchView` (the read-only diff pane's
+    `FlowDocument`; flattens the per-syntax-token `Run`s into one offset space + pointer map so a match
+    can span runs, and marks only the current hit — with the selection, since painting the others would
+    mean `ApplyPropertyValue` splitting runs and destroying the per-run diff backgrounds). The bar holds
+    no matches while closed, and re-runs its query whenever the document under it is replaced
+    (`DocumentSearchBar.Refresh` from `ShowFileEditorDocument`, `Attach` per diff tab).
 - **`EffortBarsControl`** — radial ring gauge rendering `Metrics.EffortBarLevel`'s 0–4 scale (arc for 1–3,
   filled disc for max, shape as well as color for accessibility).
 - **`AgentGraphViewModel.cs`** (panel E, Phase 6) — a *second* reader on the same `ITelemetryFeed` instance
@@ -460,7 +476,7 @@ and guarantees they don't outlive the app even across crashes.
     measured at ~8ms with 31 folders open, against the hundreds of extra directory handles per refresh
     the probing version cost.
 - **`GitPanelViewModel.cs`** (panel B, bottom) — a flat `git status` list (via `GitStatusBuilder.Build`)
-  for the same focused root `FilesPanelViewModel` resolves, split into `StagedChanges`/`Changes`
+  for the same focused root `FilesPanelViewModel` resolves, split into `Conflicts`/`StagedChanges`/`Changes`
   (unstaged + untracked), VS Code Source Control-style. Wired to `FilesPanelViewModel.FolderExpanded`/
   `FolderCollapsed` in `Program.cs` so drilling into a repo folder in the file tree switches this section
   to that repo. Double-clicking an Added/Untracked/Deleted row opens a single-pane tab in panel C/D
@@ -469,6 +485,30 @@ and guarantees they don't outlive the app even across crashes.
   - **Mutating actions** (stage/unstage/stage-all, discard, commit, push/pull, branch switch) shell out
     via `GitActionsService` behind a single `IsBusy` flag that disables the whole toolbar, and on
     success re-run the full `git status` rather than patching the lists locally.
+  - **Merge conflicts.** An unmerged path is one row in `Conflicts`, never the staged+unstaged pair a
+    positional read of porcelain v1's two status characters produces — `GitStatusBuilder.UnmergedDescription`
+    matches the seven unmerged code pairs (`UU AA DD AU UA DU UD`) as a pair, before that split, which
+    also catches `AA`/`DD` (no `U` in them at all, so they used to read as an ordinary Added/Deleted
+    change). Untracked keeps its own `?` badge for the same reason: it used to be folded onto `U`,
+    which is git's letter for *unmerged*.
+    - A conflicted row's context menu replaces Stage/Unstage/Discard with **Accept ours / Accept theirs /
+      Mark resolved** (`GitActionsService.AcceptConflictSideAsync`/`MarkResolvedAsync`). Mark-resolved is
+      the same `git add` as staging, but gated on a `ConflictMarkerScanner` check of the working-tree
+      copy — the one mistake in this flow git cannot catch, since a file full of `<<<<<<<` is valid
+      content as far as `add` is concerned.
+    - A **merge banner** (`HasInProgressOperation`) appears while the repo is stopped mid-operation, with
+      Continue (enabled only once `Conflicts` is empty) and Abort. Which operation it is comes from
+      `GitStatusBuilder.ReadInProgressOperation`, a file-existence check over git's own markers
+      (`rebase-merge`/`rebase-apply`, `CHERRY_PICK_HEAD`, `REVERT_HEAD`, `MERGE_HEAD`, tested most-specific
+      first) rather than a sixth subprocess per refresh. `ContinueOperationAsync` runs `commit --no-edit`
+      for a merge and `-c core.editor=true <verb> --continue` otherwise — this app has no terminal to host
+      the editor git would otherwise wait on until the command timed out.
+    - **The resolution editor is the existing diff viewer, not a new one.** `GitDiffSide` gained
+      `ConflictBase`/`ConflictOurs`/`ConflictTheirs`, which resolve to `git show :1:/:2:/:3:<path>` — the
+      same shape `Index` already used — so a conflicted row opens `ShowGitDiffTabAsync` with the incoming
+      blob on the left and the marker-bearing working-tree file on the right, editable through the very
+      same `FileEditBuffer`/save path as any other file tab. The only additions are a second
+      `DiffLineHighlighter` for the marker regions and per-tab pane captions.
   - **Three refresh triggers**: a focus change (`Rebuild`, same no-op-on-same-root fast path as the
     file tree); its own commands, calling the rebuild directly — `RequestRefresh` cannot serve them,
     which is why a commit or a push used to leave its own result invisible until the next focus change;

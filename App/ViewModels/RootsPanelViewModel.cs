@@ -794,10 +794,43 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
         }
     });
 
+    /// <summary>
+    /// Whether the Accel window itself is currently the active (foreground) window - set by
+    /// <c>MainWindow</c>; defaults to "always active" when nobody supplies it (tests, headless
+    /// construction), which is the pre-gate behaviour.
+    ///
+    /// <para>This gates the waiting-acknowledgment in <see cref="ApplyFocus"/>, and it has to.
+    /// "Focused session" is panel C's <i>tab selection</i>, and <c>TabsViewModel.PollFocusedSessionId</c>
+    /// re-broadcasts the selected terminal tab's live session id on every tick - so the session the
+    /// user is actually running inside Accel is permanently "focused" whether or not the user is
+    /// looking at Accel at all. Without this gate its Stop event was acknowledged by the very same
+    /// rebuild that discovered it: the row never highlighted and
+    /// <see cref="SessionWaitingForAttention"/> never fired, which is exactly the "waiting" signal
+    /// being silently dead for the most common case.</para>
+    /// </summary>
+    public Func<bool>? IsWindowActive { get; set; }
+
+    /// <summary>
+    /// Re-runs the focus/acknowledgment pass - <c>MainWindow</c> calls this when the window is
+    /// activated, so returning to Accel with a waiting session's tab already selected clears that
+    /// row's highlight immediately instead of leaving it lit until the next tab switch.
+    /// </summary>
+    public void RefreshWaitingAcknowledgment()
+    {
+        if (!_disposed)
+        {
+            ApplyFocus();
+        }
+    }
+
     /// <summary>Sets <c>IsFocused</c> on every row from the selection service (all false when there is no
     /// service). Called after every rebuild and on every focus change.</summary>
     private void ApplyFocus()
     {
+        // See IsWindowActive: a selected tab only counts as "the user has seen it" while the user is
+        // actually looking at the Accel window.
+        bool windowActive = IsWindowActive?.Invoke() ?? true;
+
         foreach (var node in EnumerateAll(Roots))
         {
             bool isFocused = IsNodeFocused(node.Key);
@@ -806,7 +839,7 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
             // The TODO's acknowledgment: focusing a waiting session's tab clears its highlight
             // immediately, without waiting for the next rebuild - see WaitingSinceUtc/IsWaiting's
             // doc comments and _waitingAcknowledgedUtc's class remarks.
-            if (isFocused && node.Kind == RootsPanelNodeKind.Session && node.WaitingSinceUtc is { } waitingSinceUtc)
+            if (windowActive && isFocused && node.Kind == RootsPanelNodeKind.Session && node.WaitingSinceUtc is { } waitingSinceUtc)
             {
                 _waitingAcknowledgedUtc[node.Key] = waitingSinceUtc;
                 node.IsWaiting = false;

@@ -1138,4 +1138,88 @@ public class RootsPanelViewModelTests
         Assert.True(agentNode.ShowEffortBars);
         Assert.Equal(2, agentNode.EffortLevel); // TelemetryFixtures.Agent defaults EffortLevel to "medium"
     }
+
+    // --- "Waiting for feedback" highlight / taskbar flash (Stop hook -> WaitingSinceUtc) ---
+
+    private static readonly DateTime WaitingAt = new(2026, 8, 20, 9, 0, 0, DateTimeKind.Utc);
+
+    [Fact]
+    public void IsWaiting_StaysSet_WhenTheSessionIsFocusedButTheWindowIsNotActive()
+    {
+        // The regression this guards: panel C re-broadcasts the selected terminal tab's live session
+        // id on every tick (TabsViewModel.PollFocusedSessionId), so the session the user runs inside
+        // Accel is permanently "focused". Acknowledging on tab selection alone therefore cleared the
+        // highlight - and suppressed SessionWaitingForAttention - even with Accel in the background.
+        var (vm, feed, _, writer) = BuildWithSelection();
+        vm.IsWindowActive = () => false;
+        writer.SetFocused("s-waiting");
+
+        int flashes = 0;
+        vm.SessionWaitingForAttention += () => flashes++;
+
+        feed.Publish(TelemetryFixtures.Tree(new[]
+        {
+            TelemetryFixtures.Root(RootPath, TelemetryFixtures.Session("s-waiting", isLive: true, waitingSinceUtc: WaitingAt)),
+        }));
+
+        Assert.True(Node(vm, "s-waiting").IsWaiting);
+        Assert.Equal(1, flashes);
+    }
+
+    [Fact]
+    public void IsWaiting_IsClearedOnceTheWindowIsActiveAndTheAcknowledgmentIsRefreshed()
+    {
+        var (vm, feed, _, writer) = BuildWithSelection();
+        bool windowActive = false;
+        vm.IsWindowActive = () => windowActive;
+        writer.SetFocused("s-waiting");
+
+        feed.Publish(TelemetryFixtures.Tree(new[]
+        {
+            TelemetryFixtures.Root(RootPath, TelemetryFixtures.Session("s-waiting", isLive: true, waitingSinceUtc: WaitingAt)),
+        }));
+        Assert.True(Node(vm, "s-waiting").IsWaiting);
+
+        // The user switches to Accel: MainWindow's Activated handler is what calls this.
+        windowActive = true;
+        vm.RefreshWaitingAcknowledgment();
+
+        Assert.False(Node(vm, "s-waiting").IsWaiting);
+
+        // ...and the acknowledgment survives the next telemetry tick, which rebuilds every node.
+        feed.Publish(TelemetryFixtures.Tree(new[]
+        {
+            TelemetryFixtures.Root(RootPath, TelemetryFixtures.Session("s-waiting", isLive: true, waitingSinceUtc: WaitingAt)),
+        }));
+        Assert.False(Node(vm, "s-waiting").IsWaiting);
+    }
+
+    [Fact]
+    public void SessionWaitingForAttention_FiresAgainForAStopEventAfterTheLastAcknowledgedOne()
+    {
+        var (vm, feed, _, writer) = BuildWithSelection();
+        vm.IsWindowActive = () => true;
+        writer.SetFocused("s-waiting");
+
+        int flashes = 0;
+        vm.SessionWaitingForAttention += () => flashes++;
+
+        feed.Publish(TelemetryFixtures.Tree(new[]
+        {
+            TelemetryFixtures.Root(RootPath, TelemetryFixtures.Session("s-waiting", isLive: true, waitingSinceUtc: WaitingAt)),
+        }));
+        Assert.False(Node(vm, "s-waiting").IsWaiting); // acknowledged: focused row, active window
+        Assert.Equal(0, flashes);
+
+        // A later turn ends while the user is away - a strictly newer Stop timestamp outranks the
+        // acknowledged one, so the row lights up and the flash fires again.
+        vm.IsWindowActive = () => false;
+        feed.Publish(TelemetryFixtures.Tree(new[]
+        {
+            TelemetryFixtures.Root(RootPath, TelemetryFixtures.Session("s-waiting", isLive: true, waitingSinceUtc: WaitingAt.AddMinutes(5))),
+        }));
+
+        Assert.True(Node(vm, "s-waiting").IsWaiting);
+        Assert.Equal(1, flashes);
+    }
 }

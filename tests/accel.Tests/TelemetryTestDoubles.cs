@@ -188,7 +188,8 @@ internal static class TelemetryFixtures
         string name = "a session",
         long? durationMs = null,
         long? consumedTokens = null,
-        string? cwd = @"C:\projects") => new(
+        string? cwd = @"C:\projects",
+        DateTime? waitingSinceUtc = null) => new(
         SessionId: sessionId,
         Name: name,
         NameSource: "first_message",
@@ -208,7 +209,8 @@ internal static class TelemetryFixtures
         LastActivityUtc: new DateTime(2026, 8, 14, 10, 0, 0, DateTimeKind.Utc),
         Agents: agents ?? Array.Empty<AgentTreeDto>(),
         DurationMs: durationMs,
-        ConsumedTokens: consumedTokens);
+        ConsumedTokens: consumedTokens,
+        WaitingSinceUtc: waitingSinceUtc);
 
     public static RootTreeDto Root(string path, params SessionTreeDto[] sessions) =>
         new(Path: path, Exists: true, Sessions: sessions);

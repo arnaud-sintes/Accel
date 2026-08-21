@@ -20,6 +20,17 @@ public interface IFilesEntryConfirmationService
     /// discarding only unstaged edits is a lighter warning, while discarding a file that also has
     /// staged changes unwinds a `git add` too, so it gets the stronger error-tier wording.</summary>
     bool ConfirmDiscardChanges(string path, bool isStaged);
+
+    /// <summary>Asked before marking a conflicted path resolved while its working-tree copy still
+    /// contains conflict markers. The one mistake in the conflict flow git cannot catch for the user:
+    /// a marker-bearing file is valid content as far as `git add` is concerned, so it would happily
+    /// commit "&lt;&lt;&lt;&lt;&lt;&lt;&lt; HEAD" into the history.</summary>
+    bool ConfirmMarkResolvedWithMarkers(string path, int markerRegionCount);
+
+    /// <summary>Asked before aborting an in-progress merge/rebase/cherry-pick/revert - unlike a
+    /// discard it is not scoped to one file, and it throws away every conflict resolution made since
+    /// the operation started.</summary>
+    bool ConfirmAbortOperation(string operationName);
 }
 
 /// <summary>Production <see cref="IFilesEntryConfirmationService"/>: the themed
@@ -46,4 +57,16 @@ public sealed class MessageBoxFilesEntryConfirmationService : IFilesEntryConfirm
             : $"Discard changes to \"{path}\"? This cannot be undone.",
         "Discard changes",
         isStaged ? Accel.App.AccelDialogIcon.Error : Accel.App.AccelDialogIcon.Warning);
+
+    public bool ConfirmMarkResolvedWithMarkers(string path, int markerRegionCount) => Accel.App.AccelMessageDialog.ShowConfirm(
+        null,
+        $"\"{path}\" still contains {markerRegionCount} conflict marker region(s). Mark it resolved anyway?",
+        "Mark resolved",
+        Accel.App.AccelDialogIcon.Warning);
+
+    public bool ConfirmAbortOperation(string operationName) => Accel.App.AccelMessageDialog.ShowConfirm(
+        null,
+        $"Abort the in-progress {operationName} and discard every conflict resolution made since it started?",
+        "Abort",
+        Accel.App.AccelDialogIcon.Error);
 }

@@ -124,7 +124,9 @@ The monitor window is split into five panels (`A`–`E`), each bound to its own 
 
 - **Panel A — MCP / Skills usage** (`McpSkillsPanelViewModel`, left column, bottom 1/4): two flat, most-used-first lists of the focused session's MCP-tool and Skill hit counts. Accel only counts `PostToolUse` hits observed while it was running, so a historical (not-currently-open) session always shows empty lists here.
 
-- **Panel B — Files / Git** (right column, top/bottom split): a read-only file tree for whichever folder is currently focused (top, with per-file-type icons), and a flat `git status` list for that same folder grouped into "Staged Changes"/"Changes" (bottom, VS Code Source Control style). Double-clicking a file in the tree (or an Added/Untracked/Deleted git entry) opens it in a Panel C/D tab — editable right in the window, see Panel D below; double-clicking a Modified git entry opens a read-only side-by-side diff. No stage/commit/push actions yet.
+- **Panel B — Files / Git** (right column, top/bottom split): a read-only file tree for whichever folder is currently focused (top, with per-file-type icons), and a flat `git status` list for that same folder grouped into "Merge Conflicts"/"Staged Changes"/"Changes" (bottom, VS Code Source Control style), with stage/unstage/discard, commit, push/pull and a branch switcher. Double-clicking a file in the tree (or an Added/Untracked/Deleted git entry) opens it in a Panel C/D tab — editable right in the window, see Panel D below; double-clicking a Modified git entry opens a side-by-side diff.
+
+  **Merge conflicts** get their own group at the top of the list, plus a banner showing which operation the repo is stopped in the middle of (merge/rebase/cherry-pick/revert) with Continue and Abort buttons. Double-clicking a conflicted row opens the same side-by-side view with the incoming side on the left and the marker-bearing working-tree file, editable, on the right — conflict regions highlighted — so a conflict is resolved by editing and saving in place. Per-row context menu: Accept ours, Accept theirs, or Mark resolved (which warns if the file still contains conflict markers).
 
   ![Panel B — Files and Git status](docs/screenshots/panel-b-files-git.png)
 
@@ -138,12 +140,19 @@ The monitor window is split into five panels (`A`–`E`), each bound to its own 
 
 - **Panel D — File editor** (shares Panel D with the terminal): a file or git-change tab opened from Panel B shows the file's content with syntax highlighting and line numbers — and, when the file exists on disk and reads as text, it is **editable**: type directly, undo/redo, then save. Saves preserve the file's original encoding, BOM, and line-ending style (LF/CRLF/mixed, trailing newline) — only your text changes, never the file's byte shape. Unsaved changes are marked with a `●` and a bold tab title, plus Save/Discard buttons in the tab header; closing a dirty tab (or quitting with dirty tabs open) prompts before anything is lost. If another writer (e.g. a running Claude Code session) changes the file on disk while you have it open, a clean tab silently reloads and a dirty one asks whether to keep your version, reload, or cancel. Deleted git entries, Modified-entry diffs, and non-text files stay read-only; markdown tabs also offer a read-only rendered-HTML preview toggle.
 
+  **Find in document (`Ctrl+F`)**: a find bar floats over the top-right of the pane, highlighting every hit in the document (the one you are currently on in a stronger colour) with a `3/17` position counter, wrapping next/previous stepping, and match-case / whole-word toggles. It works in the single-pane file viewer and, in a side-by-side diff, on the **"After" side** — the side you are reading and, on an unstaged Modified entry, editing. Editable and read-only tabs both support it.
+
   Keyboard shortcuts (when a file tab is selected):
   | Shortcut | Action |
   |---|---|
   | `Ctrl+S` | Save the current file tab |
   | `Ctrl+Z` | Undo |
   | `Ctrl+Y` / `Ctrl+Shift+Z` | Redo |
+  | `Ctrl+F` | Open the find bar (again to return to the query box) |
+  | `Enter` / `F3` | Next match |
+  | `Shift+Enter` / `Shift+F3` | Previous match |
+  | `Alt+C` / `Alt+W` | Toggle match case / whole word |
+  | `Esc` | Close the find bar |
 
 - **Panel E — Agent Graph** (`AgentGraphViewModel`, bottom of the center column): a left-to-right node graph of the focused session's currently running sub-agents (parent first, bezier connectors), each card showing model badge and an `EffortBarsControl` radial gauge for its effort level (five tiers: low/medium/high/xhigh/max). Visible but empty ("no session focused" / "no longer in the tree") in the screenshot above, since that session had no focus and no sub-agents running yet — a genuine sub-agent graph capture is still pending a session that spawns Task sub-agents while under the monitor.
 

@@ -63,6 +63,18 @@ public enum GitDiffSide
 
     /// <summary>The current working-tree file, read straight off disk.</summary>
     WorkingTree,
+
+    /// <summary>A conflicted path's merge base - index stage 1, <c>git show :1:&lt;path&gt;</c>. The
+    /// common ancestor both sides diverged from.</summary>
+    ConflictBase,
+
+    /// <summary>A conflicted path's "our" side - index stage 2, <c>git show :2:&lt;path&gt;</c>
+    /// (the branch being merged into, i.e. HEAD).</summary>
+    ConflictOurs,
+
+    /// <summary>A conflicted path's "their" side - index stage 3, <c>git show :3:&lt;path&gt;</c>
+    /// (the incoming branch/commit).</summary>
+    ConflictTheirs,
 }
 
 /// <summary>

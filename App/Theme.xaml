@@ -152,6 +152,22 @@
          same hue as DangerBrush/SuccessBrush but low-alpha so syntax-highlighted text stays legible on top. -->
     <SolidColorBrush x:Key="DiffRemovedLineBrush" Color="#33E98F8F" />
     <SolidColorBrush x:Key="DiffAddedLineBrush" Color="#338FCB9B" />
+
+    <!-- Conflict-region highlight for the merge-conflict view's editable pane (see
+         ConflictMarkerScanner). Amber rather than the red/green pair above: a conflict region is
+         neither "added" nor "removed", and it is painted on the SAME pane as DiffAddedLineBrush, so
+         it has to be distinguishable from it at a glance. Slightly stronger alpha than the two
+         diff brushes because the region it covers is what the user is being asked to act on. -->
+    <SolidColorBrush x:Key="DiffConflictLineBrush" Color="#40E8B44A" />
+
+    <!-- Find-in-document (Ctrl+F) hit highlights - see SearchMatchColorizer. Accent orange rather
+         than the teal SelectionBrush, so a hit never reads as "this is selected", and deliberately
+         two steps apart in alpha: every hit gets the faint one, the hit the find bar is currently on
+         gets the strong one, which is the only cue telling the user where Find Next just landed.
+         Both stay translucent so syntax-highlighted text and diff line backgrounds show through. -->
+    <SolidColorBrush x:Key="SearchMatchBrush" Color="#40F0A868" />
+    <SolidColorBrush x:Key="SearchCurrentMatchBrush" Color="#A6F0A868" />
+
     <SolidColorBrush x:Key="WarningTextBrush" Color="{StaticResource WarningColor}" />
     <SolidColorBrush x:Key="WarningBackgroundBrush" Color="#FF241B10" />
     <SolidColorBrush x:Key="WarningBorderBrush" Color="#FF5E4523" />

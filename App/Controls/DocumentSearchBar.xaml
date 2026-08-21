@@ -1,0 +1,150 @@
+<UserControl x:Class="Accel.App.Controls.DocumentSearchBar"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Visibility="Collapsed"
+             HorizontalAlignment="Right" VerticalAlignment="Top"
+             Margin="0,8,20,0"
+             SnapsToDevicePixels="True">
+    <!--
+        Ctrl+F find bar for whatever document panel D is showing - the single-pane file viewer, or the
+        diff view's "After" side. Floated over the top-right of its host pane (never docked, never a
+        dialog): the pane's own vertical scrollbar and diff-mark strip live on the right edge, and a
+        docked row would push the text down and re-wrap it on every open/close. Same overlay
+        convention as MainWindow's FileEditorNotice.
+
+        The bar has no ViewModel: it drives an IDocumentSearchView (see DocumentSearchBar.xaml.cs),
+        which is the abstraction over "the control underneath me", exactly as panel D's other document
+        chrome is driven from code-behind. The searching itself is TextSearchEngine's, which is where
+        the tested logic lives.
+    -->
+    <UserControl.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="../Theme.xaml" />
+            </ResourceDictionary.MergedDictionaries>
+
+            <!--
+                The two option toggles (Aa / whole word). Kept local rather than added to Theme.xaml:
+                nothing else in the app uses a ToggleButton as an on/off chip, and Theme.xaml has no
+                default ToggleButton style, so without a template here these would render with WPF's
+                stock grey bevel. Checked state uses AccentTintStrongBrush + accent text, the same
+                "this filter is active" language as the rest of the UI.
+            -->
+            <Style x:Key="SearchOptionToggleStyle" TargetType="ToggleButton">
+                <Setter Property="Width" Value="24" />
+                <Setter Property="Height" Value="22" />
+                <Setter Property="FontFamily" Value="{StaticResource FontFamilyBase}" />
+                <Setter Property="FontSize" Value="{StaticResource FontSizeCaption}" />
+                <Setter Property="Foreground" Value="{StaticResource TextMutedBrush}" />
+                <Setter Property="Cursor" Value="Hand" />
+                <Setter Property="Template">
+                    <Setter.Value>
+                        <ControlTemplate TargetType="ToggleButton">
+                            <Border x:Name="Bd" Background="Transparent" CornerRadius="4">
+                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                            </Border>
+                            <ControlTemplate.Triggers>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Setter TargetName="Bd" Property="Background" Value="{StaticResource SurfaceHoverBrush}" />
+                                    <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
+                                </Trigger>
+                                <Trigger Property="IsChecked" Value="True">
+                                    <Setter TargetName="Bd" Property="Background" Value="{StaticResource AccentTintStrongBrush}" />
+                                    <Setter Property="Foreground" Value="{StaticResource AccentBrush}" />
+                                </Trigger>
+                            </ControlTemplate.Triggers>
+                        </ControlTemplate>
+                    </Setter.Value>
+                </Setter>
+            </Style>
+
+            <!-- Prev / next / close: the same invisible-until-hovered square affordance as the tab
+                 strip's close button, minus its red hover tint (stepping through matches is not a
+                 destructive action). -->
+            <Style x:Key="SearchIconButtonStyle" TargetType="Button">
+                <Setter Property="Width" Value="24" />
+                <Setter Property="Height" Value="22" />
+                <Setter Property="Padding" Value="0" />
+                <Setter Property="FontFamily" Value="Segoe MDL2 Assets" />
+                <Setter Property="FontSize" Value="11" />
+                <Setter Property="Foreground" Value="{StaticResource TextMutedBrush}" />
+                <Setter Property="Cursor" Value="Hand" />
+                <Setter Property="Template">
+                    <Setter.Value>
+                        <ControlTemplate TargetType="Button">
+                            <Border x:Name="Bd" Background="Transparent" CornerRadius="4">
+                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                            </Border>
+                            <ControlTemplate.Triggers>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Setter TargetName="Bd" Property="Background" Value="{StaticResource SurfaceHoverBrush}" />
+                                    <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
+                                </Trigger>
+                                <Trigger Property="IsEnabled" Value="False">
+                                    <Setter Property="Foreground" Value="{StaticResource TextDisabledBrush}" />
+                                </Trigger>
+                            </ControlTemplate.Triggers>
+                        </ControlTemplate>
+                    </Setter.Value>
+                </Setter>
+            </Style>
+        </ResourceDictionary>
+    </UserControl.Resources>
+
+    <Border Background="{StaticResource SurfaceOverlayBrush}"
+            BorderBrush="{StaticResource WindowBorderBrush}" BorderThickness="1"
+            CornerRadius="{StaticResource RadiusMedium}"
+            Padding="6,4" Effect="{StaticResource ElevationOverlayShadow}">
+        <StackPanel Orientation="Horizontal">
+            <!--
+                MinHeight/Padding shrink the themed TextBox to the bar's height; everything else
+                (focus ring, caret colour) comes from Theme.xaml's default TextBox style. Enter /
+                Shift+Enter / Escape / F3 are handled in PreviewKeyDown so the TextBox's own input
+                handling never swallows them - see QueryBox_PreviewKeyDown.
+            -->
+            <TextBox x:Name="QueryBox" Width="200" MinHeight="22" Padding="6,1"
+                     FontFamily="{StaticResource FontFamilyMono}"
+                     FontSize="{StaticResource FontSizeCaption}"
+                     VerticalAlignment="Center"
+                     TextChanged="QueryBox_TextChanged"
+                     PreviewKeyDown="QueryBox_PreviewKeyDown"
+                     AutomationProperties.Name="Find in document" />
+
+            <!-- "3/17", "No results", or blank while the query is empty. Fixed width so stepping
+                 through matches does not make the whole bar shuffle sideways as the digits grow. -->
+            <TextBlock x:Name="StatusText" Width="76" Margin="8,0,4,0"
+                       VerticalAlignment="Center" TextAlignment="Center"
+                       TextTrimming="CharacterEllipsis"
+                       FontFamily="{StaticResource FontFamilyBase}"
+                       FontSize="{StaticResource FontSizeCaption}"
+                       Foreground="{StaticResource TextMutedBrush}"
+                       AutomationProperties.LiveSetting="Polite" />
+
+            <ToggleButton x:Name="MatchCaseToggle" Content="Aa"
+                          Style="{StaticResource SearchOptionToggleStyle}"
+                          Checked="Option_Changed" Unchecked="Option_Changed"
+                          ToolTip="Match case (Alt+C)"
+                          AutomationProperties.Name="Match case" />
+            <ToggleButton x:Name="WholeWordToggle" Content="&#x2758;ab&#x2758;"
+                          Style="{StaticResource SearchOptionToggleStyle}" Width="34"
+                          Checked="Option_Changed" Unchecked="Option_Changed"
+                          ToolTip="Whole word (Alt+W)"
+                          AutomationProperties.Name="Whole word" />
+
+            <Border Width="1" Margin="4,3" Background="{StaticResource StrokeBrush}" />
+
+            <Button x:Name="PreviousButton" Content="&#xE70E;" Style="{StaticResource SearchIconButtonStyle}"
+                    Click="PreviousButton_Click"
+                    ToolTip="Previous match (Shift+Enter)"
+                    AutomationProperties.Name="Previous match" />
+            <Button x:Name="NextButton" Content="&#xE70D;" Style="{StaticResource SearchIconButtonStyle}"
+                    Click="NextButton_Click"
+                    ToolTip="Next match (Enter)"
+                    AutomationProperties.Name="Next match" />
+            <Button x:Name="CloseButton" Content="&#xE711;" Style="{StaticResource SearchIconButtonStyle}"
+                    Click="CloseButton_Click"
+                    ToolTip="Close (Esc)"
+                    AutomationProperties.Name="Close find bar" />
+        </StackPanel>
+    </Border>
+</UserControl>

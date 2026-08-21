@@ -5,7 +5,8 @@
         xmlns:controls="clr-namespace:Accel.App.Controls"
         xmlns:avalonEdit="http://icsharpcode.net/sharpdevelop/avalonedit"
         Title="Accel" Height="720" Width="1200" WindowState="Maximized" WindowStyle="None"
-        Icon="pack://application:,,,/App/accel.ico">
+        Icon="pack://application:,,,/App/accel.ico"
+        PreviewKeyDown="Window_PreviewKeyDown">
     <!--
         P1-T4 originally set Language="" here to route around a XamlParseException caused by
         InvariantGlobalization (Accel.csproj) stripping the culture tables FrameworkElement.Language
@@ -72,15 +73,40 @@
                         <MenuItem Header="Stage"
                                   Command="{Binding PlacementTarget.Tag.StageFileCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
                                   CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
-                                  Visibility="{Binding IsStaged, Converter={StaticResource InverseBoolToVis}}" />
+                                  Visibility="{Binding CanStage, Converter={StaticResource BoolToVis}}" />
                         <MenuItem Header="Unstage"
                                   Command="{Binding PlacementTarget.Tag.UnstageFileCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
                                   CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
-                                  Visibility="{Binding IsStaged, Converter={StaticResource BoolToVis}}" />
+                                  Visibility="{Binding CanUnstage, Converter={StaticResource BoolToVis}}" />
+                        <!--
+                            Conflict resolution replaces the staging pair above on an unmerged row
+                            (GitPanelEntryViewModel.IsConflicted) rather than being added alongside it:
+                            plain "Stage" on a conflicted file runs the same `git add` as "Mark
+                            resolved" but with none of its marker check, i.e. it silently declares a
+                            conflict settled while the markers are still in the file. "Open" is the
+                            row's double-click gesture, spelled out here because the two-pane conflict
+                            view is not something a user would think to look for behind a double-click.
+                        -->
+                        <MenuItem Header="Accept ours (current branch)"
+                                  Command="{Binding PlacementTarget.Tag.AcceptOursCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                  CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                  Visibility="{Binding IsConflicted, Converter={StaticResource BoolToVis}}" />
+                        <MenuItem Header="Accept theirs (incoming)"
+                                  Command="{Binding PlacementTarget.Tag.AcceptTheirsCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                  CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                  Visibility="{Binding IsConflicted, Converter={StaticResource BoolToVis}}" />
+                        <MenuItem Header="Mark resolved"
+                                  Command="{Binding PlacementTarget.Tag.MarkResolvedCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                  CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                  Visibility="{Binding IsConflicted, Converter={StaticResource BoolToVis}}" />
                         <Separator />
+                        <!-- Hidden on a conflicted row: `git restore` cannot revert an unmerged path
+                             to anything meaningful - the way out is one of the three actions above,
+                             or aborting the whole operation from the header banner. -->
                         <MenuItem Header="Discard changes…"
                                   Command="{Binding PlacementTarget.Tag.DiscardFileCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
-                                  CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
+                                  CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                  Visibility="{Binding IsConflicted, Converter={StaticResource InverseBoolToVis}}" />
                     </ContextMenu>
                 </Grid.ContextMenu>
                 <TextBlock Grid.Column="0" Text="{Binding Path}" TextTrimming="CharacterEllipsis"
@@ -101,6 +127,9 @@
                                 <DataTrigger Binding="{Binding StatusLetter}" Value="D">
                                     <Setter Property="Foreground" Value="{StaticResource DangerBrush}" />
                                 </DataTrigger>
+                                <!-- "U" is unmerged/conflicted ONLY - untracked keeps its own "?" badge
+                                     below (it used to be folded onto this letter, which made the two
+                                     indistinguishable). -->
                                 <DataTrigger Binding="{Binding StatusLetter}" Value="U">
                                     <Setter Property="Foreground" Value="{StaticResource DangerBrush}" />
                                 </DataTrigger>
@@ -1164,6 +1193,14 @@
                                                Foreground="{StaticResource TextMutedBrush}"
                                                AutomationProperties.LiveSetting="Polite" />
                                 </Border>
+
+                                <!--
+                                    Ctrl+F find bar for this pane, floated over its top-right corner
+                                    (declared last so it paints over both the text and the notice
+                                    above). Wired to FileEditor in MainWindow.xaml.cs's constructor and
+                                    opened by Window_PreviewKeyDown; see DocumentSearchBar.xaml.
+                                -->
+                                <controls:DocumentSearchBar x:Name="FileSearchBar" />
                                 </Grid>
                             </Border>
 
@@ -1190,13 +1227,20 @@
                                         <RowDefinition Height="*" />
                                     </Grid.RowDefinitions>
 
+                                    <!--
+                                        Pane captions. Named (and left without literal text here) because
+                                        the same two panes serve two different comparisons: an ordinary
+                                        Modified diff is "Before"/"After", while a merge-conflict view is
+                                        "Theirs (incoming)"/"Working tree (conflict markers)" - see
+                                        MainWindow.ShowGitDiffTabAsync, which sets both per tab.
+                                    -->
                                     <Border Grid.Row="0" Grid.Column="0" Grid.ColumnSpan="2" Background="{StaticResource SurfaceElevatedBrush}"
                                             BorderBrush="{StaticResource StrokeSubtleBrush}" BorderThickness="0,0,0,1" Padding="16,8">
-                                        <TextBlock Text="Before" Style="{StaticResource SecondaryTextStyle}" FontWeight="Bold" />
+                                        <TextBlock x:Name="DiffOldCaption" Text="Before" Style="{StaticResource SecondaryTextStyle}" FontWeight="Bold" />
                                     </Border>
                                     <Border Grid.Row="0" Grid.Column="3" Grid.ColumnSpan="3" Background="{StaticResource SurfaceElevatedBrush}"
                                             BorderBrush="{StaticResource StrokeSubtleBrush}" BorderThickness="0,0,0,1" Padding="16,8">
-                                        <TextBlock Text="After" Style="{StaticResource SecondaryTextStyle}" FontWeight="Bold" />
+                                        <TextBlock x:Name="DiffNewCaption" Text="After" Style="{StaticResource SecondaryTextStyle}" FontWeight="Bold" />
                                     </Border>
 
                                     <!--
@@ -1260,8 +1304,14 @@
                                         </Canvas>
                                     </Border>
 
+                                    <!-- IsInactiveSelectionHighlightEnabled: the find bar marks the
+                                         current match in this pane with the selection (see
+                                         RichTextBoxSearchView's remarks on why it cannot paint one),
+                                         and keyboard focus is in the find box at that moment - without
+                                         this the match would be selected but invisible. -->
                                     <RichTextBox x:Name="DiffNewText" Grid.Row="1" Grid.Column="4"
                                                  IsReadOnly="True" IsReadOnlyCaretVisible="True"
+                                                 IsInactiveSelectionHighlightEnabled="True"
                                                  VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
                                                  FontFamily="Consolas" FontSize="{StaticResource FontSizeBody}"
                                                  Padding="16" Background="Transparent" BorderThickness="0"
@@ -1309,6 +1359,19 @@
                                     -->
                                     <Canvas x:Name="DiffMarkStrip" Grid.Row="1" Grid.Column="5" Background="{StaticResource SurfaceElevatedBrush}"
                                             IsHitTestVisible="False" ClipToBounds="True" SizeChanged="DiffMarkStrip_SizeChanged" />
+
+                                    <!--
+                                        Ctrl+F find bar for the diff view. Scoped to the "After" side
+                                        only - that is the side the user is reading and, when the tab is
+                                        editable, editing - a second bar over "Before" would double
+                                        the chrome for a pane nobody searches. Declared last so it
+                                        paints over whichever "After" control is visible; which of
+                                        the two it searches is attached per tab in
+                                        ShowGitDiffTabAsync. Column 4 (not 3-5) so its own right
+                                        margin clears the pane's vertical scrollbar the same way it
+                                        does in the single-pane viewer.
+                                    -->
+                                    <controls:DocumentSearchBar x:Name="DiffSearchBar" Grid.Row="1" Grid.Column="4" />
                                 </Grid>
                             </Border>
 
@@ -1654,6 +1717,34 @@
                             </StackPanel>
 
                             <!--
+                                Merge banner: shown only while a merge/rebase/cherry-pick/revert is
+                                stopped part-way through (GitPanelViewModel.HasInProgressOperation,
+                                read from git's own marker files - see
+                                GitStatusBuilder.ReadInProgressOperation). Sits above the ordinary
+                                action toolbar because in that state Commit/Push are not the next
+                                step: Continue (enabled only once nothing is unmerged) or Abort are.
+                            -->
+                            <Border Margin="0,10,0,0" Padding="8,6" CornerRadius="3"
+                                    Background="{StaticResource SurfaceElevatedBrush}"
+                                    BorderBrush="{StaticResource DangerBrush}" BorderThickness="1"
+                                    Visibility="{Binding HasInProgressOperation, Converter={StaticResource BoolToVis}}"
+                                    IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}">
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Text="&#xE7BA;" FontFamily="Segoe MDL2 Assets" FontSize="12"
+                                               VerticalAlignment="Center" Foreground="{StaticResource DangerBrush}" />
+                                    <TextBlock Text="{Binding InProgressOperationText}" Margin="6,0,0,0" VerticalAlignment="Center"
+                                               FontSize="{StaticResource FontSizeCaption}" FontWeight="Bold"
+                                               Foreground="{StaticResource TextPrimaryBrush}"
+                                               AutomationProperties.LiveSetting="Polite" />
+                                    <Button Content="Continue" Command="{Binding ContinueOperationCommand}"
+                                            IsEnabled="{Binding CanContinueOperation}"
+                                            Style="{StaticResource PrimaryButtonStyle}" Padding="10,2" MinHeight="0" Margin="10,0,0,0" />
+                                    <Button Content="Abort…" Command="{Binding AbortOperationCommand}"
+                                            Style="{StaticResource SecondaryButtonStyle}" Padding="10,2" MinHeight="0" Margin="6,0,0,0" />
+                                </StackPanel>
+                            </Border>
+
+                            <!--
                                 Action toolbar: Stage all / Commit / Push / Pull, plus a busy
                                 indicator while any of GitPanelViewModel's mutating commands is
                                 in flight. Only shown once a repo is actually focused - matches
@@ -1680,6 +1771,19 @@
 
                         <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="8,0,8,8">
                             <StackPanel>
+                                <!--
+                                    Merge conflicts first, above both other groups: an unmerged path
+                                    blocks the commit the other two are heading towards, so it is the
+                                    only thing worth doing next. Same row template as the other groups -
+                                    the template switches its own context menu on
+                                    GitPanelEntryViewModel.IsConflicted.
+                                -->
+                                <TextBlock Text="MERGE CONFLICTS" Margin="8,4"
+                                           Style="{StaticResource SecondaryTextStyle}" FontWeight="Bold"
+                                           Foreground="{StaticResource DangerBrush}"
+                                           Visibility="{Binding Conflicts.Count, Converter={StaticResource CountToVis}}" />
+                                <ItemsControl ItemsSource="{Binding Conflicts}" ItemTemplate="{StaticResource GitChangeRowTemplate}" />
+
                                 <TextBlock Text="STAGED CHANGES" Margin="8,4"
                                            Style="{StaticResource SecondaryTextStyle}" FontWeight="Bold"
                                            Visibility="{Binding StagedChanges.Count, Converter={StaticResource CountToVis}}" />
