@@ -4,7 +4,7 @@
         xmlns:controls="clr-namespace:Accel.App.Controls"
         Title="{Binding Title}" Height="300" Width="440"
         WindowStartupLocation="CenterOwner" ResizeMode="NoResize"
-        ShowInTaskbar="False" WindowStyle="None" Style="{StaticResource DialogWindowStyle}">
+        ShowInTaskbar="False" WindowStyle="None" Style="{DynamicResource DialogWindowStyle}">
     <Window.Resources>
         <ResourceDictionary Source="Theme.xaml" />
     </Window.Resources>

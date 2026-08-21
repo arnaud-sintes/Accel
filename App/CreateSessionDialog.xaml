@@ -5,7 +5,7 @@
         xmlns:conv="clr-namespace:Accel.App.Converters"
         Title="Create session" Height="620" Width="560"
         WindowStartupLocation="CenterOwner" ResizeMode="NoResize"
-        ShowInTaskbar="False" WindowStyle="None" Style="{StaticResource DialogWindowStyle}">
+        ShowInTaskbar="False" WindowStyle="None" Style="{DynamicResource DialogWindowStyle}">
     <!--
         P2-T6 originally set Language="" here, matching MainWindow.xaml's now-removed workaround -
         see Accel.csproj's comment on why InvariantGlobalization was removed entirely instead (it
