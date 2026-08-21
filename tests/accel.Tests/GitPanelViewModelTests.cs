@@ -577,7 +577,7 @@ public sealed class GitPanelViewModelTests : IDisposable
         Focus(feed, writer, _root);
 
         var entry = Assert.Single(vm.Changes);
-        Assert.Equal("?", entry.StatusLetter);
+        Assert.Equal("+", entry.StatusLetter);
         Assert.True(entry.IsUntracked);
         Assert.False(entry.IsConflicted);
     }

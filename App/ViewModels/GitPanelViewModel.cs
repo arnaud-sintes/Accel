@@ -23,11 +23,13 @@ public sealed class GitPanelEntryViewModel
     {
         Path = entry.Path;
 
-        // Untracked keeps git's own '?', it is NOT folded into "U": 'U' is git's letter for an
-        // unmerged (conflicted) path, and mapping untracked onto it made the two states render as the
-        // same red "U" badge - indistinguishable in the one list where confusing "git doesn't know
-        // about this file" with "this file has a merge conflict" matters most.
-        StatusLetter = char.ToUpperInvariant(entry.StatusCode).ToString();
+        // Untracked is NOT folded into "U": 'U' is git's letter for an unmerged (conflicted) path,
+        // and mapping untracked onto it made the two states render as the same red "U" badge -
+        // indistinguishable in the one list where confusing "git doesn't know about this file" with
+        // "this file has a merge conflict" matters most. It renders as "+" instead of git's raw '?'
+        // for the badge - a locally-added file, not a question mark - while entry.StatusCode itself
+        // stays '?' for every other comparison (IsOpenable/IsUntracked above, GitStatusBuilder, tests).
+        StatusLetter = entry.StatusCode == '?' ? "+" : char.ToUpperInvariant(entry.StatusCode).ToString();
         StatusDescription = entry.StatusDescription;
         RepoRootPath = repoRootPath;
 
@@ -53,8 +55,8 @@ public sealed class GitPanelEntryViewModel
     /// its tooltip.</summary>
     public string Path { get; }
 
-    /// <summary>Single-letter badge (M/A/D/R/C/U, Untracked shown as "U" rather than raw "?") - always
-    /// paired with <see cref="StatusDescription"/>
+    /// <summary>Single-character badge (M/A/D/R/C/U, Untracked shown as "+" rather than git's raw "?")
+    /// - always paired with <see cref="StatusDescription"/>
     /// in the automation name, never color-only (same accessibility rule <see cref="FilesPanelNodeViewModel"/>
     /// follows for folder vs. file).</summary>
     public string StatusLetter { get; }

@@ -127,7 +127,7 @@
                                 <DataTrigger Binding="{Binding StatusLetter}" Value="D">
                                     <Setter Property="Foreground" Value="{StaticResource DangerBrush}" />
                                 </DataTrigger>
-                                <!-- "U" is unmerged/conflicted ONLY - untracked keeps its own "?" badge
+                                <!-- "U" is unmerged/conflicted ONLY - untracked keeps its own "+" badge
                                      below (it used to be folded onto this letter, which made the two
                                      indistinguishable). -->
                                 <DataTrigger Binding="{Binding StatusLetter}" Value="U">
@@ -139,7 +139,7 @@
                                 <DataTrigger Binding="{Binding StatusLetter}" Value="C">
                                     <Setter Property="Foreground" Value="{StaticResource TealBrush}" />
                                 </DataTrigger>
-                                <DataTrigger Binding="{Binding StatusLetter}" Value="?">
+                                <DataTrigger Binding="{Binding StatusLetter}" Value="+">
                                     <Setter Property="Foreground" Value="{StaticResource TextMutedBrush}" />
                                 </DataTrigger>
                             </Style.Triggers>
@@ -346,21 +346,23 @@
                     </Grid.RowDefinitions>
 
                 <DockPanel Grid.Row="0" LastChildFill="True">
-                    <Border DockPanel.Dock="Top" Margin="16,16,16,10" Style="{StaticResource SectionHeaderBackdropStyle}">
-                        <TextBlock Text="SESSIONS" Style="{StaticResource SectionHeaderTextStyle}" />
-                    </Border>
-
                     <!--
-                        P1-T3b: minimal add/remove toolbar. "Add root…" prompts for a folder,
-                        creates it on disk if missing, and appends it to accel-folders.json.
-                        Remove is scoped to a selected root node via the tree's context menu below
-                        (right-click a root row) rather than a toolbar button, since it needs a
-                        target node - see RootsPanelViewModel.RemoveRootCommand.
+                        P1-T3b: "Add root…" prompts for a folder, creates it on disk if missing,
+                        and appends it to accel-folders.json. Sits inline with the title, right-
+                        aligned, instead of its own toolbar row, so this header row is the same
+                        height as FILES' title-only header - keeping the two panels' search boxes
+                        below vertically aligned. Remove is scoped to a selected root node via the
+                        tree's context menu below (right-click a root row) rather than a toolbar
+                        button, since it needs a target node - see RootsPanelViewModel.RemoveRootCommand.
                     -->
-                    <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="16,0,16,12">
-                        <Button Content="+  Add root" Command="{Binding AddRootCommand}"
-                                Style="{StaticResource SecondaryButtonStyle}" HorizontalAlignment="Left" />
-                    </StackPanel>
+                    <DockPanel DockPanel.Dock="Top" Margin="16,16,16,10" LastChildFill="False">
+                        <Border Style="{StaticResource SectionHeaderBackdropStyle}">
+                            <TextBlock Text="SESSIONS" Style="{StaticResource SectionHeaderTextStyle}" />
+                        </Border>
+                        <Button DockPanel.Dock="Right" Content="+  Add root" Command="{Binding AddRootCommand}"
+                                Style="{StaticResource SecondaryButtonStyle}" Padding="10,3" MinHeight="0"
+                                FontSize="{StaticResource FontSizeCaption}" VerticalAlignment="Center" />
+                    </DockPanel>
 
                     <!--
                         Search box: filters Roots down to rows matching SearchText (plus any
