@@ -21,7 +21,7 @@
 
 param()
 
-$publishDir = Join-Path $PSScriptRoot "bin\Release\net8.0-windows\win-x64\publish"
+$publishDir = Join-Path $PSScriptRoot "bin\Release\net10.0-windows\win-x64\publish"
 $exePath = Join-Path $publishDir "accel.exe"
 $distDir = Join-Path $PSScriptRoot "dist"
 $csprojPath = Join-Path $PSScriptRoot "accel.csproj"
@@ -88,7 +88,7 @@ try {
     # output - none of those are needed at runtime. No folder.json is shipped: the root-folders
     # config always lives (and is created on demand) at %USERPROFILE%\.claude\accel-folders.json,
     # which is writable without elevation wherever the exe itself was unpacked. ---
-    $stageDir = Join-Path $PSScriptRoot "bin\Release\net8.0-windows\win-x64\publish-stage"
+    $stageDir = Join-Path $PSScriptRoot "bin\Release\net10.0-windows\win-x64\publish-stage"
     if (Test-Path $stageDir) {
         Remove-Item $stageDir -Recurse -Force
     }

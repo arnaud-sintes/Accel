@@ -24,7 +24,7 @@
       yet for this repo, so this starts pre-1.0; bump it by hand per release.
     -->
     <Version>0.2.0</Version>
-    <TargetFramework>net8.0-windows</TargetFramework>
+    <TargetFramework>net10.0-windows</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
     <UseWPF>true</UseWPF>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
@@ -57,6 +57,20 @@
       the bug entirely rather than working around it per-XAML-file.
     -->
     <GenerateMvcApplicationPartsAssemblyAttributes>false</GenerateMvcApplicationPartsAssemblyAttributes>
+
+    <!--
+      .NET 10 upgrade: Microsoft.NET.Sdk.Web precompresses static web assets (Brotli + gzip
+      siblings next to every wwwroot file) at publish time by default since .NET 9. That is the
+      right default for a real ASP.NET Core site served through the static-files middleware, which
+      negotiates Content-Encoding and picks the .br/.gz variant. Accel never serves these files
+      that way: App/Controls/TerminalView.xaml.cs hands the xterm folder to WebView2 via
+      CoreWebView2.SetVirtualHostNameToFolderMapping, a plain filesystem mapping with no
+      content-negotiation layer, so the .br/.gz siblings can never be read - they only bloat the
+      publish output, the portable zip, and the Inno Setup installer (2 dead files per asset).
+      Disabled rather than filtered out downstream, so publish.ps1's staging copy and
+      installer/accel.iss's wwwroot glob stay simple.
+    -->
+    <CompressionEnabled>false</CompressionEnabled>
 
     <!-- Acceleration-themed app icon (dark rounded square, orange->teal forward chevrons). -->
     <ApplicationIcon>App\accel.ico</ApplicationIcon>

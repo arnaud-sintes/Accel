@@ -10,7 +10,7 @@ Native Windows C# tool that monitors Claude Code local session activity. Running
 
 ### Requirements
 
-- .NET 8 SDK (pinned to 8.0.424 via `global.json` — this avoids a broken workload-manifest resolver in newer versions)
+- .NET 10 SDK (pinned to 10.0.400 via `global.json`, `rollForward: latestFeature`). .NET 10 is the current LTS (supported to Nov 2028); .NET 8 reaches end of support on Nov 10 2026. The older 8.0.424 pin existed to dodge a broken workload-manifest resolver in later 8.0.x SDKs — that resolver bug does not reproduce on 10.0.400.
 - Windows 10 1809+ or Windows 11 (for the ConPTY pseudoconsole API used to host PTY sessions) plus the WebView2 Evergreen runtime (usually preinstalled; needed by the terminal panel — `accel doctor` checks for it)
 
 ### Build
@@ -29,7 +29,7 @@ Publish as a self-contained, single-file Windows x64 executable:
 dotnet publish accel.csproj -r win-x64 -c Release
 ```
 
-**Output:** `bin/Release/net8.0-windows/win-x64/publish/accel.exe` (~179 MB)
+**Output:** `bin/Release/net10.0-windows/win-x64/publish/accel.exe` (~203 MB)
 
 Alternatively, run the included `publish.ps1`:
 

@@ -4,8 +4,13 @@ This document describes file/folder organization, build/test/publish mechanics, 
 
 ## Prerequisites
 
-- **.NET 8 SDK, pinned to 8.0.424** (see `global.json`)
-  - Avoids broken workload-manifest resolver in newer 8.0.x versions
+- **.NET 10 SDK, pinned to 10.0.400** (see `global.json`, `rollForward: latestFeature`)
+  - .NET 10 is the current LTS (released Nov 2025, supported to Nov 2028). The project moved off
+    `net8.0-windows` because .NET 8 support ends Nov 10 2026 — and since Accel publishes
+    self-contained, an out-of-support target ships an unpatched runtime inside `accel.exe` rather
+    than merely relying on a stale machine-wide install.
+  - The previous 8.0.424 pin existed to avoid a broken workload-manifest resolver in later 8.0.x
+    SDKs; that bug does not reproduce on 10.0.400 (verified by a clean restore + build).
   - Restore with `dotnet workload restore` if needed (implicit during build)
 - **Windows 10 1803+ or Windows 11** (required for built-in `curl.exe`)
 - Visual Studio 2022 optional (full IDE support; command-line only via `dotnet` CLI)
@@ -32,8 +37,8 @@ This document describes file/folder organization, build/test/publish mechanics, 
 | File | Purpose |
 |------|---------|
 | `accel.sln` | Solution file (Visual Studio 2022) with 2 projects: `accel` and `accel.Tests` |
-| `accel.csproj` | Main project (SDK: Web, targets net8.0-windows, console exe with WPF/WinForms) |
-| `global.json` | Locks .NET SDK to 8.0.424 with `rollForward: latestFeature` |
+| `accel.csproj` | Main project (SDK: Web, targets net10.0-windows, console exe with WPF/WinForms) |
+| `global.json` | Locks .NET SDK to 10.0.400 with `rollForward: latestFeature` |
 | `Program.cs` | Entry point; routes CLI args to ArgParser, smoke tests, and RunCombinedAsync |
 | `folder.json` | Legacy, read-only dev fallback: JSON array of root folder paths (format: `["C:/projects", ...]`). Not shipped by the installer or portable zip; the real config is `%USERPROFILE%\.claude\accel-folders.json` |
 | `publish.ps1` | Wraps `dotnet publish` for the single-file executable, then packages a portable zip and (if Inno Setup is installed) a `Setup.exe` into `dist\` |
@@ -46,7 +51,7 @@ This document describes file/folder organization, build/test/publish mechanics, 
 dotnet build accel.sln
 ```
 
-Output: `bin/Debug/net8.0-windows/accel.exe` + dependencies in separate files
+Output: `bin/Debug/net10.0-windows/accel.exe` + dependencies in separate files
 
 **Time**: ~5–10 seconds (first build) or ~1 second (incremental)
 
@@ -56,7 +61,7 @@ Output: `bin/Debug/net8.0-windows/accel.exe` + dependencies in separate files
 dotnet build accel.sln -c Release
 ```
 
-Output: `bin/Release/net8.0-windows/accel.exe` + dependencies
+Output: `bin/Release/net10.0-windows/accel.exe` + dependencies
 
 ### Notes
 
@@ -146,12 +151,17 @@ Open `accel.sln` in Visual Studio → Test Explorer → Run All Tests (or right-
 dotnet publish accel.csproj -r win-x64 -c Release
 ```
 
-**Output**: `bin/Release/net8.0-windows/win-x64/publish/accel.exe` (~179 MB)
+**Output**: `bin/Release/net10.0-windows/win-x64/publish/accel.exe` (~203 MB)
 
 **Properties**:
-- Self-contained (includes .NET 8 runtime, no external runtime needed on target machine)
+- Self-contained (includes .NET 10 runtime, no external runtime needed on target machine)
 - Single file (PublishSingleFile=true, IncludeNativeLibrariesForSelfExtract=true)
 - Native libraries bundled (WebView2Loader.dll, xterm.js assets, application icon)
+- Static web asset compression disabled (`CompressionEnabled=false` in `accel.csproj`). The Web
+  SDK precompresses `wwwroot` files into `.br`/`.gz` siblings by default since .NET 9, which is
+  useless here: the xterm assets are served to WebView2 through
+  `SetVirtualHostNameToFolderMapping` (a plain folder mapping, no `Content-Encoding`
+  negotiation), so those siblings can never be read and only bloat the zip and installer
 - Requires no .NET installation on end-user machine
 
 ### Using publish.ps1
@@ -174,7 +184,8 @@ from `accel.csproj`'s `<Version>`, the single source of truth also read by `App/
 
 ### Artifact Details
 
-- **Size**: ~179 MB (single executable includes .NET 8 runtime + all dependencies)
+- **Size**: ~203 MB (single executable includes .NET 10 runtime + all dependencies; the ~24 MB
+  increase over the former .NET 8 target is the larger self-contained runtime)
 - **Format**: PE32+ (x64 Windows executable)
 - **Dependencies**: None on target system (the installer's `[Setup]` section notes `accel.exe` is
   already self-contained/self-extracting, so there's no .NET-runtime prerequisite page)

@@ -5,7 +5,7 @@ flow, key abstractions, and cross-cutting design decisions. It intentionally doe
 (see `CLAUDE_DESIGN.md`), folder layout/build/test mechanics (see `CLAUDE_ENV.md`), or end-user features
 (see `README.md`).
 
-Project: `accel.csproj`, SDK `Microsoft.NET.Sdk.Web`, `net8.0-windows`, `UseWPF` + `UseWindowsForms` both
+Project: `accel.csproj`, SDK `Microsoft.NET.Sdk.Web`, `net10.0-windows`, `UseWPF` + `UseWindowsForms` both
 enabled, `win-x64`, self-contained single-file publish. It uses the Web SDK (for the in-process Kestrel
 server) even though there is no ASP.NET MVC — see the csproj comments about
 `GenerateMvcApplicationPartsAssemblyAttributes` and the implicit-usings clash between the Web and
@@ -639,7 +639,7 @@ caller removes the `PtyPidRegistry` entry.
 - **Single shared `TerminalView`/WebView2 instance**, reattached per tab, rather than one per tab — an
   explicit resource-vs-scrollback tradeoff (each WebView2 instance costs multiple OS processes + GPU
   surface).
-- **`net8.0-windows` + WPF + WinForms + Kestrel in one executable**, self-contained single-file publish.
+- **`net10.0-windows` + WPF + WinForms + Kestrel in one executable**, self-contained single-file publish.
   `InvariantGlobalization` is explicitly disabled (see `accel.csproj` comment) because WPF's text input
   pipeline needs real culture resolution for non-English keyboard layouts — a constraint that will bite
   any future attempt to shrink the publish size via invariant mode.
