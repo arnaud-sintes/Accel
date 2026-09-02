@@ -455,15 +455,31 @@ public partial class MainWindow : Window
         NativeMethods.FlashWindowEx(ref info);
     }
 
-    /// <summary>Synchronously repaints the entire window (RDW_UPDATENOW) and every child
-    /// (RDW_ALLCHILDREN) - a hard guarantee against any stale/leftover bitmap surviving an
-    /// activation change, regardless of the precise Win32 message-level cause.
-    /// Deliberately NOT RDW_FRAME (nor RDW_ERASE): this WindowStyle="None" window's client rect
-    /// already covers the entire window (WindowChrome's / this hook's WM_NCCALCSIZE handling), so
-    /// invalidating the client area reaches every visible pixel - while RDW_FRAME forces a
-    /// synchronous WM_NCPAINT that DefWindowProc answers by painting the classic grey Win32 frame
-    /// for the window's WS_THICKFRAME style over the edge pixels, visible as a grey border flash
-    /// on every focus change until WPF's next render pass paints back over it.</summary>
+    /// <summary>Synchronously repaints the window (RDW_UPDATENOW) and every same-thread child - a
+    /// hard guarantee against any stale/leftover bitmap surviving an activation change, regardless
+    /// of the precise Win32 message-level cause. Deliberately NOT RDW_FRAME (nor RDW_ERASE): this
+    /// WindowStyle="None" window's client rect already covers the entire window (WindowChrome's /
+    /// this hook's WM_NCCALCSIZE handling), so invalidating the client area reaches every visible
+    /// pixel - while RDW_FRAME forces a synchronous WM_NCPAINT that DefWindowProc answers by
+    /// painting the classic grey Win32 frame for the window's WS_THICKFRAME style over the edge
+    /// pixels, visible as a grey border flash on every focus change until WPF's next render pass
+    /// paints back over it.
+    ///
+    /// <para><b>Why not plain RDW_ALLCHILDREN (the original implementation).</b> RDW_UPDATENOW
+    /// forces the repaint by calling <c>SendMessage(WM_PAINT)</c> instead of just posting it - free
+    /// for this window's own HWND (a same-thread SendMessage is just a direct window-proc call,
+    /// never blocks), but WebView2's hosted browser windows (<see cref="Controls.TerminalView"/>,
+    /// <see cref="Controls.MarkdownPreviewView"/>) are child HWNDs owned by a different thread in
+    /// the out-of-process <c>msedgewebview2.exe</c> renderer. RDW_ALLCHILDREN would have reached
+    /// those too, and SendMessage to a cross-thread/cross-process HWND blocks the calling thread
+    /// until the target's own message loop services it - with no timeout. Reported symptom: Accel
+    /// freezes solid after the PC wakes from standby. <c>Activated</c>/<c>Deactivated</c> (this
+    /// method's callers) fire reliably on resume, and if the browser process is still suspended or
+    /// mid-restart at that exact moment, this call never returns and the whole app hangs. Fixed by
+    /// walking the child windows ourselves and only forcing the immediate repaint on the ones that
+    /// share this thread; foreign-thread children just get a plain (queued, non-blocking)
+    /// invalidate instead - they still repaint, just whenever their own message loop gets to it.</para>
+    /// </summary>
     private void ForceFullWindowRedraw()
     {
         if (_windowHandle == IntPtr.Zero)
@@ -472,14 +488,21 @@ public partial class MainWindow : Window
         }
 
         const uint RDW_INVALIDATE = 0x0001;
-        const uint RDW_ALLCHILDREN = 0x0080;
         const uint RDW_UPDATENOW = 0x0100;
 
-        NativeMethods.RedrawWindow(
+        NativeMethods.RedrawWindow(_windowHandle, IntPtr.Zero, IntPtr.Zero, RDW_INVALIDATE | RDW_UPDATENOW);
+
+        var uiThreadId = NativeMethods.GetCurrentThreadId();
+        NativeMethods.EnumChildWindows(
             _windowHandle,
-            IntPtr.Zero,
-            IntPtr.Zero,
-            RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+            (hWndChild, _) =>
+            {
+                var childThreadId = NativeMethods.GetWindowThreadProcessId(hWndChild, IntPtr.Zero);
+                var flags = childThreadId == uiThreadId ? RDW_INVALIDATE | RDW_UPDATENOW : RDW_INVALIDATE;
+                NativeMethods.RedrawWindow(hWndChild, IntPtr.Zero, IntPtr.Zero, flags);
+                return true;
+            },
+            IntPtr.Zero);
     }
 
     /// <summary>
@@ -811,6 +834,19 @@ public partial class MainWindow : Window
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool FlashWindowEx(ref FLASHWINFO pwfi);
+
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public delegate bool EnumChildWindowsCallback(IntPtr hWnd, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool EnumChildWindows(IntPtr hWndParent, EnumChildWindowsCallback lpEnumFunc, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        public static extern uint GetWindowThreadProcessId(IntPtr hWnd, IntPtr lpdwProcessId);
+
+        [DllImport("kernel32.dll")]
+        public static extern uint GetCurrentThreadId();
     }
 
     private readonly FocusedSessionStubViewModel? _panelBStub;

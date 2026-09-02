@@ -43,8 +43,16 @@ public partial class TerminalView : UserControl, IDisposable
     /// <summary>The virtual host name the vendored xterm.js assets are served under.</summary>
     public const string VirtualHostName = "accel-terminal";
 
-    private readonly TaskCompletionSource initializationTcs =
+    /// <summary>How long <see cref="AttachPtyAsync"/>/<see cref="DetachPtyAsync"/> wait for their
+    /// <c>ExecuteScriptAsync</c> call before giving up - see <see cref="WebView2ProcessRecovery"/>.
+    /// </summary>
+    private static readonly TimeSpan ScriptTimeout = TimeSpan.FromSeconds(10);
+
+    private TaskCompletionSource initializationTcs =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    private string? _attachedTabId;
+    private int _attachedWebSocketPort;
 
     public TerminalView()
     {
@@ -66,14 +74,65 @@ public partial class TerminalView : UserControl, IDisposable
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
         Loaded -= OnLoaded;
+        await CompleteInitializationAsync(initializationTcs);
+    }
+
+    /// <summary>Runs <see cref="InitializeAsync"/> and completes <paramref name="tcs"/> with its
+    /// outcome - factored out of <see cref="OnLoaded"/> so <see cref="OnProcessFailed"/> can rerun
+    /// the same sequence against a fresh <see cref="TaskCompletionSource"/> after a dead
+    /// browser/render/GPU process, without duplicating the try/catch.</summary>
+    private async Task CompleteInitializationAsync(TaskCompletionSource tcs)
+    {
         try
         {
             await InitializeAsync();
-            initializationTcs.TrySetResult();
+            tcs.TrySetResult();
         }
         catch (Exception ex)
         {
-            initializationTcs.TrySetException(ex);
+            tcs.TrySetException(ex);
+        }
+    }
+
+    /// <summary>
+    /// <c>CoreWebView2.ProcessFailed</c> handler: a resume-from-sleep GPU/display-driver reset can
+    /// kill WebView2's out-of-process browser/render/GPU process outright, with nothing else in
+    /// Accel ever detecting it - <see cref="initializationTcs"/> was a one-shot
+    /// <see cref="TaskCompletionSource"/> that, without this, stayed completed forever, so every
+    /// later <see cref="AttachPtyAsync"/>/<see cref="DetachPtyAsync"/> call would sail past
+    /// <c>await Initialization</c> and call <c>ExecuteScriptAsync</c> against a defunct
+    /// <c>CoreWebView2</c>. For a failure kind that actually requires it
+    /// (<see cref="WebView2ProcessRecovery.RequiresReinitialization"/>), replace
+    /// <see cref="initializationTcs"/> with a fresh one and rerun <see cref="InitializeAsync"/>
+    /// from scratch (new environment, new navigation); if a session was attached at the time,
+    /// re-attach it once the page is back, since the fresh navigation lost xterm.js's in-page
+    /// state along with the process.
+    /// </summary>
+    private async void OnProcessFailed(object? sender, CoreWebView2ProcessFailedEventArgs e)
+    {
+        if (!WebView2ProcessRecovery.RequiresReinitialization(e.ProcessFailedKind))
+        {
+            return;
+        }
+
+        var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        initializationTcs = tcs;
+        await CompleteInitializationAsync(tcs);
+
+        if (tcs.Task.IsCompletedSuccessfully && _attachedTabId is { } tabId)
+        {
+            try
+            {
+                await WebView2ProcessRecovery.WithTimeout(
+                    Browser.CoreWebView2.ExecuteScriptAsync(BuildAttachScript(tabId, _attachedWebSocketPort)),
+                    ScriptTimeout,
+                    "PTY re-attach after WebView2 process recovery");
+            }
+            catch
+            {
+                // Best-effort - the pty session itself is unaffected by the renderer dying; a
+                // manual tab switch (which calls AttachPtyAsync again) will retry.
+            }
         }
     }
 
@@ -114,6 +173,10 @@ public partial class TerminalView : UserControl, IDisposable
             userDataFolder: userDataFolder,
             options: environmentOptions);
         await Browser.EnsureCoreWebView2Async(environment);
+
+        // Re-subscribed on every (re-)initialization, since EnsureCoreWebView2Async can hand back
+        // a brand new CoreWebView2 instance after a prior one's process died - see OnProcessFailed.
+        Browser.CoreWebView2.ProcessFailed += OnProcessFailed;
 
         // Paste (Ctrl+V, terminal.js's handlePaste) reads the clipboard via
         // navigator.clipboard.readText(), which Chromium/WebView2 gates behind an explicit
@@ -211,7 +274,13 @@ public partial class TerminalView : UserControl, IDisposable
     {
         ArgumentException.ThrowIfNullOrEmpty(tabId);
         await Initialization;
-        await Browser.CoreWebView2.ExecuteScriptAsync(BuildAttachScript(tabId, webSocketPort));
+        await WebView2ProcessRecovery.WithTimeout(
+            Browser.CoreWebView2.ExecuteScriptAsync(BuildAttachScript(tabId, webSocketPort)),
+            ScriptTimeout,
+            $"PTY attach for tab {tabId}");
+
+        _attachedTabId = tabId;
+        _attachedWebSocketPort = webSocketPort;
 
         // terminal.js's own accelAttachPty already calls term.focus(), but that only moves focus
         // within the page - inert unless the WebView2 control itself holds actual Win32/WPF
@@ -230,7 +299,12 @@ public partial class TerminalView : UserControl, IDisposable
     public async Task DetachPtyAsync()
     {
         await Initialization;
-        await Browser.CoreWebView2.ExecuteScriptAsync("window.accelDetachPty();");
+        await WebView2ProcessRecovery.WithTimeout(
+            Browser.CoreWebView2.ExecuteScriptAsync("window.accelDetachPty();"),
+            ScriptTimeout,
+            "PTY detach");
+
+        _attachedTabId = null;
     }
 
     /// <summary>

@@ -64,6 +64,28 @@ public partial class MarkdownPreviewView : UserControl, IDisposable
 
         var environment = await CoreWebView2Environment.CreateAsync(userDataFolder: userDataFolder);
         await Browser.EnsureCoreWebView2Async(environment);
+
+        // Re-subscribed on every (re-)initialization - see OnProcessFailed.
+        Browser.CoreWebView2.ProcessFailed += OnProcessFailed;
+    }
+
+    /// <summary>
+    /// <c>CoreWebView2.ProcessFailed</c> handler - same reasoning as
+    /// <see cref="TerminalView.OnProcessFailed"/>: a resume-from-sleep GPU/display-driver reset
+    /// can kill this control's out-of-process browser/render/GPU process, and without this,
+    /// <see cref="_initialization"/> would stay completed forever, so the next
+    /// <see cref="RenderAsync"/> call would navigate a defunct <c>CoreWebView2</c>. Unlike
+    /// <see cref="TerminalView"/> there is no live session state to re-attach - dropping
+    /// <see cref="_initialization"/> is enough; the next <see cref="RenderAsync"/> call's
+    /// <see cref="Initialization"/> access re-runs <see cref="InitializeAsync"/> from scratch and
+    /// re-navigates with whatever markdown it's given at that point.
+    /// </summary>
+    private void OnProcessFailed(object? sender, CoreWebView2ProcessFailedEventArgs e)
+    {
+        if (WebView2ProcessRecovery.RequiresReinitialization(e.ProcessFailedKind))
+        {
+            _initialization = null;
+        }
     }
 
     /// <summary>

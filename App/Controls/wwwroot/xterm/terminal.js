@@ -20,6 +20,22 @@
   var resizeObserver = null;
   var webglActive = false;
 
+  // Reconnect state for the loopback PTY WebSocket. A resume-from-standby cycle commonly drops
+  // this socket (the loopback stack resets, or Kestrel's own idle/keep-alive timeout fires while
+  // the process was suspended) with no corresponding accelDetachPty call - previously this left
+  // the terminal silently inert (socket null forever, every keystroke dropped by
+  // handleTerminalData's readyState guard, no code path ever called accelAttachPty again unless
+  // the user switched to a different tab and back, which TabsViewModel's SelectedTab no-op on an
+  // unchanged value means never happens for a single open tab). lastTabId/lastPort remember the
+  // most recent accelAttachPty call so a dropped connection can be re-established with the same
+  // tabId/port; detachRequested distinguishes that case (reconnect) from an actual
+  // accelDetachPty (don't reconnect).
+  var lastTabId = null;
+  var lastPort = null;
+  var detachRequested = false;
+  var reconnectTimer = null;
+  var reconnectAttempts = 0;
+
   // Diagnostic accumulator, read back via CoreWebView2.ExecuteScriptAsync by
   // Program.cs's `terminal-e2e-smoke-test` verb to prove real bytes from a real child arrived
   // over the wire. Not used by any production code path.
@@ -286,6 +302,16 @@
 
   function handleTerminalData(data) {
     if (!socket || socket.readyState !== WebSocket.OPEN) {
+      // The user is actively trying to type into what looks like a dead terminal - if a
+      // reconnect is already scheduled (backoff timer pending), jump it now instead of making
+      // them wait out the delay. This keystroke itself is still dropped (no safe way to buffer it
+      // across a socket that doesn't exist yet), same as before.
+      if (!detachRequested && lastTabId && reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+        connect(lastTabId, lastPort);
+      }
+
       return;
     }
 
@@ -319,6 +345,25 @@
     // keystrokes go nowhere until they click into panel D themselves.
     term.focus();
 
+    detachRequested = false;
+    reconnectAttempts = 0;
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+
+    window.accelReceivedText = "";
+    connect(tabId, port);
+  };
+
+  // Opens (or re-opens, on an unplanned drop - see scheduleReconnect) the PTY WebSocket for
+  // tabId/port. Split out of accelAttachPty so a reconnect after a network-level drop (no
+  // explicit accelDetachPty, no fresh accelAttachPty call from the host) can reuse the exact same
+  // connection logic instead of duplicating it.
+  function connect(tabId, port) {
+    lastTabId = tabId;
+    lastPort = port;
+
     if (socket) {
       try {
         socket.close();
@@ -326,8 +371,6 @@
         // Best-effort close of a previous attach.
       }
     }
-
-    window.accelReceivedText = "";
 
     // Deliberately a REAL loopback address, not the virtual host name: CoreWebView2.
     // SetVirtualHostNameToFolderMapping (see TerminalView.xaml.cs) only intercepts document/
@@ -356,6 +399,7 @@
 
     mySocket.onopen = function () {
       if (socket === mySocket) {
+        reconnectAttempts = 0;
         sendResize();
       }
     };
@@ -376,18 +420,46 @@
     mySocket.onclose = function () {
       if (socket === mySocket) {
         socket = null;
+        if (!detachRequested) {
+          scheduleReconnect();
+        }
       }
     };
 
     mySocket.onerror = function () {
       // Cleanup happens in onclose; nothing else actionable client-side today.
     };
-  };
+  }
+
+  // Retries the same tabId/port after an unplanned socket drop (standby/resume being the common
+  // case - see the reconnect-state comment near the top of this file), with capped exponential
+  // backoff (0.5s, 1s, 2s, 4s, then flat 5s) so a PC that just woke up and is still bringing its
+  // network stack back doesn't get hammered with immediate retries.
+  function scheduleReconnect() {
+    if (reconnectTimer || !lastTabId) {
+      return;
+    }
+
+    var delay = Math.min(500 * Math.pow(2, reconnectAttempts), 5000);
+    reconnectAttempts++;
+    reconnectTimer = setTimeout(function () {
+      reconnectTimer = null;
+      connect(lastTabId, lastPort);
+    }, delay);
+  }
 
   // Called from C# (TerminalView.DetachPtyAsync) when panel C has no tab left to show (the last
   // open session's tab just closed) - closes any live socket and wipes the screen buffer so panel
   // D goes back to a blank black surface instead of freezing on the closed session's last frame.
   window.accelDetachPty = function () {
+    detachRequested = true;
+    lastTabId = null;
+    lastPort = null;
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+
     if (socket) {
       try {
         socket.close();
