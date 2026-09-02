@@ -24,6 +24,24 @@ xterm-addon-webgl
   License:  MIT
   Source:   https://www.npmjs.com/package/@xterm/addon-webgl/v/0.18.0
 
+  Local patch (TERMINAL_RENDERER_AUDIT.md Step 3, applied on top of the vendored 0.18.0 bundle):
+  WebglRenderer._updateModel's per-row loop captures `lastBg` (the previous cell's resolved
+  background, used by GlyphRenderer._updateCell to decide whether an overhanging glyph needs its
+  left edge clipped - see the `bg !== lastBg` check there) before resolving the *current* cell's
+  color, so column 0 of every row special-cased itself: `0===p&&(s=this._cellColorResolver.result.bg)`
+  re-read the exact same not-yet-updated value the line above it had just read, a no-op. In effect
+  column 0 always inherited the PREVIOUS ROW's last cell's resolved bg as its "left neighbour" -
+  rows are not horizontally adjacent, so this is never the real left neighbour, and can wrongly
+  clip (or wrongly skip clipping) a column-0 glyph's overhang based on unrelated data. Confirmed
+  still present, byte-for-byte the same dead branch, in xterm.js's `master` branch as of this
+  patch (github.com/xtermjs/xterm.js, addons/addon-webgl/src/WebglRenderer.ts) - not yet fixed
+  upstream, so this is a local patch rather than an upgrade. Patched to `0===p&&(s=-1)`: -1 can
+  never equal a real resolved bg (those are non-negative packed attribute values, built from
+  `50331648|rgb&16777215`-shaped bitwise-OR expressions - see CellColorResolver.resolve/the cursor
+  override in WebglRenderer._updateModel), so column 0 now always compares as "different from any
+  real left neighbour" and clips its overhang consistently, instead of accidentally matching (or
+  mismatching) a previous row's leftover color.
+
 Note on version choice: @xterm/xterm 6.0.0 (latest at the time of writing) dropped the classic
 lib/xterm.js UMD bundle from its published package (CJS/ESM module entry points only), which
 does not work as a plain <script> tag inside the offline-served WebView2 page below. 5.5.0 is

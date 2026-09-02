@@ -20,6 +20,17 @@
   var resizeObserver = null;
   var webglActive = false;
 
+  // TERMINAL_RENDERER_AUDIT.md Step 2: today nothing distinguished "WebGL addon never attempted"
+  // from "WebGL context failed/was lost" - both just left webglActive false forever. This retry
+  // state turns a context-loss event from a one-way, permanent trip to the DOM fallback (the
+  // reported "column-0 ghosting... goes back to normal only after opening another tab" symptom)
+  // into a capped, backed-off series of re-attempts, settling into DOM only once those are
+  // exhausted - and logs that final state clearly (see logTerminalEvent) instead of silently.
+  var webglRetryAttempts = 0;
+  var webglRetryTimer = null;
+  var MAX_WEBGL_RETRIES = 3;
+  var WEBGL_RETRY_BASE_DELAY_MS = 1000;
+
   // Reconnect state for the loopback PTY WebSocket. A resume-from-standby cycle commonly drops
   // this socket (the loopback stack resets, or Kestrel's own idle/keep-alive timeout fires while
   // the process was suspended) with no corresponding accelDetachPty call - previously this left
@@ -225,6 +236,7 @@
     // Guarded on the global existing at all so a missing/failed-to-load addon-webgl.js script
     // degrades to the DOM renderer instead of throwing out of createTerminal().
     if (typeof WebglAddon === "undefined") {
+      logTerminalEvent("warn", "addon-webgl.js did not load; staying on the DOM renderer");
       return;
     }
 
@@ -232,19 +244,82 @@
       var webglAddon = new WebglAddon.WebglAddon();
 
       // Per the addon's own README: the browser can revoke the WebGL context at any time (GPU
-      // reset, driver update, too many live contexts). Disposing the addon on that event is the
-      // documented recovery - xterm transparently falls back to the DOM renderer rather than
-      // freezing on the last WebGL frame.
+      // reset, driver update, too many live contexts). This used to unconditionally dispose the
+      // addon and never look back - a live GPU driver hiccup (dock/undock, DPI change, resume
+      // from standby) then meant a PERMANENT DOM-renderer fallback for the rest of the app run,
+      // which is exactly the "sometimes... goes back to normal only after opening another
+      // session tab" symptom in TERMINAL_RENDERER_AUDIT.md (the "another tab" part just happened
+      // to incidentally trigger the DOM renderer's own repaint-on-focus, not a real fix). Retry
+      // instead of a one-way dispose, capped so a genuinely dead GPU still settles into DOM.
       webglAddon.onContextLoss(function () {
-        webglAddon.dispose();
+        logTerminalEvent("warn", "WebGL context lost");
+        try {
+          webglAddon.dispose();
+        } catch (disposeError) {
+          // Best-effort - the addon may already be torn down by the context-loss event itself.
+        }
         webglActive = false;
+        retryWebglAfterContextLoss();
       });
 
       term.loadAddon(webglAddon);
       webglActive = true;
+      webglRetryAttempts = 0;
+      logTerminalEvent("log", "WebGL renderer active");
     } catch (e) {
       // WebGL context creation failed (e.g. GPU/driver blocklisted, remote session without GPU) -
-      // stay on the DOM renderer, which is functionally complete, just artifact-prone.
+      // stay on the DOM renderer, which is functionally complete, just artifact-prone. Previously
+      // this catch was empty, so a failed init was indistinguishable from "never attempted" and
+      // never logged - see TERMINAL_RENDERER_AUDIT.md Step 2.
+      webglActive = false;
+      logTerminalEvent("error", "WebGL renderer init failed, staying on the DOM renderer: " + (e && e.message));
+    }
+  }
+
+  // Re-attempts WebGL after a context-loss event, with linear backoff (1s, 2s, 3s), instead of
+  // the previous permanent fallback. Only settles into DOM once MAX_WEBGL_RETRIES is exhausted,
+  // logging that terminal state clearly so it is field-diagnosable (window.accelRendererType()
+  // reads back "dom" from that point on, for this app run).
+  function retryWebglAfterContextLoss() {
+    if (webglRetryTimer) {
+      return;
+    }
+
+    if (webglRetryAttempts >= MAX_WEBGL_RETRIES) {
+      logTerminalEvent("error",
+        "WebGL context-loss retries exhausted (" + MAX_WEBGL_RETRIES + "); staying on the DOM " +
+        "renderer for the rest of this session");
+      return;
+    }
+
+    webglRetryAttempts++;
+    var delay = WEBGL_RETRY_BASE_DELAY_MS * webglRetryAttempts;
+    logTerminalEvent("warn",
+      "retrying WebGL renderer in " + delay + "ms (attempt " + webglRetryAttempts + "/" + MAX_WEBGL_RETRIES + ")");
+    webglRetryTimer = setTimeout(function () {
+      webglRetryTimer = null;
+      activateWebglRenderer();
+    }, delay);
+  }
+
+  // TERMINAL_RENDERER_AUDIT.md Step 1: routes renderer-state messages both to the page's own
+  // DevTools console (unchanged, for local debugging) and, best-effort, to Accel's host process
+  // via the WebView2 postMessage bridge (see TerminalView.xaml.cs's WebMessageReceived handler),
+  // so a field report of "sometimes, not systematic" ghosting can be confirmed from Accel's own
+  // logs instead of relying on the user noticing/reproducing it live under DevTools.
+  function logTerminalEvent(level, message) {
+    try {
+      (console[level] || console.log).call(console, "[accel-terminal] " + message);
+    } catch (consoleError) {
+      // Best-effort - DevTools console should always exist, but never let logging crash the terminal.
+    }
+
+    try {
+      if (window.chrome && window.chrome.webview) {
+        window.chrome.webview.postMessage({ source: "terminal-renderer", level: level, message: message });
+      }
+    } catch (bridgeError) {
+      // Best-effort - e.g. running this page outside a WebView2 host during local development.
     }
   }
 
@@ -351,6 +426,21 @@
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
     }
+
+    // Belt-and-braces (TERMINAL_RENDERER_AUDIT.md Step 2): forces a full repaint of every row on
+    // every tab attach. While WebGL is active this is a harmless no-op (it always redraws the
+    // whole frame anyway); while in a DOM-fallback state, this turns today's *incidental* self-heal
+    // (some other repaint path happening to scrub the ghost pixels) into a *guaranteed* one, without
+    // waiting on the real WebGL retry fix above.
+    try {
+      term.refresh(0, term.rows - 1);
+    } catch (refreshError) {
+      // Best-effort - never block attach on a diagnostic/cosmetic repaint.
+    }
+
+    logTerminalEvent("log",
+      "attach tab=" + tabId + " renderer=" + window.accelRendererType() +
+      " cellMetrics=" + JSON.stringify(window.accelCellMetrics()));
 
     window.accelReceivedText = "";
     connect(tabId, port);

@@ -194,6 +194,33 @@ public partial class TerminalView : UserControl, IDisposable
             }
         };
 
+        // TERMINAL_RENDERER_AUDIT.md Step 1: terminal.js's logTerminalEvent posts renderer-state
+        // messages (WebGL active/failed/context-lost, cell metrics on attach) over this bridge so
+        // they land in Accel's own console output instead of only being visible in a live DevTools
+        // session - turning "sometimes, not systematic" ghosting reports into a yes/no field
+        // signal (a "dom" renderer report at/near the time an artifact was seen).
+        Browser.CoreWebView2.WebMessageReceived += (_, e) =>
+        {
+            try
+            {
+                using var message = JsonDocument.Parse(e.WebMessageAsJson);
+                var root = message.RootElement;
+                if (!root.TryGetProperty("source", out var source) ||
+                    source.GetString() != "terminal-renderer")
+                {
+                    return;
+                }
+
+                var level = root.TryGetProperty("level", out var levelProp) ? levelProp.GetString() : "log";
+                var text = root.TryGetProperty("message", out var messageProp) ? messageProp.GetString() : null;
+                Console.WriteLine($"[TerminalRenderer:{level}] {text}");
+            }
+            catch (JsonException)
+            {
+                // Best-effort - an unrecognized/malformed web message is not actionable here.
+            }
+        };
+
         var assetsRoot = XtermAssetsFolder();
         Browser.CoreWebView2.SetVirtualHostNameToFolderMapping(
             VirtualHostName,
