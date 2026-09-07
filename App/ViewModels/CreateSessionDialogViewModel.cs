@@ -4,6 +4,7 @@ using System.Linq;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Accel.App.Services;
+using Accel.Settings;
 using Accel.Metrics;
 using Accel.Orchestration;
 
@@ -33,6 +34,7 @@ public sealed partial class CreateSessionDialogViewModel : ObservableObject
     private readonly Func<IReadOnlyList<string>, string?, PtyLaunchSpec> _specBuilder;
     private readonly Func<PtyLaunchSpec, PtySession> _sessionStarter;
     private readonly IFolderPickerService _folderPicker;
+    private readonly ModelCatalog _catalog;
 
     /// <summary>
     /// Shown next to the extra-args field, and read by the dialog's code-behind to set the warning
@@ -73,45 +75,114 @@ public sealed partial class CreateSessionDialogViewModel : ObservableObject
     /// starts wherever the user is already looking rather than defaulting to some unrelated directory.
     /// Still user-editable via <see cref="BrowseWorkingDirectoryCommand"/> or direct text entry before
     /// confirming.</param>
+    /// <param name="catalog">The models to offer and their per-model effort ladders. Defaults to
+    /// <see cref="ModelCatalog.BuiltIn"/>; production callers pass
+    /// <c>ModelCatalogService.Current</c>, which is the lineup this machine's `claude` actually
+    /// reported.</param>
+    /// <param name="userDefaults">The user's own <c>settings.json</c> model/effort preference, used as
+    /// the initial selection. Defaults to <see cref="UserModelDefaults.None"/>, which falls back to
+    /// the catalog's first entry and that model's middle effort tier.</param>
     public CreateSessionDialogViewModel(
         Func<Guid>? guidFactory = null,
         Func<IReadOnlyList<string>, string?, PtyLaunchSpec>? specBuilder = null,
         Func<PtyLaunchSpec, PtySession>? sessionStarter = null,
         IFolderPickerService? folderPicker = null,
-        string? initialWorkingDirectory = null)
+        string? initialWorkingDirectory = null,
+        ModelCatalog? catalog = null,
+        UserModelDefaults? userDefaults = null)
     {
         _guidFactory = guidFactory ?? Guid.NewGuid;
         _specBuilder = specBuilder ?? DefaultSpecBuilder;
         _sessionStarter = sessionStarter ?? (spec => PtySession.Start(spec));
         _folderPicker = folderPicker ?? new WinFormsFolderPickerService();
+        _catalog = catalog ?? ModelCatalog.BuiltIn;
 
-        _selectedModelFamily = ModelFamilies.FirstOrDefault(f => f == "Sonnet") ?? ModelFamilies[0];
-        _selectedEffortLevel = EffortLevels.FirstOrDefault(l => l == "medium") ?? EffortLevels[0];
+        var defaults = userDefaults ?? UserModelDefaults.None;
+
+        // The user's configured model wins when the catalog actually offers it; otherwise the first
+        // row. Accel used to hardcode "Sonnet"/"medium" here, which silently overrode whatever the
+        // user had set in settings.json every time they created a session.
+        _selectedModelFamily =
+            _catalog.Find(defaults.Model)?.CliValue
+            ?? _catalog.ResolveDefaultModel()
+            ?? string.Empty;
+
+        _selectedEffortLevel = ResolveInitialEffort(_selectedModelFamily, defaults.EffortLevel);
         _workingDirectory = initialWorkingDirectory;
     }
 
-    /// <summary>Model-family vocabulary - exactly <see cref="ModelBadgeTable.Families"/>, the same
-    /// table panel A's badges resolve against.</summary>
-    public IReadOnlyList<string> ModelFamilies => ModelBadgeTable.Families;
+    /// <summary>The catalog this dialog is offering - see <see cref="ModelCatalog"/>.</summary>
+    public ModelCatalog Catalog => _catalog;
 
-    /// <summary>What the dialog's model picker actually displays: the same families as
-    /// <see cref="ModelFamilies"/>, ordered by ascending complexity (Haiku, Sonnet, Opus, Fable),
-    /// each paired with a version-specific label (e.g. "Haiku 4.5") - see
-    /// <see cref="ModelBadgeTable.FamilyDisplayNames"/>.</summary>
-    public IReadOnlyList<ModelFamilyOption> ModelOptions => ModelBadgeTable.FamilyDisplayNames;
+    /// <summary>Model-family vocabulary: the <c>--model</c> value of every catalog entry.</summary>
+    public IReadOnlyList<string> ModelFamilies => _catalog.Entries.Select(entry => entry.CliValue).ToArray();
 
-    /// <summary>Effort vocabulary - exactly <see cref="EffortBarLevel.Levels"/>, the same table
-    /// panel A's effort bars resolve against.</summary>
-    public IReadOnlyList<string> EffortLevels => EffortBarLevel.Levels;
+    /// <summary>What the dialog's model picker displays - the catalog's entries, each carrying the
+    /// <c>--model</c> value, the version-specific label, and (when discovered) the description the
+    /// CLI's own picker shows.</summary>
+    public IReadOnlyList<ModelCatalogEntry> ModelOptions => _catalog.Entries;
 
-    /// <summary>Whether <see cref="SelectedModelFamily"/> recognizes an effort level at all - per
-    /// <see cref="ModelEffortTable"/>, false only for Haiku. The view binds this to the Effort
-    /// field's visibility/enabled state, and <see cref="BuildArguments"/> uses it to omit
-    /// <c>--effort</c> entirely for a family that doesn't support it, regardless of whatever value
+    /// <summary>
+    /// Provenance for the model picker's tooltip - whether this lineup was read from Claude Code or
+    /// is Accel's built-in guess. Shown rather than hidden because the two are not equally
+    /// trustworthy and an unexpected lineup is otherwise unexplainable to the user.
+    /// </summary>
+    public string CatalogSourceDescription => _catalog.DescribeSource();
+
+    /// <summary>
+    /// The effort ladder for the <i>currently selected</i> model, ascending - not one shared
+    /// vocabulary. Empty when the selected model has no effort control at all (Haiku), which is what
+    /// <see cref="EffortSupported"/> reports.
+    /// </summary>
+    public IReadOnlyList<string> EffortLevels => ModelEffortTable.TiersFor(SelectedModelFamily, _catalog);
+
+    /// <summary>Whether <see cref="SelectedModelFamily"/> recognizes an effort level at all. The view
+    /// binds this to the Effort field's enabled state, and <see cref="BuildArguments"/> uses it to
+    /// omit <c>--effort</c> entirely for a model that doesn't support it, regardless of whatever value
     /// <see cref="SelectedEffortLevel"/> was left at from a previous model selection.</summary>
-    public bool EffortSupported => ModelEffortTable.SupportsEffort(SelectedModelFamily);
+    public bool EffortSupported => EffortLevels.Count > 0;
 
-    partial void OnSelectedModelFamilyChanged(string value) => OnPropertyChanged(nameof(EffortSupported));
+    partial void OnSelectedModelFamilyChanged(string value)
+    {
+        // The ladder is per-model, so switching models can invalidate the current selection - a model
+        // whose ladder stops at "high" must not be left holding "ultracode" from the previous one.
+        OnPropertyChanged(nameof(EffortLevels));
+        OnPropertyChanged(nameof(EffortSupported));
+
+        var tiers = EffortLevels;
+        if (tiers.Count > 0 && !tiers.Contains(SelectedEffortLevel, StringComparer.OrdinalIgnoreCase))
+        {
+            SelectedEffortLevel = _catalog.Find(value)?.DefaultEffortTier ?? tiers[tiers.Count / 2];
+        }
+    }
+
+    /// <summary>
+    /// The initial effort selection: the user's configured tier when the starting model actually
+    /// offers it, otherwise that model's middle tier. Never a tier outside the model's own ladder -
+    /// passing one would just be clamped silently by the CLI, which is exactly the invisible
+    /// mismatch this whole catalog exists to remove.
+    /// </summary>
+    private string ResolveInitialEffort(string model, string? configured)
+    {
+        var tiers = ModelEffortTable.TiersFor(model, _catalog);
+        if (tiers.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        if (!string.IsNullOrWhiteSpace(configured))
+        {
+            foreach (var tier in tiers)
+            {
+                if (string.Equals(tier, configured.Trim(), StringComparison.OrdinalIgnoreCase))
+                {
+                    return tier;
+                }
+            }
+        }
+
+        return _catalog.Find(model)?.DefaultEffortTier ?? tiers[tiers.Count / 2];
+    }
 
     /// <summary>Combo-box source for <see cref="SelectedPermissionModeChoice"/> - see <see cref="CommonCliFlags"/>.</summary>
     public IReadOnlyList<PermissionModeChoice> PermissionModeChoices => CommonCliFlags.PermissionModeChoices;

@@ -19,7 +19,7 @@ Native Windows C# tool that monitors Claude Code local session activity. Running
 dotnet build accel.sln
 ```
 
-This builds the main `accel` project and the `accel.Tests` project (xUnit, 1289 tests).
+This builds the main `accel` project and the `accel.Tests` project (xUnit, 1403 tests).
 
 ## Publishing
 
@@ -50,7 +50,7 @@ The exe requires no .NET runtime on the target machine — it includes everythin
 - **`accel statusline --port <n>`** — **Internal verb, invoked by Claude Code itself as a short-lived child process.** Reads the statusline payload from stdin, posts it to the server, and re-prints the chained original status line. Always exits 0.
 - **`accel subagent-statusline --port <n>`** — **Internal verb, invoked by Claude Code itself as a short-lived child process.** Reads the subagent status array from stdin and posts it to the server without printing.
 
-No other user-facing verbs are recognized (there is no separate `run`/`install`/`ui`/`status`/`sessions` anymore). A handful of raw-string-matched dev-only smoke/stress-test verbs also exist (`pty-smoke-test`, `pty-session-smoke-test`, `pty-registry-stress-test`, `pty-shutdown-orphan-test`, `terminal-e2e-smoke-test`, `tabs-e2e-smoke-test`) — not part of the documented surface, see `CLAUDE_ARCHITECTURE.md`.
+No other user-facing verbs are recognized (there is no separate `run`/`install`/`ui`/`status`/`sessions` anymore). A handful of raw-string-matched dev-only smoke/stress-test verbs also exist (`pty-smoke-test`, `pty-session-smoke-test`, `pty-registry-stress-test`, `pty-shutdown-orphan-test`, `terminal-e2e-smoke-test`, `tabs-e2e-smoke-test`, `model-picker-probe`) — not part of the documented surface, see `CLAUDE_ARCHITECTURE.md`.
 
 ## How It Works
 
@@ -127,7 +127,9 @@ The monitor window is split into five panels (`A`–`E`), each bound to its own 
 
   **Merge conflicts** get their own group at the top of the list, plus a banner showing which operation the repo is stopped in the middle of (merge/rebase/cherry-pick/revert) with Continue and Abort buttons. Double-clicking a conflicted row opens the same side-by-side view with the incoming side on the left and the marker-bearing working-tree file, editable, on the right — conflict regions highlighted — so a conflict is resolved by editing and saving in place. Per-row context menu: Accept ours, Accept theirs, or Mark resolved (which warns if the file still contains conflict markers).
 
-- **"Create session…" dialog**: opened from Panel A's root context menu. Lets you set a display name, model, effort, permission mode, working directory, and (advanced/unvalidated) extra CLI arguments before spawning the PTY session. Effort is a 5-tier scale (low/medium/high/xhigh/max) gated per model family — Haiku has no reasoning-effort knob at all, so the control hides/disables itself rather than offering a setting the CLI would reject.
+- **"Create session…" dialog**: opened from Panel A's root context menu. Lets you set a display name, model, effort, permission mode, working directory, and (advanced/unvalidated) extra CLI arguments before spawning the PTY session. The model list and each model's effort tiers are **read from Claude Code itself** rather than hardcoded — Accel opens its `/model` picker in a headless PTY, so the dialog offers exactly the models your account actually has (including custom `modelPicker` rows) with each one's real ladder (`low/medium/high/xhigh/max/ultracode` for current frontier models; Haiku has no reasoning-effort knob at all, so the control disables itself rather than offering a setting the CLI would silently clamp). The initial selection comes from your own `settings.json` `model`/`effortLevel`.
+
+  Discovery runs **once per Claude Code update**, behind a skippable modal "please wait" (~15s) during startup. It blocks deliberately: the catalog feeds this dialog's two pickers, so creating a session moments after launch would otherwise silently get the built-in fallback list. When the cached catalog still matches the installed `claude.exe` — every other start — nothing runs and no dialog appears. It never costs an API call, and if it fails for any reason (not logged in, an untrusted folder, a picker redesign) the dialog falls back to Accel's built-in list and says so in the picker's tooltip.
 
 - **Panel C — Tab Strip** (`TabsViewModel`, top of the center column) and **Panel D — Terminal** (`TerminalView`, below the tab strip): one tab per open PTY session; double-clicking a tab renames it; selecting a tab focuses it across the whole window (Panel A highlights the matching session, Panel D reattaches its terminal — a single shared WebView2/xterm.js instance — to it over a `ws://…/pty/{tabId}` connection, Panel E rebuilds around it). Tabs also host plain shell sessions (from a root's *Open terminal here…*) and file/diff viewers, not just `claude` sessions.
 
@@ -147,7 +149,7 @@ The monitor window is split into five panels (`A`–`E`), each bound to its own 
   | `Alt+C` / `Alt+W` | Toggle match case / whole word |
   | `Esc` | Close the find bar |
 
-- **Panel E — Agent Graph** (`AgentGraphViewModel`, bottom of the center column): a left-to-right node graph of the focused session's currently running sub-agents (parent first, bezier connectors), each card showing model badge and an `EffortBarsControl` radial gauge for its effort level (five tiers: low/medium/high/xhigh/max). It renders an explicit empty state ("no session focused" / "no longer in the tree") rather than a blank pane when there is nothing to draw.
+- **Panel E — Agent Graph** (`AgentGraphViewModel`, bottom of the center column): a left-to-right node graph of the focused session's currently running sub-agents (parent first, bezier connectors), each card showing model badge and an `EffortBarsControl` moon-phase gauge for its effort level (six tiers: low/medium/high/xhigh/max/ultracode). It renders an explicit empty state ("no session focused" / "no longer in the tree") rather than a blank pane when there is nothing to draw.
 
 ## Example Usage
 
@@ -171,4 +173,4 @@ accel doctor
 dotnet test Accel.sln
 ```
 
-Runs 1289 unit tests covering settings merge/diff, hook registration, state management, CLI parsing, session/folder tree enumeration, the file/git/MCP-Skills panels, git actions and merge-conflict handling, filesystem create/rename/move/delete planning, document search, file-edit buffers and encoding/line-ending round-trips, and per-model effort gating.
+Runs 1403 unit tests covering settings merge/diff, hook registration, state management, CLI parsing, session/folder tree enumeration, the file/git/MCP-Skills panels, git actions and merge-conflict handling, filesystem create/rename/move/delete planning, document search, file-edit buffers and encoding/line-ending round-trips, and per-model effort gating, plus model/effort catalog discovery (terminal-screen emulation, picker parsing, cache invalidation).

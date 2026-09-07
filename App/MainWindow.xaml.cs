@@ -40,6 +40,16 @@ public partial class MainWindow : Window
     {
     }
 
+    /// <summary>
+    /// The model/effort catalog handed to every "Create session" dialog this window opens. A settable
+    /// property rather than another constructor parameter: this window already has eight chained
+    /// constructor overloads, and a ninth parameter threaded through all of them would be pure
+    /// ceremony for something only one call site reads. Set by <c>Program.cs</c>'s composition root;
+    /// null in tests and in the designer, where the dialog falls back to
+    /// <see cref="Accel.Metrics.ModelCatalog.BuiltIn"/> on its own.
+    /// </summary>
+    public Accel.App.Services.ModelCatalogService? ModelCatalog { get; set; }
+
     public MainWindow(RootsPanelViewModel? rootsPanel)
         : this(rootsPanel, null, 0)
     {
@@ -958,7 +968,13 @@ public partial class MainWindow : Window
         // "(unattributed)" root's label or a root folder that no longer exists, neither of which is a
         // directory anyone can start a session in (see RootsPanelViewModel.ResolveWorkingDirectoryFor).
         initialWorkingDirectory ??= RootsPanel?.SelectedWorkingDirectory;
-        var viewModel = new CreateSessionDialogViewModel(initialWorkingDirectory: initialWorkingDirectory);
+        // The catalog is read at open time, not cached per window: a background discovery may have
+        // replaced it since the last time this dialog was opened, and the dialog is short-lived enough
+        // that reading the current value here is simpler than subscribing to CatalogChanged.
+        var viewModel = new CreateSessionDialogViewModel(
+            initialWorkingDirectory: initialWorkingDirectory,
+            catalog: ModelCatalog?.Current,
+            userDefaults: ModelCatalog?.UserDefaults);
         var dialog = new CreateSessionDialog(viewModel) { Owner = this };
         dialog.ShowDialog();
 

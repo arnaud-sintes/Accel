@@ -87,6 +87,17 @@ if (args.Length > 0 && string.Equals(args[0], "tabs-e2e-smoke-test", StringCompa
     return Accel.App.TabsE2ESmokeTest.Run(Console.Out);
 }
 
+// Hidden dev-only verb, same placement rules as the smoke tests above. Unlike them it launches a
+// real `claude.exe`, because the thing being exercised is Claude Code's own interactive /model
+// picker - the only surface that reports the model lineup and each model's effort ladder. It never
+// submits a prompt (no API cost), never writes the catalog cache, and only sends arrow keys and
+// Escape. Optional working directory: `model-picker-probe [dir]` (default: current), which must be
+// a directory Claude Code already trusts.
+if (args.Length > 0 && string.Equals(args[0], "model-picker-probe", StringComparison.Ordinal))
+{
+    return Accel.Orchestration.ModelPickerProbeSmokeTest.Run(Console.Out, args.Length > 1 ? args[1] : null);
+}
+
 // Combined-app entry point (post "one combined app" refactor): running `accel` with no
 // arguments installs the hooks (best-effort - a refusal is printed but never aborts startup),
 // starts the Kestrel event server in-process, and opens the WPF shell on its own STA thread wired
@@ -273,12 +284,45 @@ static async Task<int> RunCombinedAsync(int port, string? dumpRawDir, bool verbo
         // SessionTreeDto (mcp_usage/skill_usage), so it does no I/O of its own.
         var mcpSkillsPanel = new Accel.App.ViewModels.McpSkillsPanelViewModel(feed, dispatcher, selection);
 
+        // The model/effort catalog behind the "Create session" dialog's two pickers. Constructed here
+        // so the whole app shares one instance (and one cache read), and handed to the window rather
+        // than passed through its ctor chain - see MainWindow.ModelCatalog.
+        //
+        // Its constructor is synchronous and does no process work: it reads the on-disk cache, or
+        // falls back to ModelCatalog.BuiltIn. The expensive part - actually asking Claude Code what it
+        // offers, which drives a real TUI for ~15s - runs only when the cached catalog no longer
+        // matches the installed claude.exe, so a normal start does nothing at all here.
+        var modelCatalog = new Accel.App.Services.ModelCatalogService();
         mainWindow = new Accel.App.MainWindow(rootsPanel, server.PtySessions, port, tabs, sessionRegistry, selection, agentGraph, filesPanel, gitPanel, mcpSkillsPanel);
-        mainWindow.Loaded += (_, _) => rootsPanel.Start();
+        mainWindow.ModelCatalog = modelCatalog;
+        mainWindow.Loaded += (_, _) =>
+        {
+            rootsPanel.Start();
+
+            // Blocking, behind a modal "please wait", rather than a background refresh: the catalog
+            // feeds the Create-session dialog's model and effort pickers, and a user who opens that
+            // dialog in the first seconds after startup would otherwise be handed the stale built-in
+            // list while discovery was still running - the exact case the catalog exists to fix. The
+            // dialog appears only when there is something to learn (see RunIfNeeded), so this is one
+            // ~15s wait per Claude Code upgrade, not per start, and it is skippable.
+            //
+            // A configured root, never a temp directory: discovery has to run somewhere Claude Code
+            // already trusts, or it lands on the folder-trust gate and gives up (see
+            // ModelCatalogProbe.DiscoverAsync).
+            Accel.App.ModelCatalogUpdateDialog.RunIfNeeded(
+                mainWindow,
+                modelCatalog,
+                Accel.App.Services.ModelCatalogService.ResolveProbeDirectory(
+                    Accel.Server.RootFoldersConfig.Load()));
+        };
         mainWindow.Closed += (_, _) =>
         {
             // Disposed immediately before rootsPanel.Dispose() - before feed.Dispose() - so the panel
             // unhooks from a feed that still exists.
+            // Cancels an in-flight catalog discovery: its `claude` child is already owned by that
+            // session's Job Object, so this only stops the awaiting task, but leaving it running past
+            // window close would keep a PTY alive for no consumer.
+            modelCatalog.Dispose();
             agentGraph.Dispose();
             filesPanel.FolderExpanded -= gitPanel.OnFilesPanelFolderExpanded;
             filesPanel.FolderCollapsed -= gitPanel.OnFilesPanelFolderCollapsed;

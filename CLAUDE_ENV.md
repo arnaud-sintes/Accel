@@ -117,6 +117,7 @@ Smoke tests live alongside source code (not in tests/) and validate real OS reso
 | `Orchestration/PtyShutdownReconcileSmokeTest.cs` | `pty-shutdown-orphan-test` | App shutdown grace paths (Dispose, console control, ProcessExit) + orphan reconciliation |
 | `App/TerminalE2ESmokeTest.cs` | `terminal-e2e-smoke-test` | WebView2 terminal panel wired to PtySession over /pty/{tabId} WebSocket on real Kestrel server |
 | `App/TabsE2ESmokeTest.cs` | `tabs-e2e-smoke-test` | Real XAML tab strip, ISessionSelectionService, panel D reattach, real child teardown |
+| `Orchestration/ModelPickerProbeSmokeTest.cs` | `model-picker-probe [dir]` | Model/effort catalog discovery against Claude Code's live `/model` picker. The only harness that launches `claude.exe`; submits no prompt (no API cost), sends only arrow keys/Escape, writes no cache. `dir` must be a folder Claude Code already trusts (default: current) |
 
 **How to run** (manually, not via `dotnet test`):
 
@@ -132,6 +133,9 @@ accel.exe pty-shutdown-orphan-test
 
 # Run terminal WebView2 E2E test
 accel.exe terminal-e2e-smoke-test
+
+# Probe the live /model picker for the model/effort catalog
+accel.exe model-picker-probe
 
 # Run tab strip XAML/binding E2E test
 accel.exe tabs-e2e-smoke-test
@@ -245,6 +249,25 @@ If a legacy `folder.json` (2 or 3) has content while the durable file is missing
 `ResolveWritePath()` call migrates it into the durable file (upgrading it to the v2 object shape).
 
 If not found or malformed, treated as an empty config (no roots, no session overrides).
+
+### Model/Effort Catalog Cache
+
+`%USERPROFILE%\.claude\accel-model-catalog.json` (`ModelCatalogCache.DefaultPath()`), written only after
+a successful discovery run (never by the `model-picker-probe` dev verb). Freshness is keyed on the
+**claude.exe binary identity** (path + size + last-write time), so an unchanged CLI means no discovery
+and no spawned process at startup; a 14-day `MaxAge` is a secondary backstop for entitlement/policy
+changes that do not touch the binary. Corrupt, absent, schema-mismatched, wrong-binary and stale all
+degrade silently to `ModelCatalog.BuiltIn`. Safe to delete at any time — it is a cache, and the next
+start rebuilds it.
+
+### Model/Effort Catalog Cache
+
+`%USERPROFILE%.claudeccel-model-catalog.json` (`ModelCatalogCache.DefaultPath()`), written only
+after a successful discovery run. Freshness is keyed on the **claude.exe binary identity** (path + size
++ last-write time), so an unchanged CLI means no discovery and no spawned process; a 14-day `MaxAge` is
+a secondary backstop for entitlement/policy changes that do not touch the binary. Corrupt, absent,
+schema-mismatched, wrong-binary and stale all degrade silently to `ModelCatalog.BuiltIn`. Safe to
+delete at any time — it is a cache, and the next start rebuilds it.
 
 ### Event Server Port
 

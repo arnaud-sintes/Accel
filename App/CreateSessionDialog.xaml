@@ -63,14 +63,23 @@
             ItemTemplate does not have that failure mode: WPF uses it directly as
             SelectionBoxItemTemplate too, for both the dropdown list and the closed box.
         -->
+        <!--
+            SelectedValuePath is ModelCatalogEntry.CliValue - the value that goes after the model
+            flag. The
+            list itself is whatever ModelCatalogService discovered from Claude Code's own /model
+            picker (falling back to ModelCatalog.BuiltIn), so it is neither a fixed four families nor
+            a second hardcoded list; CatalogSourceDescription is the tooltip that tells the user which
+            of the two they are looking at.
+        -->
         <ComboBox x:Name="ModelComboBox" Grid.Row="3"
                   ItemsSource="{Binding ModelOptions}"
-                  SelectedValuePath="Family"
+                  SelectedValuePath="CliValue"
                   SelectedValue="{Binding SelectedModelFamily}"
+                  ToolTip="{Binding CatalogSourceDescription}"
                   Margin="0,0,0,16">
             <ComboBox.ItemTemplate>
                 <DataTemplate>
-                    <TextBlock Text="{Binding DisplayName}" />
+                    <TextBlock Text="{Binding DisplayName}" ToolTip="{Binding Description}" />
                 </DataTemplate>
             </ComboBox.ItemTemplate>
         </ComboBox>
@@ -82,9 +91,14 @@
         -->
         <!--
             IsEnabled, not Visibility=Collapsed: the field stays in place (no layout jump when
-            switching models) and the ToolTip explains why it's greyed out - Haiku has no
-            reasoning-effort knob at all (ModelEffortTable.SupportsEffort), so SelectedEffortLevel
+            switching models) and the ToolTip explains why it's greyed out - some models (Haiku) have
+            no reasoning-effort knob at all (ModelEffortTable.SupportsEffort), so SelectedEffortLevel
             is simply left as-is but never sent (CreateSessionDialogViewModel.BuildArguments).
+
+            ItemsSource is the SELECTED MODEL's own ladder, not one shared vocabulary: the tiers are a
+            per-model capability (six rungs ending in "ultracode" for the current frontier models,
+            none at all for Haiku), and offering a rung the model doesn't have would just be clamped
+            silently by the CLI.
         -->
         <ComboBox x:Name="EffortComboBox" Grid.Row="5"
                   ItemsSource="{Binding EffortLevels}"

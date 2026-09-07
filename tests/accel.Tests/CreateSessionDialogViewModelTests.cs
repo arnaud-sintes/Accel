@@ -6,6 +6,7 @@ using System.IO;
 using Accel.App.ViewModels;
 using Accel.Metrics;
 using Accel.Orchestration;
+using Accel.Settings;
 using Xunit;
 
 /// <summary>
@@ -25,35 +26,119 @@ public class CreateSessionDialogViewModelTests
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe");
 
     // ---------------------------------------------------------------------------------------------
-    // Vocabulary reuse: model/effort selections must be exactly ModelBadgeTable/EffortBarLevel's
-    // own lists, not a second, independently maintained one.
+    // Vocabulary: the dialog offers exactly the catalog it was given (defaulting to
+    // ModelCatalog.BuiltIn), never a second, independently maintained list.
     // ---------------------------------------------------------------------------------------------
 
     [Fact]
-    public void ModelFamilies_IsExactlyModelBadgeTablesFamilies()
+    public void ModelFamilies_DefaultsToTheBuiltInCatalog()
     {
         var viewModel = new CreateSessionDialogViewModel();
         Assert.Equal(ModelBadgeTable.Families, viewModel.ModelFamilies);
     }
 
     [Fact]
-    public void EffortLevels_IsExactlyEffortBarLevelsLevels()
+    public void ModelFamilies_ComesFromTheSuppliedCatalog_NotAHardcodedList()
     {
-        var viewModel = new CreateSessionDialogViewModel();
-        Assert.Equal(EffortBarLevel.Levels, viewModel.EffortLevels);
+        // A lineup that shares nothing with Accel's built-in table: exactly what discovery can return
+        // after a Claude Code release, and what the dialog used to be incapable of showing.
+        var viewModel = new CreateSessionDialogViewModel(catalog: Catalog(
+            new ModelCatalogEntry("Nimbus", "Nimbus 9", "fictional", new[] { "low", "high" })));
+
+        Assert.Equal(new[] { "Nimbus" }, viewModel.ModelFamilies);
+        Assert.Equal("Nimbus", viewModel.SelectedModelFamily);
+    }
+
+    [Fact]
+    public void EffortLevels_IsTheSelectedModelsOwnLadder_NotOneSharedVocabulary()
+    {
+        var viewModel = new CreateSessionDialogViewModel(catalog: Catalog(
+            new ModelCatalogEntry("Short", "Short", null, new[] { "low", "medium" }),
+            new ModelCatalogEntry("Long", "Long", null, new[] { "low", "medium", "high", "xhigh", "max", "ultracode" })));
+
+        viewModel.SelectedModelFamily = "Short";
+        Assert.Equal(new[] { "low", "medium" }, viewModel.EffortLevels);
+
+        viewModel.SelectedModelFamily = "Long";
+        Assert.Equal(6, viewModel.EffortLevels.Count);
     }
 
     [Fact]
     public void DefaultSelections_AreValidMembersOfTheirVocabularies()
     {
         var viewModel = new CreateSessionDialogViewModel();
-        Assert.Contains(viewModel.SelectedModelFamily, ModelBadgeTable.Families);
-        Assert.Contains(viewModel.SelectedEffortLevel, EffortBarLevel.Levels);
+        Assert.Contains(viewModel.SelectedModelFamily, viewModel.ModelFamilies);
+        Assert.Contains(viewModel.SelectedEffortLevel, viewModel.EffortLevels);
+    }
+
+    /// <summary>
+    /// Entry order is ascending capability, so <c>Entries[0]</c> is the <i>least</i> capable model -
+    /// picking it as the default would open the dialog on Haiku. With nothing discovered and nothing
+    /// configured, the fallback preference must win instead.
+    /// </summary>
+    [Fact]
+    public void DefaultModel_WithNothingConfigured_IsNotSimplyTheFirstEntry()
+    {
+        var viewModel = new CreateSessionDialogViewModel();
+        Assert.Equal("Sonnet", viewModel.SelectedModelFamily);
+    }
+
+    [Fact]
+    public void DefaultModel_PrefersTheCatalogsDiscoveredDefaultHint()
+    {
+        var catalog = new ModelCatalog(
+            new[]
+            {
+                new ModelCatalogEntry("Haiku", "Haiku 4.5", null, Array.Empty<string>()),
+                new ModelCatalogEntry("Opus", "Opus 5", null, new[] { "low", "medium", "high" }),
+            },
+            ModelCatalogSource.Discovered,
+            DefaultModelHint: "Opus 5");
+
+        // Matched on the display name, which is how the picker's "Default (recommended)" row names it.
+        Assert.Equal("Opus", new CreateSessionDialogViewModel(catalog: catalog).SelectedModelFamily);
     }
 
     // ---------------------------------------------------------------------------------------------
-    // Haiku has no effort concept (ModelEffortTable) - the dialog must reflect that instead of
-    // pretending it sits on the same five-tier scale as Sonnet/Opus/Fable.
+    // The user's own settings.json defaults, which the dialog used to ignore in favour of a
+    // hardcoded Sonnet/medium.
+    // ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void UserDefaults_AreUsedAsTheInitialSelection()
+    {
+        var viewModel = new CreateSessionDialogViewModel(
+            userDefaults: new UserModelDefaults("Opus", "xhigh"));
+
+        Assert.Equal("Opus", viewModel.SelectedModelFamily);
+        Assert.Equal("xhigh", viewModel.SelectedEffortLevel);
+    }
+
+    [Fact]
+    public void UserDefaults_ModelTheCatalogDoesNotOffer_FallsBackWithoutThrowing()
+    {
+        var viewModel = new CreateSessionDialogViewModel(
+            catalog: Catalog(new ModelCatalogEntry("Sonnet", "Sonnet 5", null, new[] { "low", "medium" })),
+            userDefaults: new UserModelDefaults("SomeRetiredModel", "medium"));
+
+        Assert.Equal("Sonnet", viewModel.SelectedModelFamily);
+    }
+
+    [Fact]
+    public void UserDefaults_EffortTheSelectedModelDoesNotOffer_IsNotSelected()
+    {
+        // Sending a tier outside the model's ladder would just be clamped silently by the CLI, so the
+        // dialog must never start out holding one.
+        var viewModel = new CreateSessionDialogViewModel(
+            catalog: Catalog(new ModelCatalogEntry("Sonnet", "Sonnet 5", null, new[] { "low", "medium" })),
+            userDefaults: new UserModelDefaults("Sonnet", "ultracode"));
+
+        Assert.Contains(viewModel.SelectedEffortLevel, viewModel.EffortLevels);
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Some models have no effort concept at all (ModelEffortTable) - the dialog must reflect that
+    // instead of pretending every model sits on the same ladder.
     // ---------------------------------------------------------------------------------------------
 
     [Fact]
@@ -64,6 +149,40 @@ public class CreateSessionDialogViewModelTests
 
         viewModel.SelectedModelFamily = "Opus";
         Assert.True(viewModel.EffortSupported);
+    }
+
+    /// <summary>
+    /// Switching models must not leave a tier selected that the new model does not have - the bug the
+    /// per-model ladder introduces if the selection is not re-validated on change.
+    /// </summary>
+    [Fact]
+    public void SwitchingModel_SnapsAnOutOfRangeEffortIntoTheNewModelsLadder()
+    {
+        var viewModel = new CreateSessionDialogViewModel(catalog: Catalog(
+            new ModelCatalogEntry("Long", "Long", null, new[] { "low", "medium", "high", "xhigh", "max", "ultracode" }),
+            new ModelCatalogEntry("Short", "Short", null, new[] { "low", "medium" })));
+
+        viewModel.SelectedModelFamily = "Long";
+        viewModel.SelectedEffortLevel = "ultracode";
+
+        viewModel.SelectedModelFamily = "Short";
+
+        Assert.Contains(viewModel.SelectedEffortLevel, viewModel.EffortLevels);
+        Assert.NotEqual("ultracode", viewModel.SelectedEffortLevel);
+    }
+
+    [Fact]
+    public void SwitchingModel_KeepsAnEffortTheNewModelAlsoHas()
+    {
+        var viewModel = new CreateSessionDialogViewModel(catalog: Catalog(
+            new ModelCatalogEntry("A", "A", null, new[] { "low", "medium", "high" }),
+            new ModelCatalogEntry("B", "B", null, new[] { "low", "medium", "high" })));
+
+        viewModel.SelectedModelFamily = "A";
+        viewModel.SelectedEffortLevel = "high";
+        viewModel.SelectedModelFamily = "B";
+
+        Assert.Equal("high", viewModel.SelectedEffortLevel);
     }
 
     [Fact]
@@ -491,6 +610,9 @@ public class CreateSessionDialogViewModelTests
             Directory.Delete(workingDirectory, recursive: true);
         }
     }
+
+    private static ModelCatalog Catalog(params ModelCatalogEntry[] entries) =>
+        new((IReadOnlyList<ModelCatalogEntry>)entries, ModelCatalogSource.Discovered);
 
     private sealed class FakeFolderPicker : Accel.App.Services.IFolderPickerService
     {

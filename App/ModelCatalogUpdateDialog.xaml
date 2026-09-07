@@ -1,0 +1,70 @@
+<Window x:Class="Accel.App.ModelCatalogUpdateDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:controls="clr-namespace:Accel.App.Controls"
+        Title="Accel" Height="232" Width="520" SizeToContent="Height"
+        WindowStartupLocation="CenterOwner" ResizeMode="NoResize"
+        ShowInTaskbar="False" WindowStyle="None" Style="{DynamicResource DialogWindowStyle}">
+    <!--
+        The blocking "please wait" shown while Accel reads the model/effort catalog out of Claude
+        Code (see ModelCatalogProbe). Modal on purpose: the catalog feeds the Create session dialog's
+        two pickers, and a user who opens that dialog seconds after startup would otherwise be handed
+        the stale built-in list while discovery was still running in the background. Blocking for one
+        run per Claude Code upgrade buys a correct list every time it is asked for.
+
+        Same shell as AccelMessageDialog/CreateSessionDialog (Theme.xaml + CustomTitleBar) so it reads
+        as part of Accel. Two things it deliberately has that a plain spinner would not:
+
+          1. A live status line, fed from the probe's own trace sink, so a 15-second wait visibly
+             progresses instead of looking hung. It names each model as its effort ladder is read.
+          2. A Skip button. Discovery drives a real terminal UI, so its worst case is bounded only by
+             the probe's own timeouts; a user who does not want to wait must be able to leave, and
+             skipping is harmless because it simply keeps the built-in catalog.
+    -->
+    <Window.Resources>
+        <ResourceDictionary Source="Theme.xaml" />
+    </Window.Resources>
+    <Border BorderBrush="{StaticResource WindowBorderBrush}" BorderThickness="1">
+    <DockPanel LastChildFill="True" Background="{StaticResource SurfaceBrush}">
+        <controls:CustomTitleBar x:Name="TitleBar" DockPanel.Dock="Top" TitleText="Accel"
+                                  ShowMinimizeButton="False" ShowMaximizeButton="False" />
+        <Grid Margin="24">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <TextBlock Grid.Row="0" Style="{StaticResource BodyTextStyle}" TextWrapping="Wrap"
+                       Text="Reading the available models and effort levels from Claude Code…" />
+
+            <!--
+                Indeterminate, not a percentage: the walk's length depends on how many models the
+                account has and how long each one's effort ladder is, neither of which is known until
+                the walk is already under way. A fake percentage would be worse than none.
+            -->
+            <ProgressBar Grid.Row="1" IsIndeterminate="True" Height="4" Margin="0,18,0,0"
+                         BorderThickness="0"
+                         Background="{StaticResource PanelBackgroundElevatedBrush}"
+                         Foreground="{StaticResource AccentBrush}" />
+
+            <TextBlock Grid.Row="2" x:Name="StatusText" Margin="0,14,0,0"
+                       FontFamily="{StaticResource FontFamilyMono}"
+                       FontSize="{StaticResource FontSizeCaption}"
+                       Foreground="{StaticResource TextMutedBrush}"
+                       TextTrimming="CharacterEllipsis" Text="Starting Claude Code…" />
+
+            <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,22,0,0">
+                <TextBlock x:Name="HintText" Style="{StaticResource BodyTextStyle}"
+                           Foreground="{StaticResource TextMutedBrush}"
+                           FontSize="{StaticResource FontSizeCaption}"
+                           VerticalAlignment="Center" Margin="0,0,14,0"
+                           Text="Runs once per Claude Code update." />
+                <Button x:Name="SkipButton" Content="Skip" Click="SkipButton_Click"
+                        MinWidth="88" IsCancel="True" />
+            </StackPanel>
+        </Grid>
+    </DockPanel>
+    </Border>
+</Window>

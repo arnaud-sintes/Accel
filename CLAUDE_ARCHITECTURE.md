@@ -39,11 +39,14 @@ HTTP server and print/relay a status line to stdout. `accel doctor`/`accel --uni
 short-lived, UI-less invocations. Only the no-argument invocation (`Verb.Start`) runs the combined
 install+server+UI mode described above (`RunCombinedAsync`).
 
-There are also six hidden dev-only verbs (`pty-smoke-test`, `pty-session-smoke-test`,
-`pty-registry-stress-test`, `pty-shutdown-orphan-test`, `terminal-e2e-smoke-test`, `tabs-e2e-smoke-test`)
-checked by raw string comparison in `Program.cs` *before* `Cli/ArgParser.Parse` runs, so they never
-collide with the documented verb surface. They exercise `Orchestration`/`App` smoke/stress harnesses
-directly (real child processes, real WebView2/WPF) rather than being unit tests.
+There are also seven hidden dev-only verbs (`pty-smoke-test`, `pty-session-smoke-test`,
+`pty-registry-stress-test`, `pty-shutdown-orphan-test`, `terminal-e2e-smoke-test`, `tabs-e2e-smoke-test`,
+`model-picker-probe`) checked by raw string comparison in `Program.cs` *before* `Cli/ArgParser.Parse`
+runs, so they never collide with the documented verb surface. They exercise `Orchestration`/`App`
+smoke/stress harnesses directly (real child processes, real WebView2/WPF) rather than being unit tests.
+All but the last launch `cmd.exe` rather than `claude.exe`, for a controllable child with no auth and no
+side effects; `model-picker-probe` is the one exception, since Claude Code's own `/model` picker is the
+thing it reads (it submits no prompt, so it bills nothing, and writes no cache).
 
 ### Startup sequence (`RunCombinedAsync`, in order)
 
@@ -145,6 +148,19 @@ self-invoked `accel.exe notify` calls) and (2) the top-level `statusLine`/`subag
   already Accel-owned and no capture exists yet (never clobbers a real prior capture). `Uninstall`
   restores/removes the field, but only if the field is still Accel-owned at uninstall time (if another
   tool took it over since, it's left untouched).
+- **`UserModelDefaults.cs`** — reads the user's own `model`/`effortLevel` out of `settings.json`, used as
+  the Create-session dialog's initial selection. Read-only, and never throws (a malformed settings file
+  yields `None`). It deliberately does **not** parse the `modelPicker` field: Claude Code already applies
+  that when rendering its picker, so `ModelCatalogProbe` observes the merged result — re-implementing the
+  merge here would be a second, divergent interpretation of a setting Accel does not own.
+- **`ModelCatalogCache.cs`** — persists a discovered `ModelCatalog` to
+  `%USERPROFILE%\.claude\accel-model-catalog.json` (schema-versioned, temp-file-then-move). The freshness
+  key is the **claude.exe binary's identity** (path + size + last-write time), not a version string:
+  asking `claude --version` would mean spawning a process on every Accel start just to decide whether to
+  spawn another, while stat-ing the file is free and answers the same question. A `MaxAge` (14 days) is a
+  secondary backstop only, for lineup changes that don't touch the binary (entitlement/org-policy
+  changes). Every read is defensive — corrupt, absent, schema-mismatched, wrong-binary and stale all
+  degrade to "no cache", which degrades to `ModelCatalog.BuiltIn`.
 
 ### 2.3 `Versioning/` — Claude Code version probing and feature gates
 
@@ -252,10 +268,23 @@ self-invoked `accel.exe notify` calls) and (2) the top-level `statusLine`/`subag
   static, side-effect-free lookup tables shared between backend metrics computation and UI rendering
   (also reused directly by `Cli/MonitorTreeBuilder.cs` and UI controls): model id → badge letter/color,
   model id → context-window token size (with an "assumed, not matched" flag propagated through the
-  DTOs), effort level string → 0–5 bar level (five tiers: low/medium/high/xhigh/max), and
-  `ModelEffortTable.SupportsEffort(...)` — whether a model family/badge recognizes the effort knob at
-  all (Haiku does not; an unrecognized family/badge degrades to "supports effort" rather than hiding the
-  control on an unmatched model).
+  DTOs), effort level string → 0–6 bar level (**six** tiers: low/medium/high/xhigh/max/**ultracode** —
+  `EffortBarLevel.MaxBars` is derived from `Levels.Count`, pinned by a unit test, so the badge geometry
+  follows the vocabulary rather than a hardcoded number), and `ModelEffortTable.SupportsEffort(...)` /
+  `.TiersFor(...)` — whether a model recognizes the effort knob and with which tiers. Both take an
+  optional `ModelCatalog`: with one, the answer is what Claude Code itself reported for that model;
+  without, they fall back to the one rule Accel can state alone (Haiku has none, everything else takes
+  the full ladder). An unrecognized model degrades to "supports effort" rather than hiding the control,
+  since a tier the CLI rejects is clamped whereas a hidden tier is unrecoverable in the UI.
+- **`ModelCatalog.cs`** — the models Accel offers and each one's own effort ladder, as an immutable
+  value. `ModelCatalog.BuiltIn` is the fallback, *derived from* the two tables above rather than typed
+  out again; a discovered catalog comes from `Orchestration/ModelCatalogProbe.cs`. An entry's empty
+  `EffortTiers` means "this model has no effort control", deliberately distinct from "tiers unknown".
+  Exists because the hardcoded assumption was measurably wrong: a real machine's picker offered four
+  rows *without* Fable (which Accel listed) but *with* a "Default (recommended)" row and an
+  "Opus (1M context)" variant (neither expressible), and every effort-capable row had six tiers rather
+  than five. The lineup also depends on the account's entitlements, so no compiled-in list can be right
+  for every user.
 
 ### 2.6 `Orchestration/` — PTY/process spawn, tracking, and teardown
 
@@ -329,7 +358,32 @@ and guarantees they don't outlive the app even across crashes.
 - **`SlashCommandDriver.cs`** — drives a live session's slash commands by writing sanitized text to PTY
   stdin (`SlashCommandInputSanitizer` allowlists safe characters, rejects control chars/line separators)
   and polling `ClaudeSessionStatusFile` for a caller-supplied completion predicate — never by
-  screen-scraping terminal output.
+  screen-scraping terminal output. That rule still holds for everything driven through this class; the
+  one deliberate exception in the codebase is `ModelCatalogProbe` below, and it is an exception rather
+  than a precedent.
+- **`ModelCatalogProbe.cs` / `TerminalScreenBuffer.cs` / `ModelPickerScreen.cs`** — **the one place in
+  Accel allowed to parse rendered terminal output.** Discovers the model lineup and per-model effort
+  ladders by opening Claude Code's own `/model` picker in a headless `PtySession`, rendering the frames
+  through a minimal terminal emulator (`TerminalScreenBuffer`: CUP/ED/EL/CR/LF/scroll — naive escape
+  stripping yields every stale frame concatenated with the current one), and parsing the result
+  (`ModelPickerScreenParser`, anchored on the picker's row ordinals, not on model-name keywords).
+
+  Why the exception exists: nothing else reports this. `--model`'s help lists only examples, there is no
+  `claude models` subcommand, no local cache holds a catalog, and the Anthropic `/v1/models` endpoint
+  needs an API key, returns API ids rather than `--model` aliases, and says nothing about effort.
+  Per-model effort is worse — `claude --model haiku --effort max` succeeds *silently* after clamping,
+  and no `--output-format json` field reports the clamp. So the choice was scraping or shipping a list
+  already known to be wrong. Name-probing was rejected: it can only confirm names Accel already
+  guessed, and each valid probe bills an API call.
+
+  The costs are contained, not hidden: no prompt is ever submitted (no API cost); only arrow keys and
+  Escape are sent, because the picker's footer is "Enter to set as default" and committing would
+  rewrite the user's own `model` setting; the picker shows only the *current* tier, so a ladder is read
+  by walking the (wrapping) slider one keypress at a time, driven off **which row the cursor is on**
+  rather than an index into an earlier snapshot; and every failure mode — auth wall, folder-trust gate,
+  unparseable redesign — degrades to `ModelCatalog.BuiltIn` rather than surfacing an error. The pure
+  halves are unit-tested against captured screens; the live drive is exercised by the
+  `model-picker-probe` dev verb.
 
 ### 2.7 `App/` — WPF UI layer
 
@@ -441,8 +495,10 @@ and guarantees they don't outlive the app even across crashes.
     mean `ApplyPropertyValue` splitting runs and destroying the per-run diff backgrounds). The bar holds
     no matches while closed, and re-runs its query whenever the document under it is replaced
     (`DocumentSearchBar.Refresh` from `ShowFileEditorDocument`, `Attach` per diff tab).
-- **`EffortBarsControl`** — radial ring gauge rendering `Metrics.EffortBarLevel`'s 0–4 scale (arc for 1–3,
-  filled disc for max, shape as well as color for accessibility).
+- **`EffortBarsControl`** — radial ring gauge rendering `Metrics.EffortBarLevel`'s 0–`MaxBars` scale as a
+  waxing moon phase (hollow ring for 0/unknown, crescent→gibbous→full disc, shape as well as color for
+  accessibility). The geometry divides by `EffortBarLevel.MaxBars`, so it scales with the vocabulary
+  automatically — adding the sixth ("ultracode") tier needed no change here.
 - **`AgentGraphViewModel.cs`** (panel E, Phase 6) — a *second* reader on the same `ITelemetryFeed` instance
   and the same read-only `ISessionSelectionService` panel A uses, never a filtered view of
   `RootsPanelViewModel`'s own tree (panel A's node objects are rebuilt wholesale on every telemetry tick,
@@ -533,6 +589,30 @@ and guarantees they don't outlive the app even across crashes.
   `SessionTreeDto` (`McpUsage`/`SkillUsage`, populated by `RootsTreeBuilder`), so a rebuild is a lookup
   plus clear-and-repopulate, no I/O of its own. Historical (not-currently-running) sessions report empty
   usage arrays — Accel only counts `PostToolUse` hits observed while it was running.
+- **`ModelCatalogService`** (`App/Services/ModelCatalogService.cs`) — owns the model/effort catalog for
+  the running app and is the only thing `Program.cs` wires for it (handed to `MainWindow.ModelCatalog`
+  as a settable property rather than a ninth constructor parameter). Its constructor is synchronous and
+  spawns nothing: it reads `ModelCatalogCache`, falling back to `ModelCatalog.BuiltIn`, so the UI has a
+  usable catalog before any window opens.
+
+  Discovery itself is **blocking, behind a modal** (`App/ModelCatalogUpdateDialog`, shown from
+  `Program.cs`'s `Loaded` handler via `RunIfNeeded`) — but only when the cached catalog no longer
+  matches the installed claude.exe, so a normal start does no work and shows no dialog at all. The
+  modal is deliberate and replaced an earlier background refresh: the catalog feeds the Create-session
+  dialog's two pickers, and a user who created a session within the first ~15s silently got the
+  built-in fallback list — the exact failure the catalog exists to prevent. The wait is therefore one
+  per Claude Code upgrade, not per start, and it is skippable (Skip/Escape/close cancels the token; the
+  probe's child is reaped through its Job Object and the built-in catalog is kept). The dialog shows a
+  live status line fed from the probe's trace sink via `ModelCatalogService.Progress`, and its
+  construction is wrapped in a catch because XAML `StaticResource` lookups fail at *runtime* — a
+  renamed Theme.xaml key must not be able to stop the app from starting.
+  `BeginRefreshIfStale`/`CatalogChanged` remain as the tested, currently-unused non-blocking mode.
+
+  The probe directory is a configured root from
+  `RootFoldersConfig.Load()`, never a temp directory, because Claude Code gates unknown directories
+  behind its folder-trust prompt and answering that on the user's behalf would persist a trust decision
+  Accel was never asked to make. Every failure leaves `Current` untouched and records
+  `LastRefreshOutcome`/`LastRefreshDetail`.
 - **Remaining `Services/`**: `CommonCliFlags` (permission-mode enum → `--permission-mode` argv),
   `ExtraArgsParser` (tokenizes free-text into a real argv array, quote-aware), `IFolderPickerService`/
   `IUserConfirmationService` (testable wrappers over WinForms folder picker / MessageBox),
