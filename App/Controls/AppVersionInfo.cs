@@ -1,5 +1,6 @@
 namespace Accel.App.Controls;
 
+using System;
 using System.Reflection;
 
 /// <summary>Accel's own version - read once from the executing assembly's version (set via
@@ -9,11 +10,16 @@ using System.Reflection;
 /// "show nothing" rather than a stray "v".</summary>
 public static class AppVersionInfo
 {
+    /// <summary>The raw assembly version, or null for a host with no version info (e.g. a designer
+    /// preview). Exposed alongside <see cref="DisplayText"/> for callers that need to compare
+    /// versions (e.g. <see cref="Accel.Versioning.AccelUpdateProbe"/>) rather than just display one.</summary>
+    public static readonly Version? Current = Assembly.GetExecutingAssembly().GetName().Version;
+
     public static readonly string DisplayText = Resolve();
 
     private static string Resolve()
     {
-        var version = Assembly.GetExecutingAssembly().GetName().Version;
+        var version = Current;
         return version is null ? string.Empty : $"v{version.Major}.{version.Minor}.{version.Build}";
     }
 }

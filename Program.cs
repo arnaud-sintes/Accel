@@ -314,6 +314,12 @@ static async Task<int> RunCombinedAsync(int port, string? dumpRawDir, bool verbo
                 modelCatalog,
                 Accel.App.Services.ModelCatalogService.ResolveProbeDirectory(
                     Accel.Server.RootFoldersConfig.Load()));
+
+            // Fire-and-forget rather than awaited: unlike the catalog check above, there is nothing
+            // downstream in this window that depends on knowing the answer, so it must never delay
+            // startup. GetLatestReleaseAsync never throws (see AccelUpdateProbe), so this has no
+            // failure mode worth observing beyond "no prompt appears".
+            _ = CheckForUpdateAsync(mainWindow);
         };
         mainWindow.Closed += (_, _) =>
         {
@@ -384,6 +390,40 @@ static async Task<int> RunCombinedAsync(int port, string? dumpRawDir, bool verbo
 
     await server.StopAsync();
     return 0;
+}
+
+/// <summary>
+/// Checks GitHub's latest release against <see cref="Accel.App.Controls.AppVersionInfo"/> and, if
+/// newer, offers to open the release page. Runs off the UI thread (the HTTP call), then marshals
+/// back onto <paramref name="owner"/>'s dispatcher only for the dialog itself - the same split
+/// <see cref="Accel.App.ModelCatalogUpdateDialog"/> uses via its captured <c>Progress&lt;string&gt;</c>
+/// context, just without a "please wait" step since nothing here blocks the window from being usable
+/// in the meantime.
+/// </summary>
+static async Task CheckForUpdateAsync(System.Windows.Window owner)
+{
+    var latest = await Accel.Versioning.AccelUpdateProbe.GetLatestReleaseAsync().ConfigureAwait(false);
+    var current = Accel.App.Controls.AppVersionInfo.Current;
+    if (latest is null || current is null || latest.Version <= current)
+    {
+        return;
+    }
+
+    await owner.Dispatcher.InvokeAsync(() =>
+    {
+        var download = Accel.App.AccelMessageDialog.ShowConfirm(
+            owner,
+            $"A new version of Accel is available: v{latest.Version.Major}.{latest.Version.Minor}.{latest.Version.Build} " +
+            $"(you have {Accel.App.Controls.AppVersionInfo.DisplayText}).\n\nDownload it now?",
+            "Update available",
+            Accel.App.AccelDialogIcon.Info);
+
+        if (download)
+        {
+            System.Diagnostics.Process.Start(
+                new System.Diagnostics.ProcessStartInfo(latest.HtmlUrl) { UseShellExecute = true });
+        }
+    });
 }
 
 /// <summary>
