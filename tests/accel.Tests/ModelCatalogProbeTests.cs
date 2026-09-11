@@ -47,6 +47,23 @@ public class ModelCatalogProbeTests
         Assert.Equal("Sonnet 4.5", ModelCatalogProbe.ExtractCliValue("Sonnet 4.5 ✦"));
     }
 
+    /// <summary>
+    /// Regression for a live-caught bug: on a machine running Claude Code 2.1.265, discovery scraped
+    /// a Sonnet row as "Sonnet √ context" - a stray checkmark-like glyph followed by echoed "context"
+    /// text, most likely repaint residue from <c>WalkRowsAsync</c>'s arrow-key navigation. Because that
+    /// decoration sits in the *interior* of the label (the label ends in the letter "t"), trimming only
+    /// leading/trailing non-alphanumerics left it untouched, and Accel launched sessions with
+    /// <c>--model "Sonnet √ context"</c> - a value the CLI silently rejects, falling back to the
+    /// account default instead of the model the user picked.
+    /// </summary>
+    [Theory]
+    [InlineData("Sonnet √ context", "Sonnet")]
+    [InlineData("Opus (1M context) √ context", "Opus")]
+    public void ExtractCliValue_DropsInteriorEchoText_NotJustLeadingAndTrailing(string label, string expected)
+    {
+        Assert.Equal(expected, ModelCatalogProbe.ExtractCliValue(label));
+    }
+
     [Theory]
     [InlineData("")]
     [InlineData("   ")]

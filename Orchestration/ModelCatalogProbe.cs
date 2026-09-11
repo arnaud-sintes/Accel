@@ -448,15 +448,23 @@ public sealed class ModelCatalogProbe
 
     /// <summary>
     /// The bare <c>--model</c> value inside a picker label. Labels carry decoration the CLI does not
-    /// accept: a parenthesised variant note ("Opus (1M context)") and trailing marker glyphs
-    /// ("Sonnet ✦"). Everything from the first parenthesis on is dropped, then trailing and leading
-    /// characters that are not letters or digits are trimmed.
+    /// accept: a parenthesised variant note ("Opus (1M context)"), marker glyphs ("Sonnet ✦"), and -
+    /// as seen live on a machine running 2.1.265 - repaint/echo residue picked up while the picker was
+    /// being walked ("Sonnet √ context"). Everything from the first parenthesis on is dropped; what
+    /// remains is split on whitespace and rebuilt token by token, starting from the first token and
+    /// stopping as soon as a token cannot plausibly be part of a model name.
     ///
-    /// <para>The trim is by character <i>class</i>, not against a list of known glyphs: an earlier
-    /// version enumerated the markers it had seen and promptly shipped <c>--model "Sonnet ✦"</c> the
-    /// first time the picker used one that was not on the list. A decorative glyph is by definition
-    /// something this code has not seen before, so it cannot be enumerated. Trailing digits survive,
-    /// which matters for any future version-suffixed name.</para>
+    /// <para>The bad token in the real-world example above ("context") is not decoration in the
+    /// glyph sense - it is an ordinary word, so trimming leading/trailing non-alphanumerics from the
+    /// label as a whole does nothing to it: it sits in the interior, after a stray "√" that itself
+    /// trims away. Rebuilding token by token and stopping at the first token that has no digit in it
+    /// (once glyph-only tokens are trimmed to nothing and skipped) keeps a legitimate multi-word,
+    /// version-suffixed name like "Sonnet 4.5" intact while dropping anything echoed in after it.</para>
+    ///
+    /// <para>The per-token trim is by character <i>class</i>, not against a list of known glyphs: an
+    /// earlier version enumerated the markers it had seen and promptly shipped <c>--model
+    /// "Sonnet ✦"</c> the first time the picker used one that was not on the list. A decorative glyph
+    /// is by definition something this code has not seen before, so it cannot be enumerated.</para>
     ///
     /// <para>A variant row collapses onto its base family, which is correct for <c>--model</c>: the
     /// 1M-context variant is selected by appending <c>[1m]</c> to the model name, not by passing the
@@ -474,19 +482,70 @@ public sealed class ModelCatalogProbe
             text = text[..parenthesis];
         }
 
+        var tokens = text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        if (tokens.Length == 0)
+        {
+            return string.Empty;
+        }
+
+        var first = TrimNonAlphanumeric(tokens[0]);
+        if (first.Length == 0)
+        {
+            return string.Empty;
+        }
+
+        var result = new StringBuilder(first);
+        for (var i = 1; i < tokens.Length; i++)
+        {
+            var token = TrimNonAlphanumeric(tokens[i]);
+            if (token.Length == 0)
+            {
+                // A glyph-only token (e.g. a lone "√" or "✦") - decoration, not a word. Skip it rather
+                // than stopping, since a real word can still follow a glyph in the same label.
+                continue;
+            }
+
+            if (!ContainsDigit(token))
+            {
+                // A real word with no digit in it is not part of a model name - it is echoed/repaint
+                // text (e.g. "context"). Stop here rather than absorbing it.
+                break;
+            }
+
+            result.Append(' ').Append(token);
+        }
+
+        return result.ToString();
+    }
+
+    private static string TrimNonAlphanumeric(string token)
+    {
         var start = 0;
-        var end = text.Length - 1;
-        while (start <= end && !char.IsLetterOrDigit(text[start]))
+        var end = token.Length - 1;
+        while (start <= end && !char.IsLetterOrDigit(token[start]))
         {
             start++;
         }
 
-        while (end >= start && !char.IsLetterOrDigit(text[end]))
+        while (end >= start && !char.IsLetterOrDigit(token[end]))
         {
             end--;
         }
 
-        return end < start ? string.Empty : text[start..(end + 1)];
+        return end < start ? string.Empty : token[start..(end + 1)];
+    }
+
+    private static bool ContainsDigit(string token)
+    {
+        foreach (var ch in token)
+        {
+            if (char.IsDigit(ch))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static bool IsNonModelRow(ModelPickerRow row)
