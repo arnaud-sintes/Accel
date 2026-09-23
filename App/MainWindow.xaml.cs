@@ -1154,9 +1154,12 @@ public partial class MainWindow : Window
 
         if (_sessionRegistry is null || !_sessionRegistry.TryGet(node.Key, out var session) || session is null)
         {
+            string message = node.IsRunning
+                ? "This session is running, but not open in a tab here, so it can't be renamed. Open it first."
+                : "This session isn't open in a tab right now, so it can't be renamed. Open it first.";
             AccelMessageDialog.ShowMessage(
                 this,
-                "This session isn't open in a tab right now, so it can't be renamed. Open it first.",
+                message,
                 "Rename session",
                 AccelDialogIcon.Info);
             return;
@@ -1165,9 +1168,12 @@ public partial class MainWindow : Window
         var status = ClaudeSessionStatusFile.TryRead(session.ProcessId);
         if (!ClaudeSessionStatusFile.IsIdle(status))
         {
+            string message = string.Equals(status?.Status, ClaudeSessionStatusFile.StatusBusy, StringComparison.Ordinal)
+                ? "Prompt execution in progress - please wait for it to finish before renaming."
+                : "The session's status can't be confirmed right now. Wait for it to go idle before renaming.";
             AccelMessageDialog.ShowMessage(
                 this,
-                "The session is busy right now. Wait for it to go idle before renaming.",
+                message,
                 "Rename session",
                 AccelDialogIcon.Info);
             return;
