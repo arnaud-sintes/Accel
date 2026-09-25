@@ -439,7 +439,7 @@ public sealed class ModelCatalogProbe
     /// ("Sonnet", "Opus") - the description column carries the version ("Sonnet 5") and is shown to
     /// the user instead.
     /// </summary>
-    private static ModelCatalogEntry ToEntry(ModelPickerRow row, IReadOnlyList<string> tiers)
+    internal static ModelCatalogEntry ToEntry(ModelPickerRow row, IReadOnlyList<string> tiers)
     {
         var cliValue = ExtractCliValue(row.Label);
         var displayName = FirstSegment(row.Description) ?? row.Label;
@@ -569,10 +569,17 @@ public sealed class ModelCatalogProbe
         }
 
         // The description is "·"-separated ("Sonnet 5 · Efficient for routine tasks · Org default");
-        // only the first segment names the model version.
+        // only the first segment names the model version. If the picker's text ever drops or
+        // repositions that separator, the whole string is descriptive prose ("Best for everyday,
+        // complex tasks") rather than a version name - falling back to it would show that prose to
+        // the user, so fall back to null (ToEntry then uses row.Label) instead.
         var separator = description.IndexOf('·');
-        var segment = separator > 0 ? description[..separator] : description;
-        return NullIfEmpty(segment.Trim());
+        if (separator <= 0)
+        {
+            return null;
+        }
+
+        return NullIfEmpty(description[..separator].Trim());
     }
 
     private static string? NullIfEmpty(string? text) => string.IsNullOrWhiteSpace(text) ? null : text.Trim();

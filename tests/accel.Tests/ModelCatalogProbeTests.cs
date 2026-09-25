@@ -74,4 +74,31 @@ public class ModelCatalogProbeTests
         // An empty value is what IsNonModelRow uses to discard a row rather than launching with it.
         Assert.Equal(string.Empty, ModelCatalogProbe.ExtractCliValue(label));
     }
+
+    /// <summary>
+    /// Regression: <c>DisplayName</c> is read from the description's first "·"-separated segment
+    /// ("Sonnet 5 · Best for everyday, complex tasks" -> "Sonnet 5"). If the picker ever renders a
+    /// description without that separator, falling back to the raw description would show descriptive
+    /// prose ("Best for everyday, complex tasks") in the dialog instead of a model name - it must fall
+    /// back to the row's label instead.
+    /// </summary>
+    [Fact]
+    public void ToEntry_DescriptionWithoutSeparator_FallsBackToLabel_NotRawDescription()
+    {
+        var row = new ModelPickerRow(1, "Opus", "Best for everyday, complex tasks", Selected: false);
+
+        var entry = ModelCatalogProbe.ToEntry(row, tiers: []);
+
+        Assert.Equal("Opus", entry.DisplayName);
+    }
+
+    [Fact]
+    public void ToEntry_DescriptionWithSeparator_UsesFirstSegment()
+    {
+        var row = new ModelPickerRow(1, "Opus", "Opus 5 · Best for everyday, complex tasks", Selected: false);
+
+        var entry = ModelCatalogProbe.ToEntry(row, tiers: []);
+
+        Assert.Equal("Opus 5", entry.DisplayName);
+    }
 }
