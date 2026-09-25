@@ -54,7 +54,17 @@
 
   function createTerminal() {
     term = new Terminal({
-      convertEol: true,
+      // convertEol MUST stay off (xterm's default). Reported bug: the first column of the
+      // transcript intermittently filled with garbage, mostly while it scrolled - it survived two
+      // renderer fixes because it was never a rendering problem: the garbage was really in xterm's
+      // buffer. convertEol makes every bare LF a CR+LF, but ConPTY is not a raw stream - it is a
+      // renderer that emits "\r\n" itself whenever it means "next line, column 0", and a bare "\n"
+      // to mean "down one row, SAME column" (captured from this machine's in-box conhost: a run
+      // painted at row 4 col 6 followed by one at row 5 col 9 comes out as "ESC[4;6Habc\ndef").
+      // With convertEol that next run was written from column 0 instead, overwriting the row's
+      // leading cells (the ⏺/● bullets), and since ConPTY believes the screen already matches its
+      // own buffer it never repaints them. Scrolling repaints many rows at once, which is why it
+      // showed up mostly then.
 
       // ConPTY is the backend on every target (locked-in decision 1). This was originally
       // `windowsMode: true`, which forces xterm's LEGACY ConPTY workarounds on unconditionally: a
@@ -610,6 +620,7 @@
     return {
       injectedBuildNumber: typeof window.accelConPtyBuildNumber === "number" ? window.accelConPtyBuildNumber : null,
       windowsMode: term.options.windowsMode,
+      convertEol: term.options.convertEol,
       windowsPtyBackend: term.options.windowsPty ? term.options.windowsPty.backend : null,
       windowsPtyBuildNumber: term.options.windowsPty ? term.options.windowsPty.buildNumber : null,
       reflowEnabled: reflowEnabled,

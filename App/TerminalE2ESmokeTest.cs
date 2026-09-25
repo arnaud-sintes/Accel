@@ -430,12 +430,18 @@ public static class TerminalE2ESmokeTest
         bool legacyExpected = buildNumber < 21376;
         bool reflowEnabled = root.GetProperty("reflowEnabled").ValueKind == JsonValueKind.True;
 
+        // ConPTY emits a bare "\n" to mean "down one row, same column" (and "\r\n" itself when it means
+        // column 0), so convertEol must be off - with it on, those runs land in column 0 and overwrite
+        // the row's leading cells (the intermittent first-column garbage - see terminal.js).
+        bool convertEol = root.GetProperty("convertEol").ValueKind == JsonValueKind.True;
+
         bool ok = !windowsMode
+            && !convertEol
             && string.Equals(backend, "conpty", StringComparison.Ordinal)
             && reflowEnabled == !legacyExpected;
 
         output.WriteLine($"  [{(ok ? "PASS" : "FAIL")}] build {buildNumber} -> windowsMode={windowsMode}, " +
-            $"windowsPty.backend={backend}, reflowEnabled={reflowEnabled} " +
+            $"convertEol={convertEol}, windowsPty.backend={backend}, reflowEnabled={reflowEnabled} " +
             $"(expected legacy ConPTY workarounds {(legacyExpected ? "ON" : "OFF")} for this build)");
         return ok;
     }
