@@ -1,0 +1,14 @@
+{
+  "profiles": {
+    "Accel debug": {
+      "commandName": "Project",
+      "commandLineArgs": "--verbose",
+      "launchBrowser": false
+    },
+    "Accel (port 40011, alongside installed)": {
+      "commandName": "Project",
+      "commandLineArgs": "--port 40011 --verbose",
+      "launchBrowser": false
+    }
+  }
+}

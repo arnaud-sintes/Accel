@@ -47,10 +47,38 @@
   var reconnectTimer = null;
   var reconnectAttempts = 0;
 
+  // Font-size (zoom) bounds. MUST mirror App/Services/TerminalFontSizeStore.cs's TerminalFontSize
+  // constants (Default/Minimum/Maximum) - the host clamps with those when it reads the saved value
+  // back from disk, this side clamps with these on every step, and the two must agree or a value the
+  // host accepts could be rejected here (or vice versa) and the persisted size would drift from what
+  // is displayed.
+  var DEFAULT_FONT_SIZE = 14;
+  var MIN_FONT_SIZE = 8;
+  var MAX_FONT_SIZE = 32;
+
   // Diagnostic accumulator, read back via CoreWebView2.ExecuteScriptAsync by
   // Program.cs's `terminal-e2e-smoke-test` verb to prove real bytes from a real child arrived
   // over the wire. Not used by any production code path.
   window.accelReceivedText = "";
+
+  // The font size to start at: whatever the user last chose, injected by the host at document
+  // creation (TerminalView.InitializeAsync reads it from accel-ui.json into
+  // window.accelTerminalFontSize, the same AddScriptToExecuteOnDocumentCreatedAsync mechanism as
+  // accelConPtyBuildNumber, for the same reason - it has to be known before the Terminal
+  // constructor runs). Falls back to the default when the host did not inject anything (e.g. the
+  // page opened outside Accel during local development).
+  function initialFontSize() {
+    return clampFontSize(
+      typeof window.accelTerminalFontSize === "number" ? window.accelTerminalFontSize : DEFAULT_FONT_SIZE);
+  }
+
+  function clampFontSize(value) {
+    var rounded = Math.round(value);
+    if (!isFinite(rounded)) {
+      return DEFAULT_FONT_SIZE;
+    }
+    return Math.min(MAX_FONT_SIZE, Math.max(MIN_FONT_SIZE, rounded));
+  }
 
   function createTerminal() {
     term = new Terminal({
@@ -94,7 +122,10 @@
       // fixes it, because the browser's font-metrics measurement is sub-pixel-accurate regardless
       // of the font size being a whole number. See the task report for the real numbers read back
       // off a live instance via window.accelCellMetrics(), before and after the correction below.
-      fontSize: 14,
+      //
+      // User-adjustable since the zoom shortcuts (Ctrl+= / Ctrl+- / Ctrl+0 / Ctrl+wheel, see
+      // setFontSize) - still always a whole number, and every change re-runs the same snap.
+      fontSize: initialFontSize(),
       lineHeight: 1,
       letterSpacing: 0,
 
@@ -150,6 +181,8 @@
     fitAddon = new FitAddon.FitAddon();
     term.loadAddon(fitAddon);
     term.open(document.getElementById("term"));
+
+    installNativeSelection();
 
     // Must come after term.open() (the WebGL addon needs the element/renderer to exist) and
     // before the first fit/snap below, so cell metrics are measured against the renderer that
@@ -214,8 +247,80 @@
         return false;
       }
 
+      // Font-size zoom, the Windows Terminal / Warp convention: Ctrl+= (or Ctrl++, which on a US
+      // layout is Shift+= so shift is allowed here) grows, Ctrl+- shrinks, Ctrl+0 resets. Matched on
+      // event.key - the produced character, not the physical key - so it works the same on AZERTY
+      // (where "-" and "=" sit on different keys than US) and on the numpad's +/- keys.
+      //
+      // Ctrl+- is deliberately restricted to the un-shifted key: xterm maps both Ctrl+- and
+      // Ctrl+Shift+- (i.e. Ctrl+_) to the same 0x1F byte, which some CLIs bind (undo in a readline
+      // style input), so the shifted form is left alone and still reaches the child - a user who
+      // needs 0x1F has a way to send it. Ctrl+= and Ctrl+0 produce no terminal sequence in xterm at
+      // all, so stealing them costs nothing.
+      if (event.type === "keydown" && event.ctrlKey && !event.altKey) {
+        if (event.key === "=" || event.key === "+") {
+          event.preventDefault();
+          adjustFontSize(1);
+          return false;
+        }
+        if (event.key === "-" && !event.shiftKey) {
+          event.preventDefault();
+          adjustFontSize(-1);
+          return false;
+        }
+        if (event.key === "0" && !event.shiftKey) {
+          event.preventDefault();
+          setFontSize(DEFAULT_FONT_SIZE);
+          return false;
+        }
+      }
+
       return true;
     });
+
+    // Ctrl+wheel zoom. Registered on the container in the CAPTURE phase with passive:false so it
+    // runs before, and can suppress, xterm's own wheel listener on .xterm-viewport (which would
+    // otherwise scroll the scrollback by however many lines the wheel notch maps to), and so that
+    // preventDefault() is honoured at all (Chromium treats a wheel listener as passive by default,
+    // in which case preventDefault is a silent no-op). Chromium's own Ctrl+wheel page zoom is
+    // disabled host-side (TerminalView sets CoreWebView2Settings.IsZoomControlEnabled = false) -
+    // page zoom would scale the cells fractionally and defeat snapCellWidthToIntegerPixels().
+    //
+    // Delta is ACCUMULATED to one step per mouse-wheel notch rather than one step per event: a
+    // classic wheel delivers one event of ~100px per notch, but a precision touchpad delivers a
+    // stream of small pixel deltas for the same gesture, which per-event stepping would turn into a
+    // zoom that flies from minimum to maximum in one swipe. deltaMode 1/2 (lines/pages) are folded
+    // into the same pixel scale with Chromium's conventional factors.
+    var wheelAccumulator = 0;
+    var WHEEL_STEP_PX = 50;
+    document.getElementById("term").addEventListener("wheel", function (event) {
+      if (!event.ctrlKey) {
+        wheelAccumulator = 0;
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+
+      var delta = event.deltaY;
+      if (event.deltaMode === 1) {
+        delta *= 40;
+      } else if (event.deltaMode === 2) {
+        delta *= 800;
+      }
+
+      // A direction flip discards what was accumulated the other way, so a reversal responds
+      // immediately instead of first "unwinding" the previous direction's remainder.
+      if ((delta < 0 && wheelAccumulator > 0) || (delta > 0 && wheelAccumulator < 0)) {
+        wheelAccumulator = 0;
+      }
+      wheelAccumulator += delta;
+
+      while (Math.abs(wheelAccumulator) >= WHEEL_STEP_PX) {
+        adjustFontSize(wheelAccumulator < 0 ? 1 : -1);
+        wheelAccumulator -= WHEEL_STEP_PX * Math.sign(wheelAccumulator);
+      }
+    }, { passive: false, capture: true });
 
     // FitAddon -> resize-over-the-wire: observe the terminal container itself (not `window`,
     // which only fires on the whole WebView2 control's own size changing and would miss e.g. a
@@ -330,6 +435,91 @@
       }
     } catch (bridgeError) {
       // Best-effort - e.g. running this page outside a WebView2 host during local development.
+    }
+  }
+
+  // Full-screen CLIs (Claude Code) switch on xterm mouse reporting (DECSET 9/1000/1001/1002/1003),
+  // after which xterm.js forwards every click/drag to the app and only selects text while Shift is
+  // held. Swallowing those "enable" sequences keeps mouse tracking permanently off, so selection is
+  // always native. Mode 1006 (SGR encoding) is left alone: it only changes the format of reports
+  // that are never sent once tracking is off. Host-controlled via window.accelNativeSelection
+  // (accel-ui.json "terminalNativeSelection", default on); false leaves mouse reporting to the app.
+  var MOUSE_TRACKING_MODES = [9, 1000, 1001, 1002, 1003];
+
+  function installNativeSelection() {
+    if (window.accelNativeSelection === false) {
+      return;
+    }
+
+    term.parser.registerCsiHandler({ prefix: "?", final: "h" }, function (params) {
+      var passThrough = [];
+      var swallowed = false;
+      for (var i = 0; i < params.length; i++) {
+        var mode = Array.isArray(params[i]) ? params[i][0] : params[i];
+        if (MOUSE_TRACKING_MODES.indexOf(mode) >= 0) {
+          swallowed = true;
+        } else {
+          passThrough.push(mode);
+        }
+      }
+
+      if (!swallowed) {
+        return false;
+      }
+
+      if (passThrough.length > 0) {
+        term.write("\x1b[?" + passThrough.join(";") + "h");
+      }
+      return true;
+    });
+  }
+
+  function adjustFontSize(delta) {
+    if (!term) {
+      return;
+    }
+    setFontSize(term.options.fontSize + delta);
+  }
+
+  // Applies a new font size and everything that has to follow from it. Order matters:
+  //   1. letterSpacing back to 0 FIRST - the snap below measures the *total* advance width (glyph +
+  //      letterSpacing), so re-measuring with the previous size's fractional spacing still applied
+  //      would snap to the wrong integer;
+  //   2. fontSize - xterm re-measures the font synchronously on this option change (the same
+  //      assumption createTerminal() already relies on when it snaps straight after fit());
+  //   3. fit() + snap - a new cell size means a new column/row count for the same container box,
+  //      and a new fractional remainder to round away;
+  //   4. sendResize() - the ResizeObserver will NOT fire here (the container's box is unchanged,
+  //      only the cells inside it), so the child has to be told the new cols/rows explicitly or it
+  //      keeps laying out for the old grid and the picture wraps/tears;
+  //   5. tell the host, so the value is persisted (TerminalView's WebMessageReceived handler) - the
+  //      page deliberately does not remember it itself (see TerminalFontSizeStore's doc).
+  function setFontSize(requested) {
+    if (!term) {
+      return;
+    }
+
+    var fontSize = clampFontSize(requested);
+    if (fontSize === term.options.fontSize) {
+      return;
+    }
+
+    term.options.letterSpacing = 0;
+    term.options.fontSize = fontSize;
+    if (fitAddon) {
+      fitAddon.fit();
+    }
+    snapCellWidthToIntegerPixels();
+    sendResize();
+
+    logTerminalEvent("log", "fontSize=" + fontSize + " cellMetrics=" + JSON.stringify(window.accelCellMetrics()));
+
+    try {
+      if (window.chrome && window.chrome.webview) {
+        window.chrome.webview.postMessage({ source: "terminal-font", fontSize: fontSize });
+      }
+    } catch (bridgeError) {
+      // Best-effort - outside a WebView2 host the size simply is not persisted.
     }
   }
 
@@ -658,6 +848,17 @@
   // was actually applied client-side before asserting it reached the child.
   window.accelTermSize = function () {
     return term ? { cols: term.cols, rows: term.rows } : null;
+  };
+
+  // Host-callable font-size control (TerminalView.SetFontSizeAsync) and its read-back, so the host
+  // - or a smoke test - can drive the exact same code path the keyboard/wheel shortcuts use. The
+  // setter is the real setFontSize, not a look-alike, so it clamps, re-fits, re-snaps, resizes the
+  // child and reports back to the host exactly like a keypress would.
+  window.accelSetTerminalFontSize = function (fontSize) {
+    setFontSize(fontSize);
+  };
+  window.accelGetTerminalFontSize = function () {
+    return term ? term.options.fontSize : null;
   };
 
   try {

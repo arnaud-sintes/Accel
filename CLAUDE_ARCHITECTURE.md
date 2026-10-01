@@ -441,6 +441,17 @@ and guarantees they don't outlive the app even across crashes.
   reattached per tab selection (`AttachPtyAsync(tabId, port)` calls `window.accelAttachPty` which opens a
   `ws://…/pty/{tabId}` connection) rather than one WebView2 instance per tab, trading scrollback-on-switch
   for far lower resource cost.
+  - **Font-size zoom** (Ctrl+= / Ctrl+- / Ctrl+0 / Ctrl+wheel) is handled *inside the page*
+    (`terminal.js`'s `setFontSize`: change xterm's integer `fontSize`, reset and re-snap `letterSpacing`
+    to whole-pixel cells, `fit()`, then send `{"resize":[cols,rows]}` explicitly since the container's
+    box did not change) — never via Chromium page zoom, which `TerminalView` disables
+    (`IsZoomControlEnabled = false`) because a fractional zoom factor would undo the integer cell
+    metrics. Persistence is host-owned: the page posts a `terminal-font` WebMessage on every change,
+    `TerminalView` saves it through `App/Services/TerminalFontSizeStore.cs` to
+    `%USERPROFILE%\.claude\accel-ui.json`, and seeds the next page load via a document-created script
+    (`window.accelTerminalFontSize`, same mechanism as `accelConPtyBuildNumber`). The clamp bounds are
+    mirrored constants on both sides (`TerminalFontSize` in C#, `MIN_/MAX_/DEFAULT_FONT_SIZE` in JS).
+    `SetFontSizeAsync(int)` is the host-side entry point for any future menu/settings caller.
 - **Panel D file editor** (`FileViewerHost` in `MainWindow.xaml` + `ShowFileTabAsync` and friends in
   `MainWindow.xaml.cs`) — a single AvalonEdit `TextEditor` (`FileEditor`) layered over the terminal
   (Visibility-toggled, never tearing the PTY down) that renders `TabKind.File`/`TabKind.GitChange` tabs

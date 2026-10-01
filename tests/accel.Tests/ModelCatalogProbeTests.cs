@@ -101,4 +101,37 @@ public class ModelCatalogProbeTests
 
         Assert.Equal("Opus 5", entry.DisplayName);
     }
+
+    /// <summary>Claude Code 2.1.285 shape: versioned label, prose-first description.</summary>
+    [Fact]
+    public void ToEntry_VersionedLabelWithProseDescription_UsesLabelAndDashedId()
+    {
+        var row = new ModelPickerRow(3, "Sonnet 5.5", "Most efficient for simpler tasks · Org default", Selected: false);
+
+        var entry = ModelCatalogProbe.ToEntry(row, tiers: []);
+
+        Assert.Equal("Sonnet 5.5", entry.DisplayName);
+        Assert.Equal("claude-sonnet-5-5", entry.CliValue);
+    }
+
+    [Fact]
+    public void ToEntry_LabelWithGluedRecommendedNote_DropsTheNote()
+    {
+        var row = new ModelPickerRow(2, "Opus 5.5(recommended)", "For complex work and everyday tasks", Selected: false);
+
+        var entry = ModelCatalogProbe.ToEntry(row, tiers: []);
+
+        Assert.Equal("Opus 5.5", entry.DisplayName);
+        Assert.Equal("claude-opus-5-5", entry.CliValue);
+    }
+
+    [Theory]
+    [InlineData("Sonnet", "Sonnet")]
+    [InlineData("Sonnet 5", "claude-sonnet-5")]
+    [InlineData("Fable 5.1", "claude-fable-5-1")]
+    [InlineData("Opus 4.8", "claude-opus-4-8")]
+    public void ToLaunchValue_AliasesStayBare_VersionedNamesBecomeDashedIds(string name, string expected)
+    {
+        Assert.Equal(expected, ModelCatalogProbe.ToLaunchValue(name));
+    }
 }

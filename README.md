@@ -133,6 +133,18 @@ The monitor window is split into five panels (`A`–`E`), each bound to its own 
 
 - **Panel C — Tab Strip** (`TabsViewModel`, top of the center column) and **Panel D — Terminal** (`TerminalView`, below the tab strip): one tab per open PTY session; double-clicking a tab renames it; selecting a tab focuses it across the whole window (Panel A highlights the matching session, Panel D reattaches its terminal — a single shared WebView2/xterm.js instance — to it over a `ws://…/pty/{tabId}` connection, Panel E rebuilds around it). Tabs also host plain shell sessions (from a root's *Open terminal here…*) and file/diff viewers, not just `claude` sessions.
 
+  Keyboard shortcuts (when the terminal has focus):
+  | Shortcut | Action |
+  |---|---|
+  | `Ctrl+=` / `Ctrl++` / `Ctrl+wheel up` | Increase the terminal font size |
+  | `Ctrl+-` / `Ctrl+wheel down` | Decrease the terminal font size |
+  | `Ctrl+0` | Reset the font size to the default (14 px) |
+  | `Shift+Enter` | Soft newline (sent to the CLI as `ESC CR`) |
+  | `Ctrl+C` | Copy when text is selected, otherwise the usual interrupt |
+  | `Ctrl+V` | Paste |
+
+  The font size (8–32 px) is remembered across restarts in `%USERPROFILE%\.claude\accel-ui.json`. Every step re-fits the terminal and resizes the running process to the new column/row count, so a full-screen CLI redraws at the new size rather than wrapping. `Ctrl+Shift+-` is deliberately left alone: it sends the `Ctrl+_` control byte to the CLI, as in any other terminal.
+
 - **Panel D — File editor** (shares Panel D with the terminal): a file or git-change tab opened from Panel B shows the file's content with syntax highlighting and line numbers — and, when the file exists on disk and reads as text, it is **editable**: type directly, undo/redo, then save. Saves preserve the file's original encoding, BOM, and line-ending style (LF/CRLF/mixed, trailing newline) — only your text changes, never the file's byte shape. Unsaved changes are marked with a `●` and a bold tab title, plus Save/Discard buttons in the tab header; closing a dirty tab (or quitting with dirty tabs open) prompts before anything is lost. If another writer (e.g. a running Claude Code session) changes the file on disk while you have it open, a clean tab silently reloads and a dirty one asks whether to keep your version, reload, or cancel. Deleted git entries, Modified-entry diffs, and non-text files stay read-only; markdown tabs also offer a read-only rendered-HTML preview toggle.
 
   **Find in document (`Ctrl+F`)**: a find bar floats over the top-right of the pane, highlighting every hit in the document (the one you are currently on in a stronger colour) with a `3/17` position counter, wrapping next/previous stepping, and match-case / whole-word toggles. It works in the single-pane file viewer and, in a side-by-side diff, on the **"After" side** — the side you are reading and, on an unstaged Modified entry, editing. Editable and read-only tabs both support it.

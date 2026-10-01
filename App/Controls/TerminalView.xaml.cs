@@ -7,6 +7,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using Accel.App.Services;
 using Microsoft.Web.WebView2.Core;
 
 /// <summary>
@@ -53,6 +54,14 @@ public partial class TerminalView : UserControl, IDisposable
 
     private string? _attachedTabId;
     private int _attachedWebSocketPort;
+
+    /// <summary>
+    /// Where the user's chosen terminal font size lives between launches (<c>accel-ui.json</c>). Read
+    /// once per (re-)initialization to seed the page, written on every <c>terminal-font</c> message
+    /// the page posts back - see <see cref="TerminalFontSizeStore"/> for why the host owns this and not
+    /// the page's own <c>localStorage</c>.
+    /// </summary>
+    private readonly TerminalFontSizeStore _fontSizeStore = new(TerminalFontSizeStore.DefaultPath());
 
     public TerminalView()
     {
@@ -178,6 +187,14 @@ public partial class TerminalView : UserControl, IDisposable
         // a brand new CoreWebView2 instance after a prior one's process died - see OnProcessFailed.
         Browser.CoreWebView2.ProcessFailed += OnProcessFailed;
 
+        // Chromium's built-in page zoom (Ctrl+= / Ctrl+- / Ctrl+0 / Ctrl+wheel, on by default in
+        // WebView2) must be off: those exact gestures are terminal.js's font-size shortcuts, and page
+        // zoom scales the whole page by a fractional factor - which multiplies xterm's cell metrics by
+        // that factor too and undoes snapCellWidthToIntegerPixels()' whole-pixel cells (the smearing /
+        // column-misalignment the snap exists to prevent). Changing xterm's own integer fontSize
+        // instead, then re-snapping, is the only zoom that keeps the cells integral.
+        Browser.CoreWebView2.Settings.IsZoomControlEnabled = false;
+
         // Paste (Ctrl+V, terminal.js's handlePaste) reads the clipboard via
         // navigator.clipboard.readText(), which Chromium/WebView2 gates behind an explicit
         // permission grant (CoreWebView2PermissionKind.ClipboardRead) - unlike writeText() (used
@@ -205,15 +222,38 @@ public partial class TerminalView : UserControl, IDisposable
             {
                 using var message = JsonDocument.Parse(e.WebMessageAsJson);
                 var root = message.RootElement;
-                if (!root.TryGetProperty("source", out var source) ||
-                    source.GetString() != "terminal-renderer")
+                if (!root.TryGetProperty("source", out var source))
                 {
                     return;
                 }
 
-                var level = root.TryGetProperty("level", out var levelProp) ? levelProp.GetString() : "log";
-                var text = root.TryGetProperty("message", out var messageProp) ? messageProp.GetString() : null;
-                Console.WriteLine($"[TerminalRenderer:{level}] {text}");
+                switch (source.GetString())
+                {
+                    case "terminal-renderer":
+                    {
+                        var level = root.TryGetProperty("level", out var levelProp) ? levelProp.GetString() : "log";
+                        var text = root.TryGetProperty("message", out var messageProp) ? messageProp.GetString() : null;
+                        Console.WriteLine($"[TerminalRenderer:{level}] {text}");
+                        break;
+                    }
+
+                    // terminal.js's setFontSize reports every applied zoom step here (keyboard, wheel,
+                    // or SetFontSizeAsync alike) so it can be restored on the next launch - the page
+                    // itself has already re-fitted/re-snapped/resized the child by the time this
+                    // arrives, so persistence is the only thing left to do. The value is already
+                    // clamped page-side; Save clamps again because the two sides' bounds are mirrored
+                    // constants, not shared code.
+                    case "terminal-font":
+                    {
+                        if (root.TryGetProperty("fontSize", out var fontSizeProp) &&
+                            fontSizeProp.TryGetInt32(out var fontSize))
+                        {
+                            _fontSizeStore.Save(fontSize);
+                        }
+
+                        break;
+                    }
+                }
             }
             catch (JsonException)
             {
@@ -246,6 +286,17 @@ public partial class TerminalView : UserControl, IDisposable
         // pushed in afterwards would arrive too late to be part of the constructor's options.
         await Browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(
             $"window.accelConPtyBuildNumber = {ConPtyBuildNumber().ToString(CultureInfo.InvariantCulture)};");
+
+        // Same mechanism, same reason, for the persisted font size: terminal.js reads
+        // window.accelTerminalFontSize in the Terminal constructor's options (see its
+        // initialFontSize()), so it has to be in place before the document's own scripts run. Read
+        // from disk here rather than cached in a field so a WebView2 process recovery
+        // (OnProcessFailed -> InitializeAsync again) seeds the fresh page with the latest saved value.
+        await Browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(
+            BuildFontSizeInitScript(_fontSizeStore.Load()));
+
+        await Browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(
+            BuildNativeSelectionInitScript(_fontSizeStore.LoadNativeSelection()));
 
         // Navigate() only starts the navigation - it returns long before index.html's own
         // <script> has run, let alone set document.title. Wait for NavigationCompleted so
@@ -333,6 +384,40 @@ public partial class TerminalView : UserControl, IDisposable
 
         _attachedTabId = null;
     }
+
+    /// <summary>
+    /// Sets the terminal font size from the host, via <c>window.accelSetTerminalFontSize(px)</c> - the
+    /// exact routine terminal.js's Ctrl+= / Ctrl+- / Ctrl+0 / Ctrl+wheel shortcuts run, so it clamps
+    /// to [<see cref="TerminalFontSize.Minimum"/>, <see cref="TerminalFontSize.Maximum"/>], re-fits,
+    /// re-snaps the cell width, resizes the child pty and posts the value back for persistence, all
+    /// page-side. Not used by any shortcut today (those are handled inside the page, where the
+    /// keystrokes land); it exists for a host-side caller - a menu item, a future settings UI, a smoke
+    /// test - so it never has to reach into the page with an ad-hoc script.
+    /// </summary>
+    public async Task SetFontSizeAsync(int fontSize)
+    {
+        await Initialization;
+        await WebView2ProcessRecovery.WithTimeout(
+            Browser.CoreWebView2.ExecuteScriptAsync(BuildSetFontSizeScript(fontSize)),
+            ScriptTimeout,
+            "terminal font size change");
+    }
+
+    /// <summary>
+    /// The <c>window.accelTerminalFontSize = N;</c> document-created script that seeds terminal.js's
+    /// initial font size. Clamps so a hand-edited <c>accel-ui.json</c> can never push an absurd value
+    /// into the page. Pure, for the same unit-testability reason as <see cref="BuildAttachScript"/>.
+    /// </summary>
+    internal static string BuildNativeSelectionInitScript(bool enabled) =>
+        $"window.accelNativeSelection = {(enabled ? "true" : "false")};";
+
+    internal static string BuildFontSizeInitScript(int fontSize) =>
+        $"window.accelTerminalFontSize = {TerminalFontSize.Clamp(fontSize).ToString(CultureInfo.InvariantCulture)};";
+
+    /// <summary>The <c>window.accelSetTerminalFontSize(N);</c> call <see cref="SetFontSizeAsync"/> runs,
+    /// clamped host-side too so the two sides can never disagree about what was requested.</summary>
+    internal static string BuildSetFontSizeScript(int fontSize) =>
+        $"window.accelSetTerminalFontSize({TerminalFontSize.Clamp(fontSize).ToString(CultureInfo.InvariantCulture)});";
 
     /// <summary>
     /// Builds the <c>window.accelAttachPty(tabId, port)</c> call, JSON-encoding

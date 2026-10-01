@@ -229,7 +229,7 @@ public class ModelCatalogTests
     {
         using var file = new TempFile();
         File.WriteAllText(file.Path, """
-            { "SchemaVersion": 1, "CliBinaryIdentity": "identity-a", "Models": [] }
+            { "SchemaVersion": 2, "CliBinaryIdentity": "identity-a", "Models": [] }
             """);
 
         Assert.Null(ModelCatalogCache.TryLoad(file.Path, "identity-a"));

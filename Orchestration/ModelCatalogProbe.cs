@@ -161,6 +161,7 @@ public sealed class ModelCatalogProbe
         }
 
         var options = new PtySessionOptions { Columns = Columns, Rows = Rows };
+        var sessionsBefore = ProbeSessionCleanup.Snapshot(workingDirectory);
         PtySession session;
         try
         {
@@ -173,22 +174,29 @@ public sealed class ModelCatalogProbe
         }
 
         var raw = new StringBuilder();
-        using (session)
-        using (var collector = new PtyOutputCollector(session, raw))
+        try
         {
-            try
+            using (session)
+            using (var collector = new PtyOutputCollector(session, raw))
             {
-                return await RunAsync(session, collector, raw, stopwatch, cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    return await RunAsync(session, collector, raw, stopwatch, cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    return new ModelCatalogProbeResult(
+                        ModelCatalogProbeOutcome.Cancelled, null, null, stopwatch.Elapsed);
+                }
+                finally
+                {
+                    Quit(session);
+                }
             }
-            catch (OperationCanceledException)
-            {
-                return new ModelCatalogProbeResult(
-                    ModelCatalogProbeOutcome.Cancelled, null, null, stopwatch.Elapsed);
-            }
-            finally
-            {
-                Quit(session);
-            }
+        }
+        finally
+        {
+            ProbeSessionCleanup.DeleteProbeSessions(workingDirectory, sessionsBefore);
         }
     }
 
@@ -441,9 +449,46 @@ public sealed class ModelCatalogProbe
     /// </summary>
     internal static ModelCatalogEntry ToEntry(ModelPickerRow row, IReadOnlyList<string> tiers)
     {
-        var cliValue = ExtractCliValue(row.Label);
-        var displayName = FirstSegment(row.Description) ?? row.Label;
-        return new ModelCatalogEntry(cliValue, displayName, NullIfEmpty(row.Description), tiers);
+        var name = ExtractCliValue(row.Label);
+        return new ModelCatalogEntry(ToLaunchValue(name), ChooseDisplayName(name, row.Description), NullIfEmpty(row.Description), tiers);
+    }
+
+    /// <summary>
+    /// The user-facing name. Since Claude Code 2.1.285 the row label already carries the version
+    /// ("Sonnet 5.5") and the description leads with prose ("Most efficient for simpler tasks · Org
+    /// default"), so the label wins. The description's first segment is used only when it extends the
+    /// label's family name (the older "Sonnet" / "Sonnet 5 · ..." shape) - never when it is prose.
+    /// </summary>
+    private static string ChooseDisplayName(string name, string? description)
+    {
+        var segment = FirstSegment(description);
+        if (segment is not null &&
+            segment.StartsWith(name, StringComparison.OrdinalIgnoreCase) &&
+            segment.Length > name.Length &&
+            char.IsWhiteSpace(segment[name.Length]))
+        {
+            return segment;
+        }
+
+        return name;
+    }
+
+    /// <summary>
+    /// Turns a picker name into something <c>claude --model</c> accepts. A bare family ("Sonnet") is
+    /// already an alias; a versioned name ("Sonnet 5.5") is rejected by the CLI as an unrecognized
+    /// model, so it becomes the dashed id ("claude-sonnet-5-5"), which keeps "Sonnet 5" and
+    /// "Sonnet 5.5" distinct where the bare alias could not.
+    /// </summary>
+    internal static string ToLaunchValue(string name)
+    {
+        var tokens = name.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        if (tokens.Length < 2)
+        {
+            return name;
+        }
+
+        var version = string.Join('-', tokens[1..]).Replace('.', '-');
+        return $"claude-{tokens[0].ToLowerInvariant()}-{version}";
     }
 
     /// <summary>

@@ -250,6 +250,18 @@ If a legacy `folder.json` (2 or 3) has content while the durable file is missing
 
 If not found or malformed, treated as an empty config (no roots, no session overrides).
 
+### UI Preferences
+
+`%USERPROFILE%\.claude\accel-ui.json` (`TerminalFontSizeStore.DefaultPath()`), one flat key per
+window-level preference. Today it holds only `terminalFontSize` (the panel D zoom level chosen via
+Ctrl+= / Ctrl+- / Ctrl+0 / Ctrl+wheel, clamped to 8–32 on read and write). Created on the first zoom
+step; missing, malformed or out-of-range content degrades to the default (14) and is rewritten
+cleanly on the next save. Safe to delete at any time.
+
+Also read (never written by Accel): `terminalNativeSelection` (boolean, default `true`). On, panel D
+swallows the app's mouse-reporting enable sequences (DECSET 9/1000/1001/1002/1003) so text selection
+works without holding Shift; set it to `false` to let full-screen CLIs handle the mouse themselves.
+
 ### Model/Effort Catalog Cache
 
 `%USERPROFILE%\.claude\accel-model-catalog.json` (`ModelCatalogCache.DefaultPath()`), written only after
