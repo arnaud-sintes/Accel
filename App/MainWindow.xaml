@@ -283,6 +283,7 @@
         built").
     -->
     <Border x:Name="ChromeRoot" Background="{StaticResource BackgroundBaseBrush}">
+    <Grid>
     <DockPanel LastChildFill="True">
 
         <!--
@@ -294,18 +295,10 @@
                                   VersionText="{x:Static controls:AppVersionInfo.DisplayText}" />
 
         <!--
-            P4-T2: non-modal "rename may not have applied" warning banner (the plan's exact wording
-            for what a rename's completion-poll timeout should surface - the write may well have
-            landed even though the status file never confirmed a matching name within the timeout, so
-            this deliberately never blocks the UI the way a MessageBox would). Collapsed by default;
-            MainWindow.ShowTransientWarning sets the text and shows it, auto-hiding itself again after
-            a few seconds via a DispatcherTimer.
+            P4-T2: the non-modal transient banner (rename-timeout warning, remove-session
+            confirmation) is declared at the end of this file as an overlay - see
+            TransientWarningBanner. MainWindow.ShowTransientWarning drives it.
         -->
-        <Border x:Name="TransientWarningBanner" DockPanel.Dock="Top" Background="{StaticResource WarningBackgroundBrush}"
-                BorderBrush="{StaticResource WarningBorderBrush}" BorderThickness="0,0,0,1" Padding="16,10" Visibility="Collapsed">
-            <TextBlock x:Name="TransientWarningText" TextWrapping="Wrap" FontSize="{StaticResource FontSizeBody}"
-                       Foreground="{StaticResource WarningTextBrush}" />
-        </Border>
 
         <!-- Horizontal split: Panel A | splitter | center area | splitter | Panel B. -->
         <Grid>
@@ -1802,5 +1795,21 @@
             </Border>
         </Grid>
     </DockPanel>
+
+    <!--
+        Transient banner, overlaid just below the title bar (44px, see CustomTitleBar) rather than
+        docked into the layout: docking it pushed every panel down while it showed and back up when
+        it hid. Same look as before; only the placement changed. Declared after the DockPanel so it
+        paints on top, and IsHitTestVisible=False so it never swallows a click meant for the panels.
+    -->
+    <Border x:Name="TransientWarningBanner" VerticalAlignment="Top" Margin="0,44,0,0"
+            IsHitTestVisible="False"
+            Background="{StaticResource WarningBackgroundBrush}"
+            BorderBrush="{StaticResource WarningBorderBrush}" BorderThickness="0,0,0,1" Padding="16,10" Visibility="Collapsed">
+        <TextBlock x:Name="TransientWarningText" TextWrapping="Wrap" FontSize="{StaticResource FontSizeBody}"
+                   Foreground="{StaticResource WarningTextBrush}"
+                   AutomationProperties.LiveSetting="Polite" />
+    </Border>
+    </Grid>
     </Border>
 </Window>

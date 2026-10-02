@@ -3264,9 +3264,10 @@ public partial class MainWindow : Window
     private DispatcherTimer? _transientWarningTimer;
 
     /// <summary>
-    /// Shows <paramref name="text"/> in the non-modal banner beneath the menu bar, auto-hiding it again
-    /// after a few seconds. Never blocks the caller and never stacks timers - a second call while one is
-    /// already showing just restarts the clock with the new text.
+    /// Shows <paramref name="text"/> in the non-modal banner overlaid beneath the title bar (it floats
+    /// over the panels, so showing/hiding it never shifts the layout), auto-hiding it again after a few
+    /// seconds. Never blocks the caller and never stacks timers - a second call while one is already
+    /// showing just restarts the clock with the new text.
     /// </summary>
     private void ShowTransientWarning(string text)
     {

@@ -296,8 +296,10 @@
     document.getElementById("term").addEventListener("wheel", function (event) {
       if (!event.ctrlKey) {
         wheelAccumulator = 0;
+        forwardWheelToApp(event);
         return;
       }
+      mouseWheelAccumulator = 0;
 
       event.preventDefault();
       event.stopPropagation();
@@ -446,10 +448,70 @@
   // (accel-ui.json "terminalNativeSelection", default on); false leaves mouse reporting to the app.
   var MOUSE_TRACKING_MODES = [9, 1000, 1001, 1002, 1003];
 
+  // Whether the app asked for mouse tracking that installNativeSelection swallowed (modes that carry
+  // wheel events: everything but X10's mode 9, which reports button presses only). Because xterm never
+  // sees the request, with tracking "off" it treats a wheel notch in the alternate screen (Claude Code
+  // runs there, so there is no scrollback to scroll) as Up/Down arrow keys - which the app reads as
+  // prompt-history navigation. forwardWheelToApp below sends the wheel to the app instead, as the
+  // mouse report it asked for, so it scrolls its own transcript.
+  var appWantsMouse = false;
+  var mouseWheelAccumulator = 0;
+  var MOUSE_WHEEL_STEP_PX = 100;
+
+  function forwardWheelToApp(event) {
+    if (!appWantsMouse || !term || term.buffer.active.type !== "alternate") {
+      mouseWheelAccumulator = 0;
+      return;
+    }
+
+    // Take the gesture away from xterm (its arrow-key fallback) and from the page.
+    event.preventDefault();
+    event.stopPropagation();
+
+    var delta = event.deltaY;
+    if (event.deltaMode === 1) {
+      delta *= 40;
+    } else if (event.deltaMode === 2) {
+      delta *= 800;
+    }
+
+    if ((delta < 0 && mouseWheelAccumulator > 0) || (delta > 0 && mouseWheelAccumulator < 0)) {
+      mouseWheelAccumulator = 0;
+    }
+    mouseWheelAccumulator += delta;
+
+    // 1-based cell under the pointer, as SGR (1006) mouse reports expect.
+    var screen = term.element && term.element.querySelector(".xterm-screen");
+    var rect = (screen || document.getElementById("term")).getBoundingClientRect();
+    var col = Math.min(term.cols, Math.max(1, Math.floor((event.clientX - rect.left) / (rect.width / term.cols)) + 1));
+    var row = Math.min(term.rows, Math.max(1, Math.floor((event.clientY - rect.top) / (rect.height / term.rows)) + 1));
+
+    // One report per notch: a classic wheel sends ~100px per notch, a precision touchpad a stream of
+    // small deltas for the same gesture (same reasoning as the Ctrl+wheel zoom above). 64 = wheel up,
+    // 65 = wheel down.
+    while (Math.abs(mouseWheelAccumulator) >= MOUSE_WHEEL_STEP_PX) {
+      var button = mouseWheelAccumulator < 0 ? 64 : 65;
+      handleTerminalData("\x1b[<" + button + ";" + col + ";" + row + "M");
+      mouseWheelAccumulator -= MOUSE_WHEEL_STEP_PX * Math.sign(mouseWheelAccumulator);
+    }
+  }
+
   function installNativeSelection() {
     if (window.accelNativeSelection === false) {
       return;
     }
+
+    // The app turning mouse tracking back off (Claude Code does on exit/suspend): stop forwarding.
+    // Returns false so xterm still processes the reset itself.
+    term.parser.registerCsiHandler({ prefix: "?", final: "l" }, function (params) {
+      for (var i = 0; i < params.length; i++) {
+        var mode = Array.isArray(params[i]) ? params[i][0] : params[i];
+        if (MOUSE_TRACKING_MODES.indexOf(mode) >= 0) {
+          appWantsMouse = false;
+        }
+      }
+      return false;
+    });
 
     term.parser.registerCsiHandler({ prefix: "?", final: "h" }, function (params) {
       var passThrough = [];
@@ -458,6 +520,9 @@
         var mode = Array.isArray(params[i]) ? params[i][0] : params[i];
         if (MOUSE_TRACKING_MODES.indexOf(mode) >= 0) {
           swallowed = true;
+          if (mode !== 9) {
+            appWantsMouse = true;
+          }
         } else {
           passThrough.push(mode);
         }
@@ -762,6 +827,8 @@
     if (term) {
       term.reset();
     }
+    appWantsMouse = false;
+    mouseWheelAccumulator = 0;
   };
 
   // Test-only entry point for terminal-e2e-smoke-test's raw-Ctrl+C-byte check. Calls the exact

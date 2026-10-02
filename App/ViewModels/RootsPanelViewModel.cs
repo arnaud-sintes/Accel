@@ -791,8 +791,81 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
         if (!_disposed)
         {
             ApplyFocus();
+            _selectFocusedPending = true;
+            SelectFocusedSession();
         }
     });
+
+    /// <summary>
+    /// Set when the focused session should be selected in the tree but its row is not there yet - a
+    /// freshly created session's tab is focused before the next telemetry snapshot lists it. Cleared
+    /// once the row is found (here or in <see cref="Rebuild"/>), or when it cannot be selected for a
+    /// reason that will not resolve itself (see <see cref="SelectFocusedSession"/>).
+    /// </summary>
+    private bool _selectFocusedPending;
+
+    /// <summary>
+    /// Makes panel A's tree selection follow panel C's focused tab: expands every ancestor of the
+    /// focused session's row (so its project root is open and the row is on screen) and selects it.
+    /// Runs on a focus <i>change</i> only, never on every rebuild - a rebuild restores the user's own
+    /// selection, and re-forcing the focused row there would fight them while they click around this
+    /// panel. Selection here never writes focus back (panel A only reads it), so there is no loop.
+    /// Does nothing while a search filter hides the row: surfacing it would mean clearing the filter
+    /// the user typed.
+    /// </summary>
+    private void SelectFocusedSession()
+    {
+        string? focusedId = _selection?.FocusedSessionId;
+        if (string.IsNullOrEmpty(focusedId))
+        {
+            _selectFocusedPending = false;
+            return;
+        }
+
+        var chain = FindAncestorChain(Roots, focusedId!);
+        if (chain is null)
+        {
+            // Not in the tree (yet) - keep the request for the next rebuild.
+            return;
+        }
+
+        _selectFocusedPending = false;
+
+        var node = chain[^1];
+        if (!node.IsVisible)
+        {
+            return;
+        }
+
+        for (int i = 0; i < chain.Count - 1; i++)
+        {
+            chain[i].IsExpanded = true;
+        }
+
+        node.IsSelected = true;
+    }
+
+    /// <summary>The path from a top-level row down to the session row keyed <paramref name="key"/>
+    /// (inclusive, case-insensitive like <see cref="ISessionSelectionService.IsFocused"/>), or null.</summary>
+    private static List<RootsPanelNodeViewModel>? FindAncestorChain(IEnumerable<RootsPanelNodeViewModel> nodes, string key)
+    {
+        foreach (var node in nodes)
+        {
+            if (node.Kind == RootsPanelNodeKind.Session && string.Equals(node.Key, key, StringComparison.OrdinalIgnoreCase))
+            {
+                return new List<RootsPanelNodeViewModel> { node };
+            }
+
+            var below = FindAncestorChain(node.Children, key);
+            if (below is not null)
+            {
+                below.Insert(0, node);
+                return below;
+            }
+        }
+
+        return null;
+    }
 
     /// <summary>
     /// Whether the Accel window itself is currently the active (foreground) window - set by
@@ -959,6 +1032,13 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
             if (!string.IsNullOrWhiteSpace(SearchText))
             {
                 ApplyFilter();
+            }
+
+            // A focus change that arrived before its row existed (see _selectFocusedPending). After the
+            // filter, so IsVisible is current.
+            if (_selectFocusedPending)
+            {
+                SelectFocusedSession();
             }
         }
         finally

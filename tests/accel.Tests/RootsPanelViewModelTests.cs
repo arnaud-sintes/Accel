@@ -301,6 +301,57 @@ public class RootsPanelViewModelTests
     }
 
     [Fact]
+    public void FocusChange_SelectsTheFocusedSession_AndExpandsItsRoot()
+    {
+        var (vm, feed, _, writer) = BuildWithSelection();
+        feed.Publish(TelemetryFixtures.Tree(new[]
+        {
+            TelemetryFixtures.Root(RootPath, TelemetryFixtures.Session("s-1"), TelemetryFixtures.Session("s-2")),
+        }));
+        Node(vm, RootPath).IsExpanded = false;
+
+        writer.SetFocused("s-2");
+
+        Assert.True(Node(vm, "s-2").IsSelected);
+        Assert.Equal("s-2", vm.SelectedKey);
+        Assert.True(Node(vm, RootPath).IsExpanded);
+    }
+
+    [Fact]
+    public void FocusChange_BeforeTheRowExists_SelectsItOnTheNextRebuild()
+    {
+        var (vm, feed, _, writer) = BuildWithSelection();
+        feed.Publish(TelemetryFixtures.Tree(new[] { TelemetryFixtures.Root(RootPath, TelemetryFixtures.Session("s-1")) }));
+
+        writer.SetFocused("s-new");
+        Assert.NotEqual("s-new", vm.SelectedKey);
+
+        feed.Publish(TelemetryFixtures.Tree(new[]
+        {
+            TelemetryFixtures.Root(RootPath, TelemetryFixtures.Session("s-1"), TelemetryFixtures.Session("s-new")),
+        }));
+
+        Assert.Equal("s-new", vm.SelectedKey);
+    }
+
+    [Fact]
+    public void Rebuild_DoesNotReSelectTheFocusedSession_OverTheUsersOwnSelection()
+    {
+        var (vm, feed, _, writer) = BuildWithSelection();
+        var dto = TelemetryFixtures.Tree(new[]
+        {
+            TelemetryFixtures.Root(RootPath, TelemetryFixtures.Session("s-1"), TelemetryFixtures.Session("s-2")),
+        });
+        feed.Publish(dto);
+        writer.SetFocused("s-2");
+
+        Node(vm, "s-1").IsSelected = true;
+        feed.Publish(dto);
+
+        Assert.Equal("s-1", vm.SelectedKey);
+    }
+
+    [Fact]
     public void Selection_IsClearedWhenTheSelectedNodeNoLongerExists()
     {
         var (vm, feed, _) = Build();

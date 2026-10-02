@@ -452,6 +452,12 @@ and guarantees they don't outlive the app even across crashes.
     (`window.accelTerminalFontSize`, same mechanism as `accelConPtyBuildNumber`). The clamp bounds are
     mirrored constants on both sides (`TerminalFontSize` in C#, `MIN_/MAX_/DEFAULT_FONT_SIZE` in JS).
     `SetFontSizeAsync(int)` is the host-side entry point for any future menu/settings caller.
+  - **Wheel forwarding.** Native selection swallows the app's mouse-tracking enable (DECSET 1000/1002/…),
+    so xterm would turn a wheel notch in the alternate screen into Up/Down arrows — prompt-history
+    navigation in Claude Code. `terminal.js` remembers that the app asked for tracking (`appWantsMouse`,
+    cleared by the matching `?…l`) and, in the alternate buffer, sends the wheel to the PTY as an SGR
+    report (`ESC[<64|65;col;rowM`, one per ~100px) instead, so the app scrolls its own transcript.
+    Ctrl+wheel is still zoom.
 - **Panel D file editor** (`FileViewerHost` in `MainWindow.xaml` + `ShowFileTabAsync` and friends in
   `MainWindow.xaml.cs`) — a single AvalonEdit `TextEditor` (`FileEditor`) layered over the terminal
   (Visibility-toggled, never tearing the PTY down) that renders `TabKind.File`/`TabKind.GitChange` tabs
