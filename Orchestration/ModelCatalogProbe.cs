@@ -104,6 +104,7 @@ public sealed class ModelCatalogProbe
     private const string KeyUp = "\u001b[A";
     private const string KeyDown = "\u001b[B";
     private const string KeyRight = "\u001b[C";
+    private const string KeyLeft = "\u001b[D";
     private const string KeyEscape = "\u001b";
 
     /// <summary>Rows the picker paints that are not selectable models in their own right. "Default" is
@@ -276,9 +277,10 @@ public sealed class ModelCatalogProbe
     /// selected row is currently on, never that row's whole range, so the range has to be driven out
     /// of it: park on the row, then press Right one step at a time and record each distinct tier.
     ///
-    /// <para>The slider <b>wraps</b> - stepping past the top tier returns to the bottom rather than
-    /// stopping - so there is no floor to walk to first and no "it stopped changing" terminator. One
-    /// full cycle, ending the first time a tier repeats, is what yields the ladder.</para>
+    /// <para>The slider <b>clamps</b> at its ends (as of Claude Code 2.1.296; an earlier version was
+    /// believed to wrap) and its value carries over between rows, so each ladder is read by walking
+    /// Left to the floor and then Right to the ceiling, ending a direction when the tier stops
+    /// changing or repeats.</para>
     /// </summary>
     private async Task<WalkResult> WalkRowsAsync(
         PtySession session,
@@ -383,23 +385,49 @@ public sealed class ModelCatalogProbe
 
         var tiers = new List<string> { startingTier };
 
+        // Both directions, because the picker's effort setting is shared state that carries over from
+        // the previous row (a walk that ends on "max" leaves the next row parked on "max"), and the
+        // slider clamps at its ends in Claude Code 2.1.296 rather than wrapping. Walking only Right
+        // from wherever the row opened therefore read a one-tier ladder ("max") for every row after
+        // the first. Each direction stops when the tier stops changing (clamped) or repeats (wrapped).
+        await WalkSliderAsync(session, collector, raw, KeyLeft, tiers, cancellationToken).ConfigureAwait(false);
+        await WalkSliderAsync(session, collector, raw, KeyRight, tiers, cancellationToken).ConfigureAwait(false);
+
+        return OrderAscending(tiers);
+    }
+
+    private async Task WalkSliderAsync(
+        PtySession session,
+        PtyOutputCollector collector,
+        StringBuilder raw,
+        string key,
+        List<string> tiers,
+        CancellationToken cancellationToken)
+    {
         // Headroom past the built-in vocabulary, so a ladder longer than the one Accel knows is
         // discovered rather than silently truncated to the expected length - which is exactly what
         // would have happened to "ultracode" had this been sized to EffortBarLevel.Levels.
         var maxSteps = EffortBarLevel.Levels.Count + 5;
+        var previous = ModelPickerScreenParser.Parse(Render(raw)).CurrentEffort;
         for (var step = 0; step < maxSteps; step++)
         {
-            await SendAsync(session, collector, KeyRight, cancellationToken).ConfigureAwait(false);
+            await SendAsync(session, collector, key, cancellationToken).ConfigureAwait(false);
             var next = ModelPickerScreenParser.Parse(Render(raw)).CurrentEffort;
-            if (next is null || tiers.Contains(next))
+
+            // Unchanged means clamped at this end. Termination is "same as the step before", not
+            // "already collected": the Right pass starts at the floor the Left pass just collected.
+            if (next is null || string.Equals(next, previous, StringComparison.OrdinalIgnoreCase))
             {
                 break;
             }
 
-            tiers.Add(next);
-        }
+            if (!tiers.Contains(next, StringComparer.OrdinalIgnoreCase))
+            {
+                tiers.Add(next);
+            }
 
-        return OrderAscending(tiers);
+            previous = next;
+        }
     }
 
     /// <summary>The row the picker's cursor is on. Falls back to the only row when exactly one

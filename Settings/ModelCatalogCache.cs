@@ -205,7 +205,7 @@ public static class ModelCatalogCache
     /// files by construction instead of mis-reading them.</summary>
     private sealed class CachedCatalog
     {
-        public const int CurrentSchemaVersion = 2;
+        public const int CurrentSchemaVersion = 3;
 
         public int SchemaVersion { get; set; }
 
