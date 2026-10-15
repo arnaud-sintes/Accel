@@ -618,6 +618,24 @@ public partial class MainWindow : Window
         return monitor != IntPtr.Zero && NativeMethods.GetMonitorInfo(monitor, ref monitorInfo);
     }
 
+    /// <summary>The rect a maximize should occupy: the monitor's work area, except that it never
+    /// equals the full monitor rect. The shell treats a borderless (no <c>WS_CAPTION</c>) window
+    /// that covers its whole monitor as a full-screen app and then applies Focus Assist's "when I'm
+    /// using an app in full screen mode" rule.</summary>
+    private static NativeMethods.RECT GetMaximizeTarget(NativeMethods.MONITORINFO monitorInfo)
+    {
+        var target = monitorInfo.rcWork;
+        var monitor = monitorInfo.rcMonitor;
+
+        if (target.Left <= monitor.Left && target.Top <= monitor.Top &&
+            target.Right >= monitor.Right && target.Bottom >= monitor.Bottom)
+        {
+            target.Bottom -= 1;
+        }
+
+        return target;
+    }
+
     /// <summary>Rewrites the in-place <c>MINMAXINFO</c> Windows is about to apply so a maximize
     /// targets <see cref="NativeMethods.MONITORINFO.rcWork"/> (the monitor's work area) instead of
     /// <see cref="NativeMethods.MONITORINFO.rcMonitor"/> (its full bounds, taskbar included) -
@@ -630,7 +648,7 @@ public partial class MainWindow : Window
             return false;
         }
 
-        var workArea = monitorInfo.rcWork;
+        var workArea = GetMaximizeTarget(monitorInfo);
         var monitorArea = monitorInfo.rcMonitor;
 
         var mmi = Marshal.PtrToStructure<NativeMethods.MINMAXINFO>(lParam);
@@ -700,7 +718,7 @@ public partial class MainWindow : Window
             return IntPtr.Zero;
         }
 
-        var workArea = monitorInfo.rcWork;
+        var workArea = GetMaximizeTarget(monitorInfo);
         var rect = Marshal.PtrToStructure<NativeMethods.RECT>(lParam);
         var clamped = rect;
         clamped.Left = Math.Max(rect.Left, workArea.Left);
