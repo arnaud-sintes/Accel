@@ -928,6 +928,7 @@
                             <ListBox x:Name="TabsList" ItemsSource="{Binding Tabs}"
                                      SelectedItem="{Binding SelectedTab, Mode=TwoWay}"
                                      Background="Transparent" BorderThickness="0" Padding="8,4"
+                                     AllowDrop="True" DragOver="TabsList_DragOver" Drop="TabsList_Drop"
                                      ScrollViewer.HorizontalScrollBarVisibility="Auto"
                                      ScrollViewer.VerticalScrollBarVisibility="Disabled">
                                 <ListBox.ItemsPanel>
@@ -960,6 +961,9 @@
                                             routed event on every Control, ListBoxItem included.
                                         -->
                                         <EventSetter Event="Control.MouseDoubleClick" Handler="TabItem_MouseDoubleClick" />
+                                        <!-- Drag-reorder: see MainWindow.TabItem_PreviewMouseMove. -->
+                                        <EventSetter Event="PreviewMouseLeftButtonDown" Handler="TabItem_PreviewMouseLeftButtonDown" />
+                                        <EventSetter Event="PreviewMouseMove" Handler="TabItem_PreviewMouseMove" />
                                     </Style>
                                 </ListBox.ItemContainerStyle>
                                 <ListBox.ItemTemplate>

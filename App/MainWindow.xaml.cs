@@ -1408,6 +1408,84 @@ public partial class MainWindow : Window
         Tabs?.StopTabCommand.Execute(tab);
     }
 
+    private const string TabDragFormat = "Accel.TabViewModel";
+
+    private System.Windows.Point? _tabDragStart;
+
+    // Drag-reorder of the tab strip. The drag only starts once the pointer has travelled the system
+    // drag distance, so a plain click (select) and a double-click (stop) are unaffected, and never from
+    // the tab's own buttons (close/save), which must keep behaving as buttons.
+    private void TabItem_PreviewMouseLeftButtonDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        _tabDragStart = e.OriginalSource is DependencyObject source && IsInsideButton(source, (DependencyObject)sender)
+            ? null
+            : e.GetPosition(this);
+    }
+
+    private void TabItem_PreviewMouseMove(object sender, System.Windows.Input.MouseEventArgs e)
+    {
+        if (e.LeftButton != System.Windows.Input.MouseButtonState.Pressed || _tabDragStart is not { } start)
+        {
+            return;
+        }
+
+        var now = e.GetPosition(this);
+        if (Math.Abs(now.X - start.X) < SystemParameters.MinimumHorizontalDragDistance &&
+            Math.Abs(now.Y - start.Y) < SystemParameters.MinimumVerticalDragDistance)
+        {
+            return;
+        }
+
+        _tabDragStart = null;
+        if ((sender as ListBoxItem)?.DataContext is TabViewModel tab)
+        {
+            System.Windows.DragDrop.DoDragDrop(
+                (DependencyObject)sender,
+                new System.Windows.DataObject(TabDragFormat, tab),
+                System.Windows.DragDropEffects.Move);
+        }
+    }
+
+    private void TabsList_DragOver(object sender, System.Windows.DragEventArgs e)
+    {
+        e.Effects = e.Data.GetDataPresent(TabDragFormat)
+            ? System.Windows.DragDropEffects.Move
+            : System.Windows.DragDropEffects.None;
+        e.Handled = true;
+    }
+
+    private void TabsList_Drop(object sender, System.Windows.DragEventArgs e)
+    {
+        if (e.Data.GetData(TabDragFormat) is not TabViewModel dragged ||
+            e.OriginalSource is not DependencyObject source)
+        {
+            return;
+        }
+
+        // Dropped on the strip's empty space past the last tab (no item under the pointer) = move to the end.
+        var container = ItemsControl.ContainerFromElement(TabsList, source) as ListBoxItem;
+        var target = container?.DataContext as TabViewModel ?? Tabs?.Tabs.LastOrDefault();
+        if (target is not null)
+        {
+            Tabs?.MoveTab(dragged, target);
+        }
+
+        e.Handled = true;
+    }
+
+    private static bool IsInsideButton(DependencyObject element, DependencyObject stopAt)
+    {
+        for (var current = element; current is not null && !ReferenceEquals(current, stopAt); current = VisualTreeHelper.GetParent(current))
+        {
+            if (current is System.Windows.Controls.Primitives.ButtonBase)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /// <summary>
     /// Panel B's FILES tree double-click gesture: opens (or selects, if already open -
     /// <see cref="TabsViewModel.AddFileTab"/> is idempotent per path) a tab for the double-clicked

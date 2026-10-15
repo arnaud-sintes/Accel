@@ -176,7 +176,8 @@ static async Task<int> RunCombinedAsync(int port, string? dumpRawDir, bool verbo
         var feed = new Accel.App.Services.TelemetryFeed(
             new Accel.App.Services.EventServerTelemetrySource(server),
             dispatcher,
-            new Accel.App.Services.DispatcherDebounceTimer(System.Windows.Threading.Dispatcher.CurrentDispatcher));
+            new Accel.App.Services.DispatcherDebounceTimer(System.Windows.Threading.Dispatcher.CurrentDispatcher),
+            buildOffUiThread: true);
 
         // A session's live "status_line" name (any /rename - Accel's own or one typed directly
         // into a `claude` terminal Accel never opened a tab for, since the rename hook is

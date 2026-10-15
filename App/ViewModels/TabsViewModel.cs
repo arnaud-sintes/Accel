@@ -1127,6 +1127,23 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
         }
     }
 
+    /// <summary>
+    /// Drag-reorder of panel C's strip: moves <paramref name="tab"/> to the slot currently held by
+    /// <paramref name="target"/>. Order is presentation only - selection is untouched (the same
+    /// <see cref="TabViewModel"/> instance stays selected) and so is every PTY session.
+    /// </summary>
+    public void MoveTab(TabViewModel tab, TabViewModel target)
+    {
+        int from = Tabs.IndexOf(tab);
+        int to = Tabs.IndexOf(target);
+        if (from < 0 || to < 0 || from == to)
+        {
+            return;
+        }
+
+        Tabs.Move(from, to);
+    }
+
     private void RemoveTab(TabViewModel tab)
     {
         int index = Tabs.IndexOf(tab);

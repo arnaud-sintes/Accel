@@ -2,6 +2,7 @@ namespace Accel.App.Services;
 
 using System;
 using System.IO;
+using System.Threading.Tasks;
 using Accel.Cli;
 using Accel.Metrics;
 using Accel.Server;
@@ -134,15 +135,26 @@ public sealed class TelemetryFeed : ITelemetryFeed
     private readonly IDebounceTimer _timer;
     private readonly DebounceCoalescer _coalescer;
 
+    private readonly bool _buildOffUiThread;
+
     private FileSystemWatcher? _fileWatcher;
     private bool _started;
     private bool _disposed;
 
-    public TelemetryFeed(ITelemetrySource source, IUiThreadDispatcher dispatcher, IDebounceTimer timer)
+    // Only touched on the UI thread: a background build is in flight / another signal landed while it ran.
+    private bool _building;
+    private bool _rebuildPending;
+
+    /// <param name="buildOffUiThread">Production passes <see langword="true"/>: the snapshot build walks
+    /// every transcript on disk, and doing that inline on the UI thread froze every other interaction
+    /// (a right-click menu, a dialog) behind it for as long as a scan took. Left <see langword="false"/>
+    /// (the default) the build runs inline, which is what the headless unit tests rely on.</param>
+    public TelemetryFeed(ITelemetrySource source, IUiThreadDispatcher dispatcher, IDebounceTimer timer, bool buildOffUiThread = false)
     {
         _source = source ?? throw new ArgumentNullException(nameof(source));
         _dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
         _timer = timer ?? throw new ArgumentNullException(nameof(timer));
+        _buildOffUiThread = buildOffUiThread;
 
         // Verbatim reuse: the same DebounceCoalescer MonitorForm uses, driven by the same two
         // restart/stop delegates - only the timer implementation behind them differs (DispatcherTimer
@@ -226,6 +238,12 @@ public sealed class TelemetryFeed : ITelemetryFeed
             return;
         }
 
+        if (_buildOffUiThread)
+        {
+            PublishInBackground();
+            return;
+        }
+
         RootsTreeDto snapshot;
         try
         {
@@ -239,6 +257,62 @@ public sealed class TelemetryFeed : ITelemetryFeed
             return;
         }
 
+        Complete(snapshot);
+    }
+
+    // Single-flight: a signal arriving mid-build only marks one trailing rebuild, so a long scan can
+    // never queue up a pile of them. Runs on the UI thread up to the Task.Run, and the completion is
+    // posted back to it, so _building/_rebuildPending need no lock.
+    private void PublishInBackground()
+    {
+        if (_building)
+        {
+            _rebuildPending = true;
+            return;
+        }
+
+        _building = true;
+        _ = Task.Run(() =>
+        {
+            RootsTreeDto? snapshot = null;
+            string? error = null;
+            try
+            {
+                snapshot = _source.BuildSnapshot();
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+            }
+
+            _dispatcher.Post(() =>
+            {
+                _building = false;
+                if (_disposed)
+                {
+                    return;
+                }
+
+                if (snapshot is not null)
+                {
+                    Complete(snapshot);
+                }
+                else
+                {
+                    SnapshotFailed?.Invoke(error ?? "Snapshot build failed.");
+                }
+
+                if (_rebuildPending)
+                {
+                    _rebuildPending = false;
+                    Publish();
+                }
+            });
+        });
+    }
+
+    private void Complete(RootsTreeDto snapshot)
+    {
         Latest = snapshot;
         SnapshotAvailable?.Invoke(snapshot);
     }
