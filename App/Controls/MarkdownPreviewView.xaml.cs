@@ -88,6 +88,15 @@ public partial class MarkdownPreviewView : UserControl, IDisposable
         }
     }
 
+    // Markdig's default pipeline is CommonMark only: no pipe tables (they render as literal "| a | b |"
+    // paragraphs), no task lists, strikethrough, footnotes or autolinks. The advanced set is what
+    // GitHub-flavoured README/doc files are written against.
+    private static readonly Markdig.MarkdownPipeline Pipeline =
+        Markdig.MarkdownExtensions.UseAdvancedExtensions(new Markdig.MarkdownPipelineBuilder()).Build();
+
+    /// <summary>Renders markdown source to the body HTML <see cref="RenderAsync"/> expects.</summary>
+    public static string RenderMarkdown(string markdown) => Markdig.Markdown.ToHtml(markdown, Pipeline);
+
     /// <summary>
     /// Wraps <paramref name="bodyHtml"/> (Markdig's own rendered output - already valid HTML, never
     /// escaped further here) in a small inline-styled document matching <c>Theme.xaml</c>'s dark
@@ -136,8 +145,12 @@ public partial class MarkdownPreviewView : UserControl, IDisposable
                 pre { background: #191919; padding: 12px; border-radius: 6px; overflow-x: auto; }
                 pre code { background: none; padding: 0; }
                 blockquote { border-left: 3px solid #2B2B2B; margin-left: 0; padding-left: 12px; color: #A9A9A9; }
-                table { border-collapse: collapse; }
-                th, td { border: 1px solid #2B2B2B; padding: 6px 10px; }
+                table { border-collapse: collapse; display: block; max-width: 100%; overflow-x: auto; margin: 12px 0; }
+                th, td { border: 1px solid #3A3A3A; padding: 6px 10px; vertical-align: top; }
+                th { background: #191919; font-weight: 600; text-align: left; }
+                tbody tr:nth-child(even) { background: #111111; }
+                input[type="checkbox"] { margin-right: 6px; }
+                del { color: #A9A9A9; }
                 hr { border: none; border-top: 1px solid #2B2B2B; }
                 img { max-width: 100%; }
             </style>

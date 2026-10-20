@@ -182,6 +182,18 @@
     term.loadAddon(fitAddon);
     term.open(document.getElementById("term"));
 
+    // A full reset (RIS, ESC c) drops every terminal mode, including the mouse reporting this file
+    // tracks itself in appWantsMouse. The server sends one at the start of every attach (see
+    // Server/PtyOutputHub.cs) so a tab switch never inherits the previous tab's alternate-screen /
+    // mouse state; registered here, not in installNativeSelection, so it holds even when native
+    // selection is turned off. Returning false lets xterm perform the reset itself.
+    term.parser.registerEscHandler({ final: "c" }, function () {
+      appWantsMouse = false;
+      mouseWheelAccumulator = 0;
+      scheduleScrollbarRefresh();
+      return false;
+    });
+
     installNativeSelection();
 
     // Must come after term.open() (the WebGL addon needs the element/renderer to exist) and
@@ -200,6 +212,8 @@
     // window.accelCellMetrics() for how this is verified to actually work, with real numbers,
     // rather than assumed.
     snapCellWidthToIntegerPixels();
+
+    installScrollbar();
 
     // The one onData handler for real user input. xterm.js already produces the correct raw
     // character for every key the user types, including control sequences - Ctrl+C arrives here
@@ -480,21 +494,165 @@
     }
     mouseWheelAccumulator += delta;
 
-    // 1-based cell under the pointer, as SGR (1006) mouse reports expect.
-    var screen = term.element && term.element.querySelector(".xterm-screen");
-    var rect = (screen || document.getElementById("term")).getBoundingClientRect();
-    var col = Math.min(term.cols, Math.max(1, Math.floor((event.clientX - rect.left) / (rect.width / term.cols)) + 1));
-    var row = Math.min(term.rows, Math.max(1, Math.floor((event.clientY - rect.top) / (rect.height / term.rows)) + 1));
-
     // One report per notch: a classic wheel sends ~100px per notch, a precision touchpad a stream of
-    // small deltas for the same gesture (same reasoning as the Ctrl+wheel zoom above). 64 = wheel up,
-    // 65 = wheel down.
+    // small deltas for the same gesture (same reasoning as the Ctrl+wheel zoom above).
     while (Math.abs(mouseWheelAccumulator) >= MOUSE_WHEEL_STEP_PX) {
-      var button = mouseWheelAccumulator < 0 ? 64 : 65;
-      handleTerminalData("\x1b[<" + button + ";" + col + ";" + row + "M");
+      sendWheelReport(mouseWheelAccumulator < 0, event.clientX, event.clientY);
       mouseWheelAccumulator -= MOUSE_WHEEL_STEP_PX * Math.sign(mouseWheelAccumulator);
     }
   }
+
+  // One SGR (1006) wheel report for the cell under (clientX, clientY), 1-based as the format expects.
+  // 64 = wheel up, 65 = wheel down. Shared by the real wheel and the scrollbar's alt-screen arrows.
+  function sendWheelReport(up, clientX, clientY) {
+    var screen = term.element && term.element.querySelector(".xterm-screen");
+    var rect = (screen || document.getElementById("term")).getBoundingClientRect();
+    var col = Math.min(term.cols, Math.max(1, Math.floor((clientX - rect.left) / (rect.width / term.cols)) + 1));
+    var row = Math.min(term.rows, Math.max(1, Math.floor((clientY - rect.top) / (rect.height / term.rows)) + 1));
+    handleTerminalData("\x1b[<" + (up ? 64 : 65) + ";" + col + ";" + row + "M");
+  }
+
+  // Custom scrollbar, drawn in the 14px strip FitAddon already reserves on the right (so term.cols is
+  // unchanged and no cell is ever under it). The native one is collapsed in index.html because it is
+  // structurally unusable here: Claude Code runs in the alternate screen, which has no scrollback, so
+  // the native bar has nothing to scroll and draws an empty track; and in the normal buffer it was an
+  // ~8px, low-contrast thumb that only painted at all thanks to a browser feature flag.
+  //  - normal buffer: thumb mirrors the scrollback position; drag it, or click the track to page.
+  //  - alternate screen, app wants mouse: no position exists (the app owns its transcript), so the
+  //    strip shows up/down arrows that send the same wheel reports the real wheel does.
+  //  - alternate screen, no mouse tracking: nothing can scroll, so the bar hides.
+  var scrollbar = null;
+  var scrollbarThumb = null;
+  var scrollbarRefreshScheduled = false;
+  var MIN_THUMB_PX = 24;
+
+  function scheduleScrollbarRefresh() {
+    if (scrollbarRefreshScheduled) {
+      return;
+    }
+    scrollbarRefreshScheduled = true;
+    requestAnimationFrame(function () {
+      scrollbarRefreshScheduled = false;
+      refreshScrollbar();
+    });
+  }
+
+  function scrollbarMetrics() {
+    var buffer = term.buffer.active;
+    var total = buffer.length;
+    var rows = term.rows;
+    var trackPx = scrollbar.clientHeight;
+    var thumbPx = total > rows ? Math.max(MIN_THUMB_PX, Math.round(trackPx * rows / total)) : trackPx;
+    return { maxLine: Math.max(0, total - rows), trackPx: trackPx, thumbPx: thumbPx, viewportY: buffer.viewportY };
+  }
+
+  function refreshScrollbar() {
+    if (!term || !scrollbar) {
+      return;
+    }
+
+    var alt = term.buffer.active.type === "alternate";
+    scrollbar.hidden = alt && !appWantsMouse;
+    scrollbar.dataset.mode = alt ? "alt" : "normal";
+    if (alt) {
+      return;
+    }
+
+    var m = scrollbarMetrics();
+    scrollbarThumb.style.display = m.maxLine > 0 ? "" : "none";
+    scrollbarThumb.style.height = m.thumbPx + "px";
+    scrollbarThumb.style.top = Math.round((m.trackPx - m.thumbPx) * m.viewportY / Math.max(1, m.maxLine)) + "px";
+  }
+
+  function installScrollbar() {
+    scrollbar = document.getElementById("accel-scrollbar");
+    if (!scrollbar) {
+      return;
+    }
+    scrollbarThumb = scrollbar.querySelector(".thumb");
+    var grabOffset = 0;
+
+    // preventDefault on every pointerdown keeps focus in xterm's textarea, so typing continues.
+    scrollbarThumb.addEventListener("pointerdown", function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      grabOffset = e.clientY - scrollbarThumb.getBoundingClientRect().top;
+      scrollbar.classList.add("dragging");
+      scrollbarThumb.setPointerCapture(e.pointerId);
+    });
+    scrollbarThumb.addEventListener("pointermove", function (e) {
+      if (!scrollbar.classList.contains("dragging")) {
+        return;
+      }
+      var m = scrollbarMetrics();
+      var range = m.trackPx - m.thumbPx;
+      var y = e.clientY - scrollbar.getBoundingClientRect().top - grabOffset;
+      term.scrollToLine(range <= 0 ? 0 : Math.round(Math.min(1, Math.max(0, y / range)) * m.maxLine));
+    });
+    ["pointerup", "pointercancel", "lostpointercapture"].forEach(function (type) {
+      scrollbarThumb.addEventListener(type, function () {
+        scrollbar.classList.remove("dragging");
+      });
+    });
+
+    // Track click: page toward the pointer (the Windows convention).
+    scrollbar.addEventListener("pointerdown", function (e) {
+      if (e.target !== scrollbar) {
+        return;
+      }
+      e.preventDefault();
+      term.scrollPages(e.clientY < scrollbarThumb.getBoundingClientRect().top ? -1 : 1);
+    });
+
+    // Alternate-screen arrows: one wheel report per click, auto-repeating while held.
+    scrollbar.querySelectorAll(".arrow").forEach(function (arrow) {
+      var up = arrow.classList.contains("up");
+      var timer = null;
+      function stop() {
+        clearTimeout(timer);
+        clearInterval(timer);
+        timer = null;
+      }
+      arrow.addEventListener("pointerdown", function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        arrow.setPointerCapture(e.pointerId);
+        var fire = function () {
+          sendWheelReport(up, e.clientX, e.clientY);
+        };
+        fire();
+        timer = setTimeout(function () {
+          timer = setInterval(fire, 60);
+        }, 300);
+      });
+      ["pointerup", "pointercancel", "lostpointercapture"].forEach(function (type) {
+        arrow.addEventListener(type, stop);
+      });
+    });
+
+    term.onScroll(scheduleScrollbarRefresh);
+    term.onResize(scheduleScrollbarRefresh);
+    term.onWriteParsed(scheduleScrollbarRefresh);
+    term.buffer.onBufferChange(scheduleScrollbarRefresh);
+    new ResizeObserver(scheduleScrollbarRefresh).observe(scrollbar);
+    refreshScrollbar();
+  }
+
+  // Diagnostic for terminal-e2e-smoke-test / DevTools.
+  window.accelScrollbarState = function () {
+    if (!term || !scrollbar) {
+      return null;
+    }
+    var b = term.buffer.active;
+    return {
+      mode: scrollbar.dataset.mode,
+      hidden: scrollbar.hidden,
+      length: b.length,
+      viewportY: b.viewportY,
+      thumbTop: scrollbarThumb.offsetTop,
+      thumbHeight: scrollbarThumb.offsetHeight,
+    };
+  };
 
   function installNativeSelection() {
     if (window.accelNativeSelection === false) {
@@ -508,6 +666,7 @@
         var mode = Array.isArray(params[i]) ? params[i][0] : params[i];
         if (MOUSE_TRACKING_MODES.indexOf(mode) >= 0) {
           appWantsMouse = false;
+          scheduleScrollbarRefresh();
         }
       }
       return false;
@@ -522,6 +681,7 @@
           swallowed = true;
           if (mode !== 9) {
             appWantsMouse = true;
+            scheduleScrollbarRefresh();
           }
         } else {
           passThrough.push(mode);
@@ -829,6 +989,7 @@
     }
     appWantsMouse = false;
     mouseWheelAccumulator = 0;
+    scheduleScrollbarRefresh();
   };
 
   // Test-only entry point for terminal-e2e-smoke-test's raw-Ctrl+C-byte check. Calls the exact

@@ -10,15 +10,28 @@
   html, body { margin: 0; padding: 0; height: 100%; background: #0a0a0a; }
   /* No padding here on purpose: FitAddon derives the column/row count from this element's box,
      and the integer cell-metrics correction in terminal.js assumes it un-padded. */
-  #term { width: 100%; height: 100%; }
-  /* Thin, dark, modern scrollbar matching the WPF ScrollBar style. Kept clearly visible at rest
-     (not just on hover) - a low resting opacity made this look like there was no scrollbar at all,
-     which read as "can't scroll" even though the viewport always scrolls (see xterm.css's
-     `overflow-y: scroll` on .xterm-viewport). */
-  .xterm-viewport::-webkit-scrollbar { width: 12px; }
-  .xterm-viewport::-webkit-scrollbar-track { background: #ffffff0d; }
-  .xterm-viewport::-webkit-scrollbar-thumb { background: #9a9a9acc; border-radius: 4px; border: 2px solid transparent; background-clip: padding-box; }
-  .xterm-viewport::-webkit-scrollbar-thumb:hover { background: #c2c2c2e6; border: 2px solid transparent; background-clip: padding-box; }
+  #term { width: 100%; height: 100%; position: relative; }
+  /* The native scrollbar is collapsed in favour of #accel-scrollbar (terminal.js installScrollbar has
+     the why: the native one is empty in the alternate screen Claude Code runs in, and was a thin
+     low-contrast thumb elsewhere). scrollbar-width is standard and independent of the browser
+     overlay-scrollbar flag; the ::-webkit rule covers older runtimes. The 14px FitAddon reserves on
+     the right (addon-fit.js: overviewRuler?.width || 14) stays empty viewport background - that is
+     where #accel-scrollbar sits, so the column count is unchanged and no cell is under the bar. */
+  .xterm-viewport { scrollbar-width: none; }
+  .xterm-viewport::-webkit-scrollbar { width: 0; height: 0; }
+  #accel-scrollbar { position: absolute; top: 0; right: 0; bottom: 0; width: 14px; z-index: 20;
+    background: #ffffff0f; user-select: none; touch-action: none; cursor: default; }
+  #accel-scrollbar[hidden] { display: none; }
+  #accel-scrollbar .thumb { position: absolute; left: 2px; right: 2px; min-height: 24px;
+    border-radius: 5px; background: #a8a8a8; opacity: .8; }
+  #accel-scrollbar:hover .thumb, #accel-scrollbar.dragging .thumb { left: 1px; right: 1px; background: #d0d0d0; opacity: 1; }
+  #accel-scrollbar .arrow { position: absolute; left: 0; right: 0; height: 18px; display: none;
+    color: #c2c2c2; font: 10px/18px "Segoe UI Symbol", sans-serif; text-align: center; background: #ffffff1a; }
+  #accel-scrollbar .arrow:hover { background: #ffffff33; }
+  #accel-scrollbar .arrow.up { top: 0; }
+  #accel-scrollbar .arrow.down { bottom: 0; }
+  #accel-scrollbar[data-mode="alt"] .thumb { display: none; }
+  #accel-scrollbar[data-mode="alt"] .arrow { display: block; }
 </style>
 </head>
 <body>
@@ -31,7 +44,13 @@
   loaded and xterm.js initialized without a JS error, without needing a live screenshot or an
   attached devtools session.
 -->
-<div id="term"></div>
+<div id="term">
+  <div id="accel-scrollbar" hidden>
+    <div class="thumb"></div>
+    <div class="arrow up">&#x25B2;</div>
+    <div class="arrow down">&#x25BC;</div>
+  </div>
+</div>
 <script src="https://accel-terminal/xterm.js"></script>
 <script src="https://accel-terminal/addon-fit.js"></script>
 <script src="https://accel-terminal/addon-webgl.js"></script>
@@ -43,6 +62,6 @@
   terminal.js after this file is edited on disk - a plain rebuild/relaunch is not
   guaranteed to pick up the change. Bump this whenever terminal.js itself changes.
 -->
-<script src="https://accel-terminal/terminal.js?v=8"></script>
+<script src="https://accel-terminal/terminal.js?v=10"></script>
 </body>
 </html>

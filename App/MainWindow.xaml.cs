@@ -2546,7 +2546,7 @@ public partial class MainWindow : Window
             }
         }
 
-        string bodyHtml = Markdig.Markdown.ToHtml(content);
+        string bodyHtml = Controls.MarkdownPreviewView.RenderMarkdown(content);
         await MarkdownPreview.RenderAsync(bodyHtml).ConfigureAwait(true);
     }
 

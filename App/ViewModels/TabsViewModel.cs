@@ -410,10 +410,12 @@ public sealed partial class TabViewModel : ObservableObject
 /// resets its accumulator, and identity-checks the old socket's late <c>onclose</c> against the new one -
 /// a bug it was fixed for precisely because <c>terminal-e2e-smoke-test</c> reattaches the same control to
 /// a second tabId), so reattaching is the already-proven path; (3) the WebSocket route is keyed by tabId,
-/// so one control can serve any tab with no extra server state. The known cost is that scrollback is not
-/// preserved across a tab switch - the reattached xterm shows the new session's output from the moment of
-/// attach. Per-tab scrollback is presentation polish (P4-T5 keeps a frozen buffer for an <i>ended</i>
-/// tab) and is deliberately out of scope here.</para>
+/// so one control can serve any tab with no extra server state beyond the per-session
+/// <c>PtyOutputHub</c>. The known cost is that scrollback is not preserved across a tab switch: every attach
+/// opens with a full terminal reset, then a replay of the DEC modes the session has switched on (alternate
+/// screen, mouse reporting, ...) and a forced redraw, so the reattached xterm shows the session's current
+/// screen and modes but not its earlier history. Per-tab scrollback is presentation polish and is
+/// deliberately out of scope here.</para>
 ///
 /// <para><b>Threading.</b> Every mutation happens on the UI thread: <see cref="IPtySessionHost.SessionEnded"/>
 /// arrives on a thread-pool thread and is marshalled through <see cref="IUiThreadDispatcher"/>, the same

@@ -148,15 +148,71 @@ public class PtyRoutesTests : IAsyncLifetime
 
         using var socket = await ConnectAsync(tabId);
 
+        // Every attach opens with the reset+replay prefix (see PtyOutputHub); a fresh session has no
+        // modes to replay, so that is just a full reset.
+        Assert.Equal("\u001bc", await ReceiveTextAsync(socket));
+
         fake.Publish("hello from claude\r\n");
 
-        var buffer = new byte[4096];
-        var result = await socket.ReceiveAsync(buffer, CancellationToken.None);
-
-        Assert.Equal(WebSocketMessageType.Text, result.MessageType);
-        Assert.Equal("hello from claude\r\n", Encoding.UTF8.GetString(buffer, 0, result.Count));
+        Assert.Equal("hello from claude\r\n", await ReceiveTextAsync(socket));
 
         await CloseAsync(socket);
+    }
+
+    [Fact]
+    public async Task SecondAttach_ReceivesTheModesTheFirstOneConsumed_BeforeAnyNewOutput()
+    {
+        string tabId = Guid.NewGuid().ToString("N");
+        var fake = new FakePtyEndpoint();
+        _registry!.Register(tabId, fake);
+
+        using var first = await ConnectAsync(tabId);
+        Assert.Equal("\u001bc", await ReceiveTextAsync(first));
+        fake.Publish("\u001b[?1049;1002;1006h");
+        Assert.Equal("\u001b[?1049;1002;1006h", await ReceiveTextAsync(first));
+
+        // A new socket for the same tab (tab switch back, or a reconnect) takes over from the first.
+        using var second = await ConnectAsync(tabId);
+        Assert.Equal("\u001bc\u001b[?1049h\u001b[?1006h\u001b[?1002h", await ReceiveTextAsync(second));
+
+        fake.Publish("live\r\n");
+        Assert.Equal("live\r\n", await ReceiveTextAsync(second));
+
+        await CloseAsync(first);
+        await CloseAsync(second);
+    }
+
+    [Fact]
+    public async Task Attach_ForcesARedraw_ByJigglingTheSizeOnceThePrefixIsOut()
+    {
+        string tabId = Guid.NewGuid().ToString("N");
+        var fake = new FakePtyEndpoint();
+        _registry!.Register(tabId, fake);
+
+        using var socket = await ConnectAsync(tabId);
+        Assert.Equal("\u001bc", await ReceiveTextAsync(socket));
+
+        await socket.SendAsync(Encoding.UTF8.GetBytes("{\"resize\":[100,30]}"), WebSocketMessageType.Text, endOfMessage: true, CancellationToken.None);
+
+        Assert.Equal((100, 30), await fake.NextResizeAsync(TimeSpan.FromSeconds(5)));
+        Assert.Equal((99, 30), await fake.NextResizeAsync(TimeSpan.FromSeconds(5)));
+        Assert.Equal((100, 30), await fake.NextResizeAsync(TimeSpan.FromSeconds(5)));
+
+        // Only once per attach: a later resize is just a resize.
+        await socket.SendAsync(Encoding.UTF8.GetBytes("{\"resize\":[90,30]}"), WebSocketMessageType.Text, endOfMessage: true, CancellationToken.None);
+        Assert.Equal((90, 30), await fake.NextResizeAsync(TimeSpan.FromSeconds(5)));
+
+        await CloseAsync(socket);
+    }
+
+    private static async Task<string> ReceiveTextAsync(ClientWebSocket socket)
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var buffer = new byte[4096];
+        var result = await socket.ReceiveAsync(buffer, cts.Token);
+
+        Assert.Equal(WebSocketMessageType.Text, result.MessageType);
+        return Encoding.UTF8.GetString(buffer, 0, result.Count);
     }
 
     private HttpRequestMessage NewUpgradeRequest(string path, string? origin = PtyRoutes.ExpectedOrigin)

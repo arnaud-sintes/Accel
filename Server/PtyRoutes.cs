@@ -64,24 +64,33 @@ public sealed class PtySessionEndpoint : IPtyEndpoint
 /// </summary>
 public sealed class PtyRouteRegistry
 {
-    private readonly ConcurrentDictionary<string, IPtyEndpoint> _endpoints = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, PtyOutputHub> _hubs = new(StringComparer.Ordinal);
 
-    /// <summary>Registers an endpoint under <paramref name="tabId"/>, replacing any prior registration.</summary>
+    /// <summary>Registers an endpoint under <paramref name="tabId"/>, replacing any prior registration.
+    /// Each registration gets its own <see cref="PtyOutputHub"/>, the single consumer of its output.</summary>
     public void Register(string tabId, IPtyEndpoint endpoint)
     {
         ArgumentException.ThrowIfNullOrEmpty(tabId);
         ArgumentNullException.ThrowIfNull(endpoint);
-        _endpoints[tabId] = endpoint;
+        _hubs[tabId] = new PtyOutputHub(endpoint);
     }
 
     /// <summary>Convenience over <see cref="Register(string, IPtyEndpoint)"/> for a real <see cref="PtySession"/>.</summary>
     public void RegisterSession(string tabId, PtySession session) => Register(tabId, new PtySessionEndpoint(session));
 
     /// <summary>Removes the registration for <paramref name="tabId"/>, if any. Does not dispose the endpoint.</summary>
-    public bool Unregister(string tabId) => _endpoints.TryRemove(tabId, out _);
+    public bool Unregister(string tabId) => _hubs.TryRemove(tabId, out _);
 
     /// <summary>Looks up <paramref name="tabId"/>. False for anything not registered, with no further detail.</summary>
-    public bool TryGet(string tabId, out IPtyEndpoint? endpoint) => _endpoints.TryGetValue(tabId, out endpoint);
+    public bool TryGet(string tabId, out IPtyEndpoint? endpoint)
+    {
+        bool found = _hubs.TryGetValue(tabId, out var hub);
+        endpoint = hub?.Endpoint;
+        return found;
+    }
+
+    /// <summary>Same lookup as <see cref="TryGet"/>, returning the output hub the route pumps through.</summary>
+    internal bool TryGetHub(string tabId, out PtyOutputHub? hub) => _hubs.TryGetValue(tabId, out hub);
 }
 
 /// <summary>
@@ -193,14 +202,14 @@ public static class PtyRoutes
 
         // Uniform miss: no distinction between "not a well-formed id" and "well-formed but
         // unregistered", no allocation beyond the lookup itself, and nothing touched on a miss.
-        if (!registry.TryGet(tabId, out var endpoint) || endpoint is null)
+        if (!registry.TryGetHub(tabId, out var hub) || hub is null)
         {
             context.Response.StatusCode = StatusCodes.Status404NotFound;
             return;
         }
 
         using var socket = await context.WebSockets.AcceptWebSocketAsync();
-        await PumpAsync(socket, endpoint, context.RequestAborted);
+        await PumpAsync(socket, hub, context.RequestAborted);
     }
 
     /// <summary>
@@ -210,12 +219,12 @@ public static class PtyRoutes
     /// loops below - never call <see cref="WebSocket.SendAsync"/> or <see cref="WebSocket.ReceiveAsync"/>
     /// from more than one place at a time on the same socket.
     /// </summary>
-    private static async Task PumpAsync(WebSocket socket, IPtyEndpoint endpoint, CancellationToken connectionAborted)
+    private static async Task PumpAsync(WebSocket socket, PtyOutputHub hub, CancellationToken connectionAborted)
     {
         using var pumpCts = CancellationTokenSource.CreateLinkedTokenSource(connectionAborted);
 
-        Task outputTask = PumpOutputAsync(socket, endpoint, pumpCts.Token);
-        Task inputTask = PumpInputAsync(socket, endpoint, pumpCts.Token);
+        Task outputTask = PumpOutputAsync(socket, hub, pumpCts.Token);
+        Task inputTask = PumpInputAsync(socket, hub, pumpCts.Token);
 
         try
         {
@@ -252,15 +261,19 @@ public static class PtyRoutes
 
     /// <summary><see cref="PtySession.Output"/> (or a fake's equivalent) to the client, one text frame
     /// per decoded chunk. Ends when the channel completes (session gone) or is cancelled.</summary>
-    private static async Task PumpOutputAsync(WebSocket socket, IPtyEndpoint endpoint, CancellationToken cancellationToken)
+    private static async Task PumpOutputAsync(WebSocket socket, PtyOutputHub hub, CancellationToken cancellationToken)
     {
         try
         {
-            await foreach (string chunk in endpoint.Output.ReadAllAsync(cancellationToken))
-            {
-                byte[] bytes = Encoding.UTF8.GetBytes(chunk);
-                await socket.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, cancellationToken);
-            }
+            // The hub owns the read loop (single consumer, mode tracking, reset+replay prefix); this
+            // route only supplies how one chunk is framed onto the socket.
+            await hub.PumpOutputAsync(
+                async (chunk, ct) =>
+                {
+                    byte[] bytes = Encoding.UTF8.GetBytes(chunk);
+                    await socket.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, ct);
+                },
+                cancellationToken);
         }
         catch (OperationCanceledException)
         {
@@ -279,8 +292,9 @@ public static class PtyRoutes
     /// <summary>Client frames to <paramref name="endpoint"/>: binary frames are raw input bytes,
     /// text frames are parsed as the <c>{"resize":[cols,rows]}</c> control message (see the class
     /// doc's framing convention). Ends on a Close frame, cancellation, or the socket going away.</summary>
-    private static async Task PumpInputAsync(WebSocket socket, IPtyEndpoint endpoint, CancellationToken cancellationToken)
+    private static async Task PumpInputAsync(WebSocket socket, PtyOutputHub hub, CancellationToken cancellationToken)
     {
+        IPtyEndpoint endpoint = hub.Endpoint;
         byte[] receiveBuffer = new byte[ReceiveBufferSize];
 
         try
@@ -312,7 +326,7 @@ public static class PtyRoutes
                 }
                 else if (result.MessageType == WebSocketMessageType.Text)
                 {
-                    HandleControlMessage(endpoint, message);
+                    HandleControlMessage(hub, message);
                 }
             }
         }
@@ -344,7 +358,7 @@ public static class PtyRoutes
         }
     }
 
-    private static void HandleControlMessage(IPtyEndpoint endpoint, MemoryStream message)
+    private static void HandleControlMessage(PtyOutputHub hub, MemoryStream message)
     {
         try
         {
@@ -361,7 +375,7 @@ public static class PtyRoutes
             {
                 int columns = resize[0].GetInt32();
                 int rows = resize[1].GetInt32();
-                endpoint.Resize(columns, rows);
+                hub.Resize(columns, rows);
             }
 
             // Unrecognized-but-well-formed control messages are ignored, not rejected: this is the
