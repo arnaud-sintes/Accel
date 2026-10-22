@@ -3,6 +3,7 @@ namespace Accel.Settings;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Accel.Metrics;
@@ -114,7 +115,8 @@ public static class ModelCatalogCache
             return null;
         }
 
-        if (cached.DiscoveredAtUtc is { } discoveredAt &&
+        // No timestamp means no way to tell how old it is, which must not read as "never expires".
+        if (cached.DiscoveredAtUtc is not { } discoveredAt ||
             (now ?? DateTimeOffset.UtcNow) - discoveredAt > MaxAge)
         {
             return null;
@@ -140,12 +142,18 @@ public static class ModelCatalogCache
             return null;
         }
 
-        return new ModelCatalog(
+        var catalog = new ModelCatalog(
             entries,
             ModelCatalogSource.Discovered,
             cached.ClaudeCliVersion,
             cached.DiscoveredAtUtc,
             cached.DefaultModelHint);
+
+        // A catalog scraped from a repainting screen has shipped mangled values into this file before
+        // ("claude-sonnet-5-5up", usage-meter text in a description). The same validator that gates a
+        // discovery gates a read: a cache that fails it is treated as absent, so the app rediscovers
+        // instead of offering models the CLI will reject until the cache expires.
+        return ModelCatalogValidator.Validate(catalog).Count == 0 ? catalog : null;
     }
 
     /// <summary>
@@ -157,6 +165,12 @@ public static class ModelCatalogCache
         ModelCatalog catalog, string? cliBinaryIdentity, string? path = null)
     {
         ArgumentNullException.ThrowIfNull(catalog);
+
+        // Never cache what could not be loaded back: a catalog that fails validation is not written.
+        if (ModelCatalogValidator.Validate(catalog).Count > 0)
+        {
+            return false;
+        }
 
         var file = path ?? DefaultPath();
         try
@@ -205,7 +219,9 @@ public static class ModelCatalogCache
     /// files by construction instead of mis-reading them.</summary>
     private sealed class CachedCatalog
     {
-        public const int CurrentSchemaVersion = 3;
+        // 4: catalogs written by 3 could be rotated, truncated or carry residue from a misread screen and
+        // pass for valid; they are rediscovered rather than trusted.
+        public const int CurrentSchemaVersion = 4;
 
         public int SchemaVersion { get; set; }
 

@@ -34,11 +34,15 @@ public enum ModelCatalogProbeOutcome
 }
 
 /// <summary>The result of one discovery attempt.</summary>
+/// <param name="Report">Set when a scrape was rejected: why, and the redacted screen it was read from (only the
+/// picker's own rows, effort line and chrome - never the raw terminal stream, which carries the working
+/// directory, plan and hook names). For diagnosing a rejection after the fact.</param>
 public sealed record ModelCatalogProbeResult(
     ModelCatalogProbeOutcome Outcome,
     ModelCatalog? Catalog,
     string? Detail,
-    TimeSpan Elapsed)
+    TimeSpan Elapsed,
+    string? Report = null)
 {
     public bool Succeeded => Outcome == ModelCatalogProbeOutcome.Discovered && Catalog is not null;
 }
@@ -116,6 +120,10 @@ public sealed class ModelCatalogProbe
     private readonly Func<PtyLaunchSpec, PtySessionOptions, PtySession> _sessionStarter;
     private readonly Action<string>? _trace;
 
+    // Per-run evidence, reset by DiscoverAsync. A probe instance runs one discovery at a time.
+    private int _unsupportedSeen;
+    private int _malformedRows;
+
     /// <param name="specBuilder">Test seam: overrides how the launch spec is built, so a test can
     /// point the probe at a scripted stand-in instead of the real `claude`.</param>
     /// <param name="sessionStarter">Test seam: overrides the actual <see cref="PtySession.Start"/>.</param>
@@ -143,6 +151,9 @@ public sealed class ModelCatalogProbe
         string workingDirectory, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(workingDirectory);
+
+        _unsupportedSeen = 0;
+        _malformedRows = 0;
 
         var stopwatch = Stopwatch.StartNew();
         PtyLaunchSpec spec;
@@ -220,11 +231,23 @@ public sealed class ModelCatalogProbe
                 ModelCatalogProbeOutcome.NotParseable, null, "the TUI never painted", stopwatch.Elapsed);
         }
 
-        var startupScreen = Render(raw);
-        if (FindGate(startupScreen) is { } gate)
+        // A silence is not a ready prompt: a slow start can pause longer than the quiet period between its
+        // first bytes and its UI, and keys typed before the UI exists are lost - the picker then "could not
+        // be read". Wait for the prompt itself, and send nothing at all if it never comes (Claude Code may be
+        // sitting on some dialog, where an Enter would answer a question on the user's behalf).
+        var ready = await WaitForChatPromptAsync(raw, cancellationToken).ConfigureAwait(false);
+        if (ready.Gate is { } gate)
         {
             Trace($"Stopped: {gate}");
             return new ModelCatalogProbeResult(ModelCatalogProbeOutcome.Blocked, null, gate, stopwatch.Elapsed);
+        }
+
+        if (!ready.Ready)
+        {
+            return Rejected(
+                "Claude Code never showed its chat prompt (it may be waiting on a dialog), so no keys were sent",
+                ready.Screen,
+                stopwatch);
         }
 
         Trace("Opening the model picker…");
@@ -237,28 +260,56 @@ public sealed class ModelCatalogProbe
 
         await collector.WaitForQuietAsync(PickerBudget, QuietPeriod, cancellationToken).ConfigureAwait(false);
 
-        var screen = ModelPickerScreenParser.Parse(Render(raw));
+        // A render that has stopped changing, not merely one taken after a silence: see StableRenderAsync.
+        var firstRender = await StableRenderAsync(raw, cancellationToken).ConfigureAwait(false);
+        var screen = ModelPickerScreenParser.Parse(firstRender);
         if (!screen.IsUsable)
         {
             Trace($"The model picker could not be read (chrome={screen.SawPickerChrome}, rows={screen.Rows.Count})");
-            return new ModelCatalogProbeResult(
-                ModelCatalogProbeOutcome.NotParseable,
-                null,
-                $"picker chrome={screen.SawPickerChrome}, rows={screen.Rows.Count}",
-                stopwatch.Elapsed);
+            return Rejected($"picker chrome={screen.SawPickerChrome}, rows={screen.Rows.Count}", firstRender, stopwatch);
+        }
+
+        if (!screen.IsSound)
+        {
+            return Rejected("the picker screen is malformed: " + string.Join("; ", screen.StructuralProblems!), firstRender, stopwatch);
         }
 
         Trace($"Model picker open: {screen.Rows.Count} rows (Claude Code {screen.ClaudeCliVersion ?? "version unknown"})");
 
         var walk = await WalkRowsAsync(session, collector, raw, screen, cancellationToken).ConfigureAwait(false);
+        if (walk.Problem is not null)
+        {
+            return Rejected(walk.Problem, Render(raw), stopwatch);
+        }
+
+        if (_malformedRows > 0)
+        {
+            return Rejected($"{_malformedRows} picker row(s) could not be read cleanly", Render(raw), stopwatch);
+        }
+
         var entries = walk.Entries;
         if (entries.Count == 0)
         {
-            return new ModelCatalogProbeResult(
-                ModelCatalogProbeOutcome.NotParseable,
-                null,
-                "every picker row was filtered out as non-selectable",
-                stopwatch.Elapsed);
+            return Rejected("every picker row was filtered out as non-selectable", Render(raw), stopwatch);
+        }
+
+        // Read the picker a second time, from scratch, and require the same rows. A scrape is only as good
+        // as the screen model behind it, and a stale cell shows up as text that one read has and another
+        // does not.
+        var disagreement = await ConfirmByRereadingAsync(session, collector, raw, screen, cancellationToken).ConfigureAwait(false);
+        if (disagreement is not null)
+        {
+            return Rejected(disagreement, Render(raw), stopwatch);
+        }
+
+        // The emulator counts the sequences it cannot apply. Any means the grid it rebuilt may differ from
+        // the real screen, and the cells the TUI skips would then show the difference.
+        if (_unsupportedSeen > 0)
+        {
+            return Rejected(
+                $"the terminal emulator met {_unsupportedSeen} escape sequence(s) it cannot apply, so the rebuilt screen may not match the real one",
+                Render(raw),
+                stopwatch);
         }
 
         var catalog = new ModelCatalog(
@@ -268,8 +319,131 @@ public sealed class ModelCatalogProbe
             DateTimeOffset.UtcNow,
             walk.DefaultModelHint);
 
+        var problems = ModelCatalogValidator.Validate(catalog);
+        if (problems.Count > 0)
+        {
+            return Rejected("the discovered catalog failed validation: " + string.Join("; ", problems), Render(raw), stopwatch);
+        }
+
         return new ModelCatalogProbeResult(
             ModelCatalogProbeOutcome.Discovered, catalog, null, stopwatch.Elapsed);
+    }
+
+    private static readonly TimeSpan ReadyBudget = TimeSpan.FromSeconds(25);
+
+    private sealed record ChatReadiness(bool Ready, string? Gate, IReadOnlyList<string> Screen);
+
+    /// <summary>
+    /// Waits until the screen shows Claude Code's chat prompt: the "Claude Code v…" banner and the input
+    /// box's horizontal rules, on a render that has stopped changing. Reports a login or folder-trust gate
+    /// as soon as one appears (answering those is not the probe's call), and gives up after
+    /// <see cref="ReadyBudget"/>.
+    /// </summary>
+    private async Task<ChatReadiness> WaitForChatPromptAsync(StringBuilder raw, CancellationToken cancellationToken)
+    {
+        var deadline = Stopwatch.StartNew();
+        IReadOnlyList<string> screen = Render(raw);
+        while (true)
+        {
+            if (FindGate(screen) is { } gate)
+            {
+                return new ChatReadiness(false, gate, screen);
+            }
+
+            if (LooksLikeChatPrompt(screen))
+            {
+                var settled = await StableRenderAsync(raw, cancellationToken).ConfigureAwait(false);
+                if (FindGate(settled) is { } lateGate)
+                {
+                    return new ChatReadiness(false, lateGate, settled);
+                }
+
+                return new ChatReadiness(LooksLikeChatPrompt(settled), null, settled);
+            }
+
+            if (deadline.Elapsed >= ReadyBudget)
+            {
+                return new ChatReadiness(false, null, screen);
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(400), cancellationToken).ConfigureAwait(false);
+            screen = Render(raw);
+        }
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex ChatBanner = new(
+        @"Claude Code\s+v[0-9]",
+        System.Text.RegularExpressions.RegexOptions.Compiled | System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+    private static bool LooksLikeChatPrompt(IReadOnlyList<string> screen)
+    {
+        var banner = false;
+        var inputBox = false;
+        foreach (var line in screen)
+        {
+            banner |= ChatBanner.IsMatch(line);
+            inputBox |= line.Contains("──────────", StringComparison.Ordinal);
+        }
+
+        return banner && inputBox;
+    }
+
+    /// <summary>A scrape that is not to be trusted: reported as not parseable (so the app falls back to its
+    /// built-in catalog and nothing is cached), with a redacted report of why.</summary>
+    private ModelCatalogProbeResult Rejected(string reason, IReadOnlyList<string> screen, Stopwatch stopwatch)
+    {
+        Trace($"Rejected the scrape: {reason}");
+        return new ModelCatalogProbeResult(
+            ModelCatalogProbeOutcome.NotParseable,
+            null,
+            reason,
+            stopwatch.Elapsed,
+            BuildReport(reason, screen, _unsupportedSeen, _malformedRows));
+    }
+
+    /// <summary>
+    /// Closes the picker, opens it again and reads the rows afresh. Returns why the two reads disagree, or
+    /// null when they match. Rows are compared on ordinal and label only: descriptions legitimately differ
+    /// between reads (a context meter ticks, a hint follows the highlight).
+    /// </summary>
+    private async Task<string?> ConfirmByRereadingAsync(
+        PtySession session,
+        PtyOutputCollector collector,
+        StringBuilder raw,
+        ModelPickerScreen first,
+        CancellationToken cancellationToken)
+    {
+        Trace("Reading the picker a second time to confirm it…");
+
+        session.WriteText(KeyEscape);
+        await collector.WaitForQuietAsync(KeystrokeBudget, KeystrokeSettle, cancellationToken).ConfigureAwait(false);
+
+        session.WriteText("/model");
+        await Task.Delay(TimeSpan.FromMilliseconds(500), cancellationToken).ConfigureAwait(false);
+        session.WriteText("\r");
+        await collector.WaitForQuietAsync(PickerBudget, QuietPeriod, cancellationToken).ConfigureAwait(false);
+
+        var second = ModelPickerScreenParser.Parse(await StableRenderAsync(raw, cancellationToken).ConfigureAwait(false));
+        if (!second.IsUsable)
+        {
+            return "the picker did not reopen for the confirmation read";
+        }
+
+        if (!second.IsSound)
+        {
+            return "the confirmation read of the picker is malformed: " + string.Join("; ", second.StructuralProblems!);
+        }
+
+        var before = first.Rows.Select(r => (r.Number, r.Label)).ToList();
+        var after = second.Rows.Select(r => (r.Number, r.Label)).ToList();
+        if (!before.SequenceEqual(after))
+        {
+            return "the two reads of the picker disagree: first [" +
+                   string.Join(" | ", before.Select(r => $"{r.Number}. {r.Label}")) + "], second [" +
+                   string.Join(" | ", after.Select(r => $"{r.Number}. {r.Label}")) + "]";
+        }
+
+        return null;
     }
 
     /// <summary>
@@ -289,15 +463,32 @@ public sealed class ModelCatalogProbe
         ModelPickerScreen screen,
         CancellationToken cancellationToken)
     {
-        var entries = new List<ModelCatalogEntry>();
+        var entries = new List<(int Number, ModelCatalogEntry Entry)>();
         var visited = new HashSet<int>();
         string? defaultHint = null;
+        string? problem = null;
 
-        // Reach the first row from a known position rather than from wherever the cursor happens to
-        // sit (the picker opens with the account's current model selected, not with row 1).
-        for (var i = 0; i <= screen.Rows.Count; i++)
+        // Park on the first row. The cursor WRAPS, so a blind burst of Up presses lands wherever the
+        // arithmetic happens to - it came out on the LAST row and rotated the whole catalog. Press Up until
+        // the picker itself says the cursor is on the first ordinal (bounded, so a picker that stops
+        // responding cannot loop forever).
+        var firstNumber = screen.Rows[0].Number;
+        var parked = false;
+        for (var i = 0; i <= screen.Rows.Count + 1; i++)
         {
+            var here = SelectedRow(ModelPickerScreenParser.Parse(Render(raw)));
+            if (here is not null && here.Number == firstNumber)
+            {
+                parked = true;
+                break;
+            }
+
             await SendAsync(session, collector, KeyUp, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (!parked)
+        {
+            return new WalkResult(new List<ModelCatalogEntry>(), null, "the picker's cursor could not be moved to its first row");
         }
 
         // Generous cap: the loop's real terminator is revisiting a row (the cursor wrapped or stopped
@@ -314,6 +505,18 @@ public sealed class ModelCatalogProbe
             // frame captured mid-paint can hold fewer rows than the settled screen does, so the
             // snapshot is not even a reliable count.
             var live = ModelPickerScreenParser.Parse(Render(raw));
+            if (!live.IsSound)
+            {
+                // A frame caught mid-repaint can look unsound; give it a chance to settle once before
+                // concluding the screen cannot be trusted.
+                live = ModelPickerScreenParser.Parse(await StableRenderAsync(raw, cancellationToken).ConfigureAwait(false));
+                if (!live.IsSound)
+                {
+                    problem = $"the picker screen was malformed at step {step}: " + string.Join("; ", live.StructuralProblems!);
+                    break;
+                }
+            }
+
             var row = SelectedRow(live);
             if (row is null)
             {
@@ -327,22 +530,32 @@ public sealed class ModelCatalogProbe
                 break;
             }
 
-            if (IsNonModelRow(row))
+            var kind = ClassifyRow(row);
+            if (kind == RowKind.Default)
             {
                 // The "Default (recommended)" row is not selectable as a --model value, but it names
                 // the model the account currently defaults to ("Sonnet 5 · Org default") - the only
                 // non-arbitrary answer to "what should the dialog open on", so it is kept as a hint
                 // rather than discarded with the row.
-                if (row.Label.StartsWith("Default", StringComparison.OrdinalIgnoreCase))
-                {
-                    defaultHint = FirstSegment(row.Description);
-                    Trace($"Account default: {defaultHint ?? "(none reported)"}");
-                }
-                else
-                {
-                    Trace($"Skipped '{row.Label}' (not a selectable model)");
-                }
+                defaultHint = FirstSegment(row.Description);
+                Trace($"Account default: {defaultHint ?? "(none reported)"}");
+                await SendAsync(session, collector, KeyDown, cancellationToken).ConfigureAwait(false);
+                continue;
+            }
 
+            if (kind == RowKind.NotAModel)
+            {
+                Trace($"Skipped '{row.Label}' (not a selectable model)");
+                await SendAsync(session, collector, KeyDown, cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+
+            if (kind == RowKind.Unreadable)
+            {
+                // Neither a known non-model row nor a label with a model in it: a mangled read, which fails
+                // the whole scrape rather than quietly shrinking the list.
+                _malformedRows++;
+                Trace($"Row {row.Number} '{row.Label}' could not be read cleanly");
                 await SendAsync(session, collector, KeyDown, cancellationToken).ConfigureAwait(false);
                 continue;
             }
@@ -358,12 +571,71 @@ public sealed class ModelCatalogProbe
             Trace(tiers.Count == 0
                 ? $"row {row.Number} '{row.Label}': no effort control"
                 : $"row {row.Number} '{row.Label}': {string.Join(" < ", tiers)}");
-            entries.Add(ToEntry(row, tiers));
+            var entry = ToEntry(row, tiers);
+            if (!ModelLaunchValue.IsPlausible(entry.CliValue))
+            {
+                // Never offered, never cached: a value the CLI would reject is worse than a missing row -
+                // and a row that reads as one means the screen was misread, so the scrape fails.
+                _malformedRows++;
+                Trace($"Row {row.Number} '{row.Label}': '{entry.CliValue}' is not a plausible --model value");
+            }
+            else if (entries.Exists(existing => string.Equals(existing.Entry.CliValue, entry.CliValue, StringComparison.OrdinalIgnoreCase)))
+            {
+                Trace($"Row {row.Number} '{row.Label}' names '{entry.CliValue}' again - keeping the first");
+            }
+            else
+            {
+                entries.Add((row.Number, entry));
+            }
 
             await SendAsync(session, collector, KeyDown, cancellationToken).ConfigureAwait(false);
         }
 
-        return new WalkResult(entries, defaultHint);
+        // Every row the picker showed must have been visited: a walk that stopped early (a lost keystroke,
+        // a late repaint) is a partial catalog, and a partial catalog is not cached.
+        if (problem is null && visited.Count < screen.Rows.Count)
+        {
+            problem = $"the walk visited {visited.Count} of the picker's {screen.Rows.Count} rows";
+        }
+
+        // In picker order, whatever row the walk happened to start on.
+        var ordered = entries.OrderBy(e => e.Number).Select(e => e.Entry).ToList();
+        return new WalkResult(ordered, defaultHint, problem);
+    }
+
+    private enum RowKind
+    {
+        /// <summary>A selectable model.</summary>
+        Model,
+
+        /// <summary>The "Default (recommended)" pointer row.</summary>
+        Default,
+
+        /// <summary>A row that is legitimately not a model (a bare parenthesised note).</summary>
+        NotAModel,
+
+        /// <summary>A row with no model in its label that is not a known non-model row either.</summary>
+        Unreadable,
+    }
+
+    private static RowKind ClassifyRow(ModelPickerRow row)
+    {
+        foreach (var prefix in NonModelRowPrefixes)
+        {
+            if (row.Label.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                return RowKind.Default;
+            }
+        }
+
+        if (ExtractCliValue(row.Label).Length > 0)
+        {
+            return RowKind.Model;
+        }
+
+        // A label that is entirely a parenthesised note names no model by design; anything else that
+        // extracts to nothing is a label the extractor refused.
+        return row.Label.TrimStart().StartsWith('(') ? RowKind.NotAModel : RowKind.Unreadable;
     }
 
     /// <summary>
@@ -447,7 +719,7 @@ public sealed class ModelCatalogProbe
 
     /// <summary>What one pass over the picker's rows produced: the selectable models, plus whatever
     /// the non-selectable "Default" row said the account defaults to.</summary>
-    private sealed record WalkResult(List<ModelCatalogEntry> Entries, string? DefaultModelHint);
+    private sealed record WalkResult(List<ModelCatalogEntry> Entries, string? DefaultModelHint, string? Problem = null);
 
     /// <summary>
     /// A wrapping slider yields its tiers as a cycle, which has no intrinsic first element. Ordered
@@ -478,8 +750,30 @@ public sealed class ModelCatalogProbe
     internal static ModelCatalogEntry ToEntry(ModelPickerRow row, IReadOnlyList<string> tiers)
     {
         var name = ExtractCliValue(row.Label);
-        return new ModelCatalogEntry(ToLaunchValue(name), ChooseDisplayName(name, row.Description), NullIfEmpty(row.Description), tiers);
+
+        // "Opus 4.8 (1M context)" is a different launch value from "Opus 4.8", not a duplicate of it: the
+        // 1M-context variant is selected by appending [1m]. Without this the variant row collapsed onto
+        // its base model and the dialog (which binds by launch value) lost one of them.
+        var oneMillion = HasOneMillionContextNote(row.Label);
+        var launchValue = ToLaunchValue(name) + (oneMillion ? "[1m]" : string.Empty);
+        var displayName = ChooseDisplayName(name, row.Description) + (oneMillion ? " (1M context)" : string.Empty);
+
+        // The description is the cell most exposed to neighbouring screen content (a context meter, the
+        // prompt's suggestion line). It is only a tooltip, so an implausible one is dropped, not repaired.
+        var description = NullIfEmpty(row.Description);
+        if (description is not null && !ModelCatalogValidator.IsPlausibleDescription(description))
+        {
+            description = null;
+        }
+
+        return new ModelCatalogEntry(launchValue, displayName, description, tiers);
     }
+
+    private static readonly System.Text.RegularExpressions.Regex OneMillionNote = new(
+        @"\(\s*1\s*M\b[^)]*\)",
+        System.Text.RegularExpressions.RegexOptions.Compiled | System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+    private static bool HasOneMillionContextNote(string label) => OneMillionNote.IsMatch(label);
 
     /// <summary>
     /// The user-facing name. Since Claude Code 2.1.285 the row label already carries the version
@@ -547,7 +841,7 @@ public sealed class ModelCatalogProbe
     {
         var text = label ?? string.Empty;
         // >= 0, not > 0: a label that is *entirely* a parenthesised note names no model, so cutting at
-        // index 0 leaves an empty value and IsNonModelRow discards the row - which is the right outcome.
+        // index 0 leaves an empty value and ClassifyRow discards the row - which is the right outcome.
         // Guarding with > 0 instead would salvage the note's text and offer it as a --model value.
         var parenthesis = text.IndexOf('(');
         if (parenthesis >= 0)
@@ -585,10 +879,44 @@ public sealed class ModelCatalogProbe
                 break;
             }
 
+            // What follows the family must be a version: digits and dots, nothing else. A token with a
+            // digit that is anything more ("5.5up", "5.54x") is repaint residue stuck to a version - and
+            // repairing it is a guess: "5.5up" can be trimmed back to the right answer, but "5.54" cannot
+            // be told from a real version. So the label is refused outright (empty), the row is reported
+            // as unreadable, and the whole scrape is rejected instead of shipping a value that merely
+            // looks plausible.
+            if (LeadingVersion(token).Length != token.Length)
+            {
+                return string.Empty;
+            }
+
             result.Append(' ').Append(token);
         }
 
         return result.ToString();
+    }
+
+    /// <summary>The leading <c>digits(.digits)*</c> run of <paramref name="token"/> ("5.5up" -> "5.5").</summary>
+    private static string LeadingVersion(string token)
+    {
+        var end = 0;
+        while (end < token.Length)
+        {
+            if (char.IsAsciiDigit(token[end]))
+            {
+                end++;
+            }
+            else if (token[end] == '.' && end > 0 && end + 1 < token.Length && char.IsAsciiDigit(token[end + 1]))
+            {
+                end++;
+            }
+            else
+            {
+                break;
+            }
+        }
+
+        return token[..end];
     }
 
     private static string TrimNonAlphanumeric(string token)
@@ -619,19 +947,6 @@ public sealed class ModelCatalogProbe
         }
 
         return false;
-    }
-
-    private static bool IsNonModelRow(ModelPickerRow row)
-    {
-        foreach (var prefix in NonModelRowPrefixes)
-        {
-            if (row.Label.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
-        }
-
-        return ExtractCliValue(row.Label).Length == 0;
     }
 
     private static string? FirstSegment(string? description)
@@ -686,12 +1001,81 @@ public sealed class ModelCatalogProbe
         return null;
     }
 
-    private static IReadOnlyList<string> Render(StringBuilder raw)
+    private IReadOnlyList<string> Render(StringBuilder raw)
     {
+        ScreenRender render;
         lock (raw)
         {
-            return TerminalScreenBuffer.Render(raw.ToString(), Columns, Rows);
+            render = TerminalScreenBuffer.RenderDetailed(raw.ToString(), Columns, Rows);
         }
+
+        // The most any render of this run saw: the stream only grows, so a later render has seen at least
+        // what an earlier one did, and one unsupported sequence anywhere is enough to distrust the grid.
+        if (render.UnsupportedSequences > _unsupportedSeen)
+        {
+            _unsupportedSeen = render.UnsupportedSequences;
+        }
+
+        return render.Lines;
+    }
+
+    /// <summary>
+    /// A render that has stopped changing: two renders <see cref="StableInterval"/> apart that are
+    /// identical. "No output for N ms" is a guess at redraw latency; this also catches a late repaint (a
+    /// context meter ticking, a notice appended to the footer) that lands between two quiet windows and
+    /// would otherwise be read as part of the picker.
+    /// </summary>
+    private async Task<IReadOnlyList<string>> StableRenderAsync(StringBuilder raw, CancellationToken cancellationToken)
+    {
+        var previous = Render(raw);
+        for (var attempt = 0; attempt < StableAttempts; attempt++)
+        {
+            await Task.Delay(StableInterval, cancellationToken).ConfigureAwait(false);
+            var current = Render(raw);
+            if (current.SequenceEqual(previous, StringComparer.Ordinal))
+            {
+                return current;
+            }
+
+            previous = current;
+        }
+
+        return previous;
+    }
+
+    private static readonly TimeSpan StableInterval = TimeSpan.FromMilliseconds(300);
+    private const int StableAttempts = 8;
+
+    /// <summary>
+    /// The screen's picker-relevant lines and nothing else: numbered rows, the effort line and the picker
+    /// chrome. Everything else on the screen (working directory, plan, hook output, the prompt) is dropped,
+    /// so a report is safe to write to disk and to attach to a bug.
+    /// </summary>
+    private static string BuildReport(string reason, IReadOnlyList<string> screen, int unsupported, int malformed)
+    {
+        var report = new StringBuilder();
+        report.AppendLine($"rejected: {reason}");
+        report.AppendLine($"unsupported escape sequences: {unsupported}; unreadable rows: {malformed}");
+        report.AppendLine("--- picker lines of the last screen ---");
+        foreach (var line in screen)
+        {
+            var text = line.Trim();
+            if (text.Length == 0)
+            {
+                continue;
+            }
+
+            var isRow = System.Text.RegularExpressions.Regex.IsMatch(text, @"^(?:[^\s\d]\s*)?\d{1,2}\.\s");
+            var isChrome = text.Contains("Select model", StringComparison.OrdinalIgnoreCase) ||
+                           text.Contains("Switch between Claude models", StringComparison.OrdinalIgnoreCase) ||
+                           (text.Contains("effort", StringComparison.OrdinalIgnoreCase) && text.Length < 80);
+            if (isRow || isChrome)
+            {
+                report.AppendLine(text);
+            }
+        }
+
+        return report.ToString();
     }
 
     private async Task SendAsync(

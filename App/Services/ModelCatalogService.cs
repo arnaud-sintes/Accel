@@ -115,7 +115,42 @@ public sealed class ModelCatalogService : IDisposable
     public bool NeedsRefresh()
     {
         var identity = ModelCatalogCache.DescribeCliBinary(_cliPathResolver());
-        return ModelCatalogCache.TryLoad(_cachePath, identity) is null;
+        if (ModelCatalogCache.TryLoad(_cachePath, identity) is not null)
+        {
+            return false;
+        }
+
+        // The last read of this very binary was refused, recently: scanning again at every start would just
+        // repeat a ~45s blocking dialog that is going to fail the same way. An update to Claude Code (a new
+        // identity) or the cooldown running out lifts this; RefreshAsync itself never consults it, so an
+        // explicit retry always runs.
+        return ModelCatalogFailureMemo.TryGetActive(_cachePath, identity) is null;
+    }
+
+    /// <summary>
+    /// When the list on screen is Accel's built-in one because reading Claude Code's own was tried and
+    /// refused, a sentence saying so and when the next automatic attempt happens - for the model picker's
+    /// tooltip, in place of the "not queried yet" text that would no longer be true. Null otherwise.
+    /// </summary>
+    public string? FallbackNote
+    {
+        get
+        {
+            if (Current.IsDiscovered)
+            {
+                return null;
+            }
+
+            var failure = ModelCatalogFailureMemo.TryGetActive(
+                _cachePath, ModelCatalogCache.DescribeCliBinary(_cliPathResolver()));
+            if (failure is null)
+            {
+                return null;
+            }
+
+            return $"Claude Code's model list could not be read on {failure.FailedAtUtc.ToLocalTime():yyyy-MM-dd HH:mm}; " +
+                   $"Accel will try again after {failure.RetryAtUtc.ToLocalTime():yyyy-MM-dd HH:mm} or when Claude Code is updated.";
+        }
     }
 
     /// <summary>
@@ -157,6 +192,10 @@ public sealed class ModelCatalogService : IDisposable
         string workingDirectory, CancellationToken cancellationToken = default)
     {
         ModelCatalogProbeResult result;
+
+        // Taken BEFORE the probe: if Claude Code updates itself while the picker is being read, the catalog
+        // describes the old binary and must not be cached under the new one's identity.
+        var identityBefore = ModelCatalogCache.DescribeCliBinary(_cliPathResolver());
         try
         {
             result = await _discover(workingDirectory, cancellationToken).ConfigureAwait(false);
@@ -171,7 +210,21 @@ public sealed class ModelCatalogService : IDisposable
             // built-in catalog is still perfectly serviceable.
             LastRefreshOutcome = ModelCatalogProbeOutcome.NotParseable;
             LastRefreshDetail = ex.Message;
+            ModelCatalogFailureMemo.Record(_cachePath, identityBefore, ex.Message);
             return new ModelCatalogProbeResult(ModelCatalogProbeOutcome.NotParseable, null, ex.Message, TimeSpan.Zero);
+        }
+
+        // The choke point: whatever produced a catalog (the real probe or an injected double), nothing
+        // reaches the cache or the UI without passing the validator.
+        if (result.Succeeded && result.Catalog is not null)
+        {
+            var problems = ModelCatalogValidator.Validate(result.Catalog);
+            if (problems.Count > 0)
+            {
+                var reason = "the discovered catalog failed validation: " + string.Join("; ", problems);
+                result = new ModelCatalogProbeResult(
+                    ModelCatalogProbeOutcome.NotParseable, null, reason, result.Elapsed, result.Report ?? reason);
+            }
         }
 
         LastRefreshOutcome = result.Outcome;
@@ -179,11 +232,33 @@ public sealed class ModelCatalogService : IDisposable
 
         if (!result.Succeeded || result.Catalog is null)
         {
+            WriteRejectionReport(result.Report);
+
+            // Only a refused read is remembered. A login or folder-trust gate is something the user can
+            // fix (so it is retried next launch), a missing `claude` is not a probe failure, and a
+            // cancellation says nothing about the next attempt.
+            if (result.Outcome == ModelCatalogProbeOutcome.NotParseable)
+            {
+                ModelCatalogFailureMemo.Record(_cachePath, identityBefore, result.Detail);
+            }
+
             return result;
         }
 
-        ModelCatalogCache.TrySave(
-            result.Catalog, ModelCatalogCache.DescribeCliBinary(_cliPathResolver()), _cachePath);
+        // A good discovery supersedes any report and any remembered failure left by an earlier bad one.
+        WriteRejectionReport(null);
+        ModelCatalogFailureMemo.Clear(_cachePath);
+
+        var identityAfter = ModelCatalogCache.DescribeCliBinary(_cliPathResolver());
+        if (string.Equals(identityBefore, identityAfter, StringComparison.Ordinal))
+        {
+            ModelCatalogCache.TrySave(result.Catalog, identityAfter, _cachePath);
+        }
+        else
+        {
+            // Still used for this run - it was read from a real picker - but not remembered.
+            LastRefreshDetail = "Claude Code changed while its models were being read; the result was not cached.";
+        }
 
         lock (_gate)
         {
@@ -192,6 +267,38 @@ public sealed class ModelCatalogService : IDisposable
 
         CatalogChanged?.Invoke(this, result.Catalog);
         return result;
+    }
+
+    /// <summary>
+    /// Writes (or, for null, removes) <c>accel-model-catalog.rejected.txt</c> next to the cache: why the
+    /// last scrape was refused and the picker lines it was read from. Redacted by the probe - this is for
+    /// diagnosing a rejection after the fact, and must be safe to attach to a bug report. Best effort.
+    /// </summary>
+    private void WriteRejectionReport(string? report)
+    {
+        try
+        {
+            var cache = _cachePath ?? ModelCatalogCache.DefaultPath();
+            var directory = Path.GetDirectoryName(Path.GetFullPath(cache));
+            var file = Path.Combine(directory ?? ".", Path.GetFileNameWithoutExtension(cache) + ".rejected.txt");
+
+            if (report is null)
+            {
+                if (File.Exists(file))
+                {
+                    File.Delete(file);
+                }
+
+                return;
+            }
+
+            Directory.CreateDirectory(directory ?? ".");
+            File.WriteAllText(file, $"{DateTimeOffset.Now:O}{Environment.NewLine}{report}");
+        }
+        catch
+        {
+            // A diagnostics file must never turn a refused scrape into an error.
+        }
     }
 
     /// <summary>

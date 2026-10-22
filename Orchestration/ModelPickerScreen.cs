@@ -2,6 +2,7 @@ namespace Accel.Orchestration;
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text.RegularExpressions;
 
 /// <summary>One row of the rendered picker: its ordinal, the short label, the trailing
@@ -17,12 +18,19 @@ public sealed record ModelPickerScreen(
     IReadOnlyList<ModelPickerRow> Rows,
     string? CurrentEffort,
     bool SawPickerChrome,
-    string? ClaudeCliVersion = null)
+    string? ClaudeCliVersion = null,
+    IReadOnlyList<string>? StructuralProblems = null)
 {
     /// <summary>Whether this looks like a picker screen worth reading at all - chrome present and at
     /// least one row. Callers must gate on this rather than on <see cref="Rows"/> alone, since a
     /// permission prompt or a <c>/resume</c> list also paints numbered rows.</summary>
     public bool IsUsable => SawPickerChrome && Rows.Count > 0;
+
+    /// <summary>Whether the rows have the shape a real picker has: ordinals running 1..N with none repeated,
+    /// and at most one under the cursor. A numbered line from elsewhere on the screen, or a stale cursor
+    /// glyph left by a partial repaint, breaks that - and it is a reason to distrust the whole read, not
+    /// something to work around by taking the first match.</summary>
+    public bool IsSound => StructuralProblems is null || StructuralProblems.Count == 0;
 }
 
 /// <summary>
@@ -38,8 +46,11 @@ public static class ModelPickerScreenParser
 {
     /// <summary>A row line: an optional cursor glyph, the ordinal, the label, then (after a run of
     /// two or more spaces, which is how the picker columnizes) the description.</summary>
+    // The cursor glyph is anything that is neither a space nor a digit. Excluding digits is what keeps
+    // "10. Foo" from reading as cursor "1" + ordinal "0" (which then collided with row 0/1 and stopped
+    // the walk): the ordinal is the first digits on the line, one or two of them.
     private static readonly Regex RowPattern = new(
-        @"^(?<cursor>\S)?\s*(?<number>\d+)\.\s+(?<label>\S.*?)(?:\s{2,}(?<description>\S.*))?$",
+        @"^(?:(?<cursor>[^\s\d])\s*)?(?<number>\d{1,2})\.\s+(?<label>\S.*?)(?:\s{2,}(?<description>\S.*))?$",
         RegexOptions.Compiled);
 
     /// <summary>The picker's single effort line, e.g. "❯ Medium effort / to adjust". It reports only
@@ -64,6 +75,7 @@ public static class ModelPickerScreenParser
     public static ModelPickerScreen Parse(IReadOnlyList<string> screen)
     {
         var rows = new List<ModelPickerRow>();
+        var problems = new List<string>();
         var chrome = false;
 
         foreach (var rawLine in screen)
@@ -95,17 +107,36 @@ public static class ModelPickerScreenParser
 
             // The cursor glyph is whatever the TUI happens to draw; all that matters is that the
             // ordinal was NOT the first non-space character on the line.
-            var selected = match.Groups["cursor"].Success && !char.IsAsciiDigit(match.Groups["cursor"].Value[0]);
+            var selected = match.Groups["cursor"].Success;
 
             if (!rows.Exists(existing => existing.Number == number))
             {
                 rows.Add(new ModelPickerRow(number, label, description, selected));
             }
+            else
+            {
+                problems.Add($"ordinal {number} appears more than once");
+            }
         }
 
         var effort = FindSelectedRowEffort(screen);
         rows.Sort((left, right) => left.Number.CompareTo(right.Number));
-        return new ModelPickerScreen(rows, effort, chrome, FindCliVersion(screen));
+
+        if (rows.Count > 0)
+        {
+            if (!rows.Select(r => r.Number).SequenceEqual(Enumerable.Range(1, rows.Count)))
+            {
+                problems.Add("the row ordinals are not 1.." + rows.Count);
+            }
+
+            var selectedRows = rows.Count(r => r.Selected);
+            if (selectedRows > 1)
+            {
+                problems.Add($"{selectedRows} rows are marked as selected");
+            }
+        }
+
+        return new ModelPickerScreen(rows, effort, chrome, FindCliVersion(screen), problems);
     }
 
     /// <summary>

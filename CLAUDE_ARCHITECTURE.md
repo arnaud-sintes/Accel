@@ -385,6 +385,50 @@ and guarantees they don't outlive the app even across crashes.
   halves are unit-tested against captured screens; the live drive is exercised by the
   `model-picker-probe` dev verb.
 
+  **Why this area kept regressing, and what now prevents it.** ConPTY does not repaint a screen, it emits
+  the *difference* from the one it believes is on the terminal - cursor moves, `ESC[nC` skips over cells it
+  thinks are unchanged (even inside a word), only changed cells written. So the grid `TerminalScreenBuffer`
+  rebuilds must equal the console's exactly; any divergence leaves stale text in precisely the skipped cells
+  and surfaces glued onto a row ("Sonnet 5.5up", a context meter in a description). Every earlier fix cleaned
+  strings after parsing, which is why it came back. The defences, in the order a scrape meets them:
+  - **A conformant emulator.** `TerminalScreenBuffer` follows the real CSI grammar (parameter / intermediate /
+    final bytes - a sequence's bytes are never printed), implements everything that moves the cursor or
+    changes cells (ECH/DCH/ICH/IL/DL/SU/SD/REP, scroll margins, save/restore, alternate screen, wide and
+    zero-width characters, lazy wrap) and *counts* what it cannot (`ScreenRender.UnsupportedSequences`). A
+    property test (`TerminalScreenBufferDiffTests`) encodes random screen pairs the way conhost does and
+    requires the exact target screen back.
+  - **Readiness and stability.** The probe sends no key until the chat prompt is on screen
+    (`WaitForChatPromptAsync`: version banner + input-box rules; a login/trust gate or any other dialog means
+    nothing is sent), and reads the picker from a render that has stopped changing (`StableRenderAsync`), not
+    merely after a silence.
+  - **Structure over first-match.** `ModelPickerScreen.IsSound`: ordinals must run 1..N once each with at
+    most one row under the cursor. The walk parks on row 1 by asking the picker where the (wrapping) cursor is,
+    must visit every row, and returns entries in picker order.
+  - **Reject, don't repair.** A version token that is not pure digits-and-dots makes the label unreadable
+    (`ExtractCliValue` returns empty); an unreadable row, a duplicate launch value, or any unsupported escape
+    sequence fails the whole scrape. A repaired "5.5" can be right but "5.54" cannot be told from a real
+    version. Descriptions (only a tooltip) are dropped when implausible rather than failing the scrape.
+  - **Read twice.** After the walk the picker is closed, reopened and read again; the ordinals and labels must
+    be identical (`ConfirmByRereadingAsync`).
+  - **One validator at every boundary.** `Metrics/ModelCatalogValidator` (launch-value shape, display-name
+    shape, name/launch-value agreement, prose-only descriptions, effort-ladder shape, no duplicates, no
+    all-single-tier ladders) gates the probe's result, `ModelCatalogCache.TrySave`, `TryLoad`, and the
+    service's publish step. A failing catalog is never cached, never published, and a failing *cache* is read
+    as absent (schema 4 also retires every file an older version wrote). The cache additionally refuses a file
+    with no timestamp, and the service does not cache a result if `claude.exe` changed while it was read.
+  - **Diagnostics.** A rejected scrape writes `accel-model-catalog.rejected.txt` next to the cache: the reason
+    plus only the picker's own lines (rows, effort line, chrome) - never the raw stream, which carries the
+    working directory, plan and hook names. A later good discovery removes it.
+  - A rejection costs nothing: the app falls back to `ModelCatalog.BuiltIn`.
+  - **Remembered failures.** A rejected scrape caches nothing, so without a memory every start would repeat the
+    ~45s blocking update dialog. `Settings/ModelCatalogFailureMemo` writes `accel-model-catalog.failed.json`
+    (binary identity, time, reason) after a *refused read* - not after a login/trust gate, a missing `claude`
+    or a cancel, which are retried. While it is recent (24h) **and** the binary is the same one,
+    `ModelCatalogService.NeedsRefresh()` is false, so startup skips the scan and uses the built-in list; a
+    changed `claude.exe` or the cooldown running out lifts it, a successful read clears it, and an explicit
+    `RefreshAsync` never consults it. `ModelCatalogService.FallbackNote` feeds the model picker's tooltip so
+    it says the read was refused (and when it will be retried) instead of "not queried yet".
+
 ### 2.7 `App/` — WPF UI layer
 
 - **Composition** — `App.xaml` is compiled as `Page` (not `ApplicationDefinition`) so it doesn't generate

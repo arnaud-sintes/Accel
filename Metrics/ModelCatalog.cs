@@ -43,6 +43,24 @@ public sealed record ModelCatalogEntry(
 }
 
 /// <summary>
+/// Whether a <see cref="ModelCatalogEntry.CliValue"/> has the shape a real <c>--model</c> value has: a bare
+/// alias ("sonnet", "opus") or the dashed id ("claude-sonnet-5-5"), where every dash-separated part is
+/// either all letters or all digits. The discovered catalog is scraped off a repainting terminal screen,
+/// and a stray cell glued onto a version ("Sonnet 5.5" + "up") used to ship as <c>claude-sonnet-5-5up</c>
+/// - a value the CLI rejects - and then sit in the cache for two weeks. A shape check cannot say a model
+/// exists, but it reliably rejects that kind of corruption, and it does not need updating when new model
+/// names arrive.
+/// </summary>
+public static class ModelLaunchValue
+{
+    private static readonly System.Text.RegularExpressions.Regex Shape = new(
+        @"^(?:[A-Za-z]+|claude(?:-(?:[a-z]+|[0-9]+))+)(?:\[[0-9]+[mk]\])?$",
+        System.Text.RegularExpressions.RegexOptions.Compiled | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    public static bool IsPlausible(string? value) => !string.IsNullOrWhiteSpace(value) && Shape.IsMatch(value.Trim());
+}
+
+/// <summary>
 /// The set of models Accel offers, and each one's effort ladder - the single source both the
 /// "Create session" dialog and <see cref="ModelEffortTable"/> read, replacing what used to be two
 /// independently hardcoded lists (<see cref="ModelBadgeTable.Families"/> for the models,
@@ -164,11 +182,16 @@ public sealed record ModelCatalog(
     /// unexpected lineup can tell whether they are looking at what their CLI reported or at Accel's
     /// own guess.
     /// </summary>
-    public string DescribeSource() => Source switch
+    /// <param name="failureNote">When reading the models from Claude Code was tried and refused, a sentence
+    /// saying so (see <c>ModelCatalogService.FallbackNote</c>) - which replaces the "not queried yet" text,
+    /// since that would no longer be true.</param>
+    public string DescribeSource(string? failureNote = null) => Source switch
     {
         ModelCatalogSource.Discovered =>
             $"Read from Claude Code{(ClaudeCliVersion is null ? string.Empty : " " + ClaudeCliVersion)}" +
             $"{(DiscoveredAtUtc is null ? string.Empty : $" on {DiscoveredAtUtc.Value.ToLocalTime():yyyy-MM-dd HH:mm}")}.",
+        _ when !string.IsNullOrWhiteSpace(failureNote) =>
+            "Accel's built-in list - " + failureNote + " This may not match what your account offers.",
         _ => "Accel's built-in list - Claude Code has not been queried yet, so this may not match what your account offers.",
     };
 }

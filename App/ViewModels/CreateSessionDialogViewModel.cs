@@ -89,8 +89,10 @@ public sealed partial class CreateSessionDialogViewModel : ObservableObject
         IFolderPickerService? folderPicker = null,
         string? initialWorkingDirectory = null,
         ModelCatalog? catalog = null,
-        UserModelDefaults? userDefaults = null)
+        UserModelDefaults? userDefaults = null,
+        string? catalogFailureNote = null)
     {
+        _catalogFailureNote = catalogFailureNote;
         _guidFactory = guidFactory ?? Guid.NewGuid;
         _specBuilder = specBuilder ?? DefaultSpecBuilder;
         _sessionStarter = sessionStarter ?? (spec => PtySession.Start(spec));
@@ -127,7 +129,11 @@ public sealed partial class CreateSessionDialogViewModel : ObservableObject
     /// is Accel's built-in guess. Shown rather than hidden because the two are not equally
     /// trustworthy and an unexpected lineup is otherwise unexplainable to the user.
     /// </summary>
-    public string CatalogSourceDescription => _catalog.DescribeSource();
+    public string CatalogSourceDescription => _catalog.DescribeSource(_catalogFailureNote);
+
+    // Set when reading Claude Code's model list was tried and refused (ModelCatalogService.FallbackNote), so
+    // the tooltip on the built-in list says why instead of claiming Claude Code was never asked.
+    private readonly string? _catalogFailureNote;
 
     /// <summary>
     /// The effort ladder for the <i>currently selected</i> model, ascending - not one shared

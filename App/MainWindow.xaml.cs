@@ -1012,7 +1012,8 @@ public partial class MainWindow : Window
         var viewModel = new CreateSessionDialogViewModel(
             initialWorkingDirectory: initialWorkingDirectory,
             catalog: ModelCatalog?.Current,
-            userDefaults: ModelCatalog?.UserDefaults);
+            userDefaults: ModelCatalog?.UserDefaults,
+            catalogFailureNote: ModelCatalog?.FallbackNote);
         var dialog = new CreateSessionDialog(viewModel) { Owner = this };
         dialog.ShowDialog();
 
