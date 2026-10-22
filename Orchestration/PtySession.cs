@@ -666,9 +666,10 @@ public sealed class PtySession : IDisposable
             // before somebody is draining the pipe.
             pump.Start(session._stopCts.Token, $"pty-output-pump-{conPty.ProcessId}");
 
+            // EnableRaisingEvents was already switched on in TryOpenChildProcess, where a refusal is
+            // survivable; subscribing here cannot fail.
             if (childProcess is not null)
             {
-                childProcess.EnableRaisingEvents = true;
                 childProcess.Exited += session.OnChildProcessExited;
             }
 
@@ -678,6 +679,13 @@ public sealed class PtySession : IDisposable
             // If the child was so short-lived that it exited before the handler was attached, the event
             // may never fire - check explicitly rather than leaving ExitTask hanging forever.
             session.PollForExit();
+
+            // No Process observer (see TryOpenChildProcess) means no Exited event, so watch the handle
+            // CreateProcess returned instead.
+            if (childProcess is null)
+            {
+                session.StartExitPolling();
+            }
 
             return session;
         }
@@ -868,20 +876,55 @@ public sealed class PtySession : IDisposable
 
     private static Process? TryOpenChildProcess(int processId)
     {
+        Process? process = null;
         try
         {
-            return Process.GetProcessById(processId);
+            process = Process.GetProcessById(processId);
+
+            // GetProcessById opens nothing: the handle is opened lazily, by this setter. That open is a
+            // plain OpenProcess by PID, which some machines refuse for a shell child (observed:
+            // ERROR_ACCESS_DENIED for cmd.exe, where CreateProcess's own handle works fine). Doing it
+            // here, inside the guard, turns that refusal into a missing observer instead of a failed
+            // launch.
+            process.EnableRaisingEvents = true;
+            return process;
         }
         catch (Exception)
         {
-            // Losing the observer is a degraded-but-usable session (ExitTask then completes at Dispose,
-            // and TryGetExitCode/WaitForExit still work off the owned handle), so it must not fail the
-            // launch. Practically unreachable: the child is suspended and therefore alive.
+            // Losing the observer is a degraded-but-usable session: exit is then noticed when the output
+            // pipe ends (OnOutputEnded) off the handle CreateProcess returned, and TryGetExitCode/
+            // WaitForExit still work off that owned handle. It must not fail the launch.
+            process?.Dispose();
             return null;
         }
     }
 
+    /// <summary>
+    /// Stands in for the <c>Exited</c> event when no <see cref="Process"/> observer could be opened:
+    /// checks the owned child handle twice a second until the exit is signalled. The output pipe is no
+    /// substitute - ConPTY keeps it open after the client exits until the pseudoconsole is closed. Ends by
+    /// itself: <see cref="Dispose"/> signals the exit (with no code if it never saw one), and a poll that
+    /// hits the closed handle just gets swallowed by <see cref="PollForExit"/> until then.
+    /// </summary>
+    private void StartExitPolling()
+    {
+        _ = Task.Run(async () =>
+        {
+            while (Volatile.Read(ref _exitSignalled) == 0)
+            {
+                PollForExit();
+                if (Volatile.Read(ref _exitSignalled) != 0)
+                {
+                    return;
+                }
+
+                await Task.Delay(TimeSpan.FromMilliseconds(500)).ConfigureAwait(false);
+            }
+        });
+    }
+
     private void OnChildProcessExited(object? sender, EventArgs e) => PollForExit();
+
 
     /// <summary>Observes the exit if it has happened, and signals it at most once.</summary>
     private void PollForExit()
