@@ -128,7 +128,9 @@ public sealed class AccelJobObject : IDisposable
         if (!ok)
         {
             int error = Marshal.GetLastWin32Error();
-            throw new Win32Exception(error, "AssignProcessToJobObject failed.");
+            // The code is what tells the causes apart (5 = access denied: the process is already in a
+            // job that refuses nesting, or is terminating), so it belongs in the message a user can quote.
+            throw new Win32Exception(error, $"AssignProcessToJobObject failed (Win32 error {error}).");
         }
     }
 

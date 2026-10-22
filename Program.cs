@@ -295,6 +295,10 @@ static async Task<int> RunCombinedAsync(int port, string? dumpRawDir, bool verbo
         // matches the installed claude.exe, so a normal start does nothing at all here.
         var modelCatalog = new Accel.App.Services.ModelCatalogService();
         mainWindow = new Accel.App.MainWindow(rootsPanel, server.PtySessions, port, tabs, sessionRegistry, selection, agentGraph, filesPanel, gitPanel, mcpSkillsPanel);
+
+        // Only the real app remembers/restores tabs: the smoke-test harnesses that also build a
+        // MainWindow leave this null, so they neither prompt nor overwrite the user's saved tabs.
+        mainWindow.OpenTabs = new Accel.App.Services.OpenTabsStore(Accel.App.Services.OpenTabsStore.DefaultPath());
         mainWindow.ModelCatalog = modelCatalog;
         mainWindow.Loaded += (_, _) =>
         {

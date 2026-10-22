@@ -193,6 +193,15 @@ public sealed class PtySessionOptions
     /// is for tests/diagnostics that want a job they can close on purpose.
     /// </summary>
     public AccelJobObject? JobObject { get; init; }
+
+    /// <summary>
+    /// Whether a failed job assignment aborts the launch (the default: the job is the primary orphan
+    /// backstop, so a `claude` session that cannot be covered by it is not started silently). A plain
+    /// terminal turns this off - <see cref="PtyRegistry"/> and <see cref="PtyShutdownCoordinator"/> still
+    /// close it on every normal exit, so the only thing lost is the kill-on-crash net, and refusing to
+    /// open a shell over that costs more than it protects.
+    /// </summary>
+    public bool JobAssignmentRequired { get; init; } = true;
 }
 
 /// <summary>Why <see cref="PtySession.Exited"/> fired.</summary>
@@ -601,7 +610,15 @@ public sealed class PtySession : IDisposable
 
             // Step 2 of 3: job assignment, while the child still has not executed an instruction. Uses
             // the SafeProcessHandle overload (P2-T2b finding 2) - never DangerousGetHandle from here.
-            jobObject.AssignProcess(conPty.ProcessHandle);
+            try
+            {
+                jobObject.AssignProcess(conPty.ProcessHandle);
+            }
+            catch (System.ComponentModel.Win32Exception ex) when (!options.JobAssignmentRequired)
+            {
+                // Degraded, not failed: see PtySessionOptions.JobAssignmentRequired.
+                Trace.TraceWarning($"PtySession: running '{spec.ExecutablePath}' outside the kill-on-close job: {ex.Message}");
+            }
 
             // Open the observer handle while the child is still suspended: it is provably alive, so its
             // PID cannot have been recycled, which makes Process.GetProcessById safe here and nowhere

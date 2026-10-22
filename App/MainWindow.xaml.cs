@@ -196,6 +196,10 @@ public partial class MainWindow : Window
         // dirty and lets the close proceed, same as every other Tabs-optional hook in this file.
         Closing += MainWindow_Closing;
 
+        // Offers to bring back the previous run's tabs - after the window has painted, so the question
+        // appears over a visible Accel rather than over nothing. A no-op unless OpenTabs is set.
+        Loaded += (_, _) => Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, new Action(OfferTabRestore));
+
         // The diff viewer's line-number gutters and its two panes' scroll sync are wired here rather
         // than in XAML since ScrollViewer.ScrollChangedEvent has no attached-property XAML shorthand -
         // see DiffOldText_ScrollChanged/DiffNewText_ScrollChanged's remarks. The single-pane file view
@@ -315,6 +319,13 @@ public partial class MainWindow : Window
 
             // T8: the close guard - see ConfirmCloseDirtyTabAsync's own remarks.
             tabs.ConfirmCloseDirtyTabAsync = ConfirmCloseDirtyTabAsync;
+
+            // A file/git tab has no session to focus, so panel A is told which file it is instead and
+            // shows the project that hosts it.
+            tabs.FileTabActivated += path => RootsPanel?.SelectRootContaining(path);
+
+            // Keeps the "tabs to restore next launch" file current - see SaveOpenTabs.
+            tabs.TabSetChanged += SaveOpenTabs;
         }
 
         if (filesPanel is not null)
@@ -376,10 +387,19 @@ public partial class MainWindow : Window
             // acknowledges the row, hence the Activated re-run.
             rootsPanel.IsWindowActive = () => IsActive;
             Activated += (_, _) => rootsPanel.RefreshWaitingAcknowledgment();
+
+            // See RootsTreeViewItem_RequestBringIntoView: keeps a rebuild from scrolling the panel.
+            rootsPanel.TreeRebuilding += OnRootsTreeRebuilding;
+            rootsPanel.TreeRebuilt += OnRootsTreeRebuilt;
         }
 
         Closed += (_, _) =>
         {
+            // The last word on what to restore, taken before teardown starts: closing the sessions below
+            // empties the tab strip, and that must not be what gets remembered.
+            SaveOpenTabs();
+            _openTabsFrozen = true;
+
             // No session teardown here any more: PtyRegistry is the single owner of PtySession.Dispose
             // (P3-T2) and app-exit teardown is P3-T4's job (CloseAllAsync/Dispose around the app loop).
             // This only drops the tab strip's registry subscription plus panel B's own; AgentGraphViewModel
@@ -1022,7 +1042,12 @@ public partial class MainWindow : Window
         // Selecting the new tab is what attaches panel D (TabsViewModel.AttachTerminalAsync, wired in
         // the constructor). Nothing is awaited: AddTab is synchronous and the attach is fire-and-forget
         // by design, exactly as P2-T5b's own call site was.
-        Tabs?.AddTab(tabId, string.IsNullOrWhiteSpace(viewModel.DisplayName) ? null : viewModel.DisplayName);
+        string? launchDirectory = viewModel.LastLaunchSpec?.WorkingDirectory;
+        Tabs?.AddTab(
+            tabId,
+            string.IsNullOrWhiteSpace(viewModel.DisplayName) ? null : viewModel.DisplayName,
+            launchDirectory,
+            ProjectPathFor(launchDirectory));
 
         // Panel A's row name comes from RootsTreeBuilder.BuildSessionDto's own tiered ladder
         // (accel_override > live /rename > transcript ai-title > first user message > truncated id),
@@ -1063,21 +1088,27 @@ public partial class MainWindow : Window
     /// message dialog rather than crashing the UI thread; everything past that point mirrors
     /// <see cref="CreateSessionCore"/>'s registration/tab steps exactly.
     /// </summary>
-    private void CreateShellSessionCore(string workingDirectory)
+    private TabViewModel? CreateShellSessionCore(string workingDirectory, bool placeNextToProject = true, bool silent = false)
     {
         PtySession session;
         try
         {
-            session = PtySession.Start(PtySession.CreateShellSpec(workingDirectory));
+            session = PtySession.Start(
+                PtySession.CreateShellSpec(workingDirectory),
+                new PtySessionOptions { JobAssignmentRequired = false });
         }
         catch (PtySessionLaunchException ex)
         {
-            AccelMessageDialog.ShowMessage(
-                this,
-                $"Could not open a terminal here:\n{ex.Message}",
-                "Open terminal",
-                AccelDialogIcon.Warning);
-            return;
+            if (!silent)
+            {
+                AccelMessageDialog.ShowMessage(
+                    this,
+                    $"Could not open a terminal here:\n{ex.Message}",
+                    "Open terminal",
+                    AccelDialogIcon.Warning);
+            }
+
+            return null;
         }
 
         string tabId = Guid.NewGuid().ToString();
@@ -1091,15 +1122,29 @@ public partial class MainWindow : Window
             // Same posture as CreateSessionCore: Register only throws for a duplicate tabId (impossible
             // for a fresh GUID) or a disposed registry (the app is shutting down). Either way there is
             // nothing useful to add to the UI here, and the session must not be disposed from this file.
-            return;
+            return null;
         }
 
         _ptyRouteRegistry?.RegisterSession(tabId, session);
 
         // Selecting the new tab is what attaches panel D, exactly like CreateSessionCore's own AddTab
         // call - Shell and Session tabs go through the identical attach path (TabViewModel.HasPtySession).
-        Tabs?.AddShellTab(tabId, $"Terminal - {Path.GetFileName(workingDirectory.TrimEnd('\\', '/'))}");
+        // placeNextToProject: the tab lands right of its project's rightmost session/terminal tab;
+        // restoring a saved tab set turns that off so the saved order comes back as it was.
+        return Tabs?.AddShellTab(
+            tabId,
+            $"Terminal - {Path.GetFileName(workingDirectory.TrimEnd('\\', '/'))}",
+            workingDirectory,
+            ProjectPathFor(workingDirectory),
+            placeNextToProject);
     }
+
+    /// <summary>The project a folder belongs to for tab placement: the configured root that contains it,
+    /// or the folder itself when no root does.</summary>
+    private string? ProjectPathFor(string? workingDirectory) =>
+        string.IsNullOrWhiteSpace(workingDirectory)
+            ? null
+            : RootsPanel?.RootPathContaining(workingDirectory) ?? workingDirectory;
 
     /// <summary>
     /// Panel A's root-folder "Reveal in File Explorer" context menu item (right-click a folder in
@@ -1307,8 +1352,30 @@ public partial class MainWindow : Window
             return;
         }
 
-        string sessionId = node.Key;
+        // Must go through ResolveWorkingDirectoryFor, never RootPathFor directly: this value becomes
+        // CreateProcessW's lpCurrentDirectory (PtySession.CreateClaudeSpec -> ConPty.LaunchChild),
+        // which hard-fails with Win32 267 (ERROR_DIRECTORY) on anything that isn't an existing
+        // directory - and the owning root's key is the literal string "(unattributed)" for a session
+        // under the synthetic root, or a stale path for a root folder that has since been deleted.
+        // See that method's remarks for the full precedence chain and why the session's own recorded
+        // cwd is preferred over its owning root.
+        StartResumedSession(
+            node.Key,
+            RootsPanel?.ResolveWorkingDirectoryFor(node),
+            string.IsNullOrWhiteSpace(node.Text) ? null : node.Text,
+            fork,
+            silent: false);
+    }
 
+    /// <summary>
+    /// <c>claude --resume &lt;sessionId&gt;</c> in <paramref name="workingDirectory"/>, with a tab for it.
+    /// The body of "Resume session", split out so restoring the previous run's tabs relaunches sessions
+    /// through exactly the same path (same saved launch args, same registration, same tab). Returns the
+    /// tab, or null if nothing was started; <paramref name="silent"/> suppresses the failure dialog for
+    /// a caller that reports failures in one batch.
+    /// </summary>
+    private TabViewModel? StartResumedSession(string sessionId, string? workingDirectory, string? title, bool fork, bool silent)
+    {
         // Already open: select the existing tab rather than launching a second `claude --resume` against
         // the same session id (which claude itself would likely refuse, but there is no reason to even
         // attempt it) - AddTab's own idempotency (TabsViewModel.AddTab) would do the same for a plain
@@ -1317,17 +1384,8 @@ public partial class MainWindow : Window
         if (!fork && _sessionRegistry is not null && _sessionRegistry.TryGet(sessionId, out var existing) && existing is not null)
         {
             Tabs?.SelectTab(sessionId);
-            return;
+            return Tabs?.Tabs.FirstOrDefault(t => t.TabId == sessionId);
         }
-
-        // Must go through ResolveWorkingDirectoryFor, never RootPathFor directly: this value becomes
-        // CreateProcessW's lpCurrentDirectory (PtySession.CreateClaudeSpec -> ConPty.LaunchChild),
-        // which hard-fails with Win32 267 (ERROR_DIRECTORY) on anything that isn't an existing
-        // directory - and the owning root's key is the literal string "(unattributed)" for a session
-        // under the synthetic root, or a stale path for a root folder that has since been deleted.
-        // See that method's remarks for the full precedence chain and why the session's own recorded
-        // cwd is preferred over its owning root.
-        string? workingDirectory = RootsPanel?.ResolveWorkingDirectoryFor(node);
 
         var baseArguments = fork
             ? new[] { "--resume", sessionId, "--fork-session" }
@@ -1357,9 +1415,13 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            AccelMessageDialog.ShowMessage(this, $"Could not resume this session: {ex.Message}", "Resume session",
-                AccelDialogIcon.Error);
-            return;
+            if (!silent)
+            {
+                AccelMessageDialog.ShowMessage(this, $"Could not resume this session: {ex.Message}", "Resume session",
+                    AccelDialogIcon.Error);
+            }
+
+            return null;
         }
 
         string tabId = fork ? Guid.NewGuid().ToString() : sessionId;
@@ -1373,11 +1435,11 @@ public partial class MainWindow : Window
             // Same rationale as CreateSession_Click: Register only throws for a duplicate tabId (not
             // possible for the ids constructed above within one run) or a disposed registry (app is
             // shutting down) - nothing useful to add to the UI, and the session must not be disposed here.
-            return;
+            return null;
         }
 
         _ptyRouteRegistry?.RegisterSession(tabId, session);
-        Tabs?.AddTab(tabId, string.IsNullOrWhiteSpace(node.Text) ? null : node.Text);
+        return Tabs?.AddTab(tabId, title, workingDirectory, ProjectPathFor(workingDirectory));
     }
 
     /// <summary>
@@ -1406,6 +1468,187 @@ public partial class MainWindow : Window
         }
 
         Tabs?.StopTabCommand.Execute(tab);
+    }
+
+    // --- Panel A: never scroll because of a rebuild ---------------------------------------------------
+
+    private bool _suppressRootsBringIntoView;
+    private double _rootsScrollOffset;
+
+    private void OnRootsTreeRebuilding()
+    {
+        _rootsScrollOffset = FindDescendant<ScrollViewer>(RootsTreeView)?.VerticalOffset ?? 0;
+        _suppressRootsBringIntoView = true;
+    }
+
+    private void OnRootsTreeRebuilt(bool revealSelection)
+    {
+        if (revealSelection)
+        {
+            // A deliberate move to the focused row: let its scroll-into-view through.
+            _suppressRootsBringIntoView = false;
+            return;
+        }
+
+        // The fresh rows are laid out after this returns, and that is when they ask to be scrolled to;
+        // keep swallowing until layout has settled, then put the offset back in case anything moved it.
+        Dispatcher.BeginInvoke(DispatcherPriority.ContextIdle, new Action(() =>
+        {
+            var scroller = FindDescendant<ScrollViewer>(RootsTreeView);
+            if (scroller is not null && Math.Abs(scroller.VerticalOffset - _rootsScrollOffset) > 0.5)
+            {
+                scroller.ScrollToVerticalOffset(_rootsScrollOffset);
+            }
+
+            _suppressRootsBringIntoView = false;
+        }));
+    }
+
+    private void RootsTreeViewItem_RequestBringIntoView(object sender, RequestBringIntoViewEventArgs e)
+    {
+        if (_suppressRootsBringIntoView)
+        {
+            e.Handled = true;
+        }
+    }
+
+    private static T? FindDescendant<T>(DependencyObject parent) where T : DependencyObject
+    {
+        int count = VisualTreeHelper.GetChildrenCount(parent);
+        for (int i = 0; i < count; i++)
+        {
+            var child = VisualTreeHelper.GetChild(parent, i);
+            if (child is T match)
+            {
+                return match;
+            }
+
+            var deeper = FindDescendant<T>(child);
+            if (deeper is not null)
+            {
+                return deeper;
+            }
+        }
+
+        return null;
+    }
+
+    // --- Remembering and restoring the open tabs -------------------------------------------------------
+
+    /// <summary>
+    /// Where the open tabs are remembered. Null (the default) switches both saving and the restore offer
+    /// off, which is what the smoke-test harnesses that build a <see cref="MainWindow"/> need - they must
+    /// neither prompt nor overwrite the user's real file. <c>Program.cs</c> sets it for the real app.
+    /// </summary>
+    public OpenTabsStore? OpenTabs { get; set; }
+
+    private bool _openTabsFrozen;
+    private bool _restoringTabs;
+    private bool _restoreOffered;
+
+    private void SaveOpenTabs()
+    {
+        if (OpenTabs is null || Tabs is null || _openTabsFrozen || _restoringTabs)
+        {
+            return;
+        }
+
+        OpenTabs.Save(Tabs.CreateRestoreSnapshot());
+    }
+
+    /// <summary>
+    /// Once per launch: if the previous run left tabs behind, asks whether to bring them back. Answering
+    /// no just starts empty - the next change (or the final save on close) replaces what was remembered.
+    /// </summary>
+    private void OfferTabRestore()
+    {
+        if (_restoreOffered)
+        {
+            return;
+        }
+
+        _restoreOffered = true;
+        if (OpenTabs is null || Tabs is null)
+        {
+            return;
+        }
+
+        var saved = OpenTabs.Load();
+        if (saved.Tabs.Count == 0)
+        {
+            return;
+        }
+
+        string list = string.Join('\n', saved.Tabs.Take(8).Select(t => " - " + DescribeSavedTab(t)));
+        if (saved.Tabs.Count > 8)
+        {
+            list += $"\n - ... and {saved.Tabs.Count - 8} more";
+        }
+
+        bool restore = AccelMessageDialog.ShowConfirm(
+            this,
+            $"Restore the {saved.Tabs.Count} tab(s) that were open when Accel was last closed?\n\n{list}",
+            "Restore tabs",
+            AccelDialogIcon.Question);
+
+        if (restore)
+        {
+            RestoreTabs(saved);
+        }
+    }
+
+    private static string DescribeSavedTab(SavedTab tab) => tab.Kind switch
+    {
+        SavedTabKind.Session => "session: " + (string.IsNullOrWhiteSpace(tab.Title) ? tab.Id : tab.Title),
+        SavedTabKind.Shell => string.IsNullOrWhiteSpace(tab.Title) ? "terminal" : tab.Title,
+        _ => "file: " + Path.GetFileName(tab.Id),
+    };
+
+    private void RestoreTabs(SavedTabSet saved)
+    {
+        var restored = new TabViewModel?[saved.Tabs.Count];
+
+        // The strip is rebuilt in the saved order, one tab at a time; saving after every step would
+        // write a half-restored set, so it is held until the end.
+        _restoringTabs = true;
+        try
+        {
+            for (int i = 0; i < saved.Tabs.Count; i++)
+            {
+                var tab = saved.Tabs[i];
+                restored[i] = tab.Kind switch
+                {
+                    SavedTabKind.Session when Directory.Exists(tab.WorkingDirectory) =>
+                        StartResumedSession(tab.Id, tab.WorkingDirectory, tab.Title, fork: false, silent: true),
+                    SavedTabKind.Shell when Directory.Exists(tab.WorkingDirectory) =>
+                        CreateShellSessionCore(tab.WorkingDirectory!, placeNextToProject: false, silent: true),
+                    SavedTabKind.File when File.Exists(tab.Id) =>
+                        Tabs?.AddFileTab(tab.Id),
+                    _ => null,
+                };
+            }
+        }
+        finally
+        {
+            _restoringTabs = false;
+        }
+
+        if (saved.SelectedIndex is { } selected && restored[selected] is { } selectedTab)
+        {
+            Tabs?.SelectTab(selectedTab.TabId);
+        }
+
+        SaveOpenTabs();
+
+        int missed = restored.Count(t => t is null);
+        if (missed > 0)
+        {
+            AccelMessageDialog.ShowMessage(
+                this,
+                $"{missed} tab(s) could not be restored: their folder or file no longer exists, or the session failed to start.",
+                "Restore tabs",
+                AccelDialogIcon.Warning);
+        }
     }
 
     private const string TabDragFormat = "Accel.TabViewModel";

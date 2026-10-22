@@ -495,6 +495,40 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
     }
 
     /// <summary>
+    /// The configured root whose folder contains <paramref name="path"/> (the file/folder itself may be
+    /// anywhere below it; the longest root wins when roots nest), or null. Matched on the path text, not
+    /// the disk, so a path under a root that has since been deleted still resolves. The synthetic
+    /// "(unattributed)" node is never a match - its key is a label, not a folder.
+    /// </summary>
+    public string? RootPathContaining(string? path) =>
+        ProjectPaths.LongestContainingRoot(
+            path,
+            Roots.Where(r => r.Kind == RootsPanelNodeKind.Root && Path.IsPathRooted(r.Key)).Select(r => r.Key));
+
+    /// <summary>
+    /// Selects (and so shows) the root row that hosts <paramref name="path"/> - what clicking a file tab
+    /// does, since that tab has no session to focus. Selection only: it never changes the focused
+    /// session, which panels B and E follow. Does nothing when no root contains the path, or while a
+    /// search filter hides the row (surfacing it would mean clearing what the user typed).
+    /// </summary>
+    public void SelectRootContaining(string? path)
+    {
+        string? rootPath = RootPathContaining(path);
+        if (rootPath is null)
+        {
+            return;
+        }
+
+        var node = Roots.FirstOrDefault(r => r.Kind == RootsPanelNodeKind.Root && r.Key == rootPath);
+        if (node is null || !node.IsVisible)
+        {
+            return;
+        }
+
+        node.IsSelected = true;
+    }
+
+    /// <summary>
     /// The first configured root that actually exists on disk, or null if there are none (no roots
     /// configured at all, or every configured root has since been deleted/renamed). Filters out the
     /// synthetic "(unattributed)" root node the same way <see cref="Directory.Exists"/> naturally
@@ -843,6 +877,13 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
         }
 
         node.IsSelected = true;
+
+        // Landing on the focused row inside a rebuild is a deliberate "show me this" (its row just
+        // appeared); tell the view not to suppress the scroll that selection causes.
+        if (_rebuilding)
+        {
+            _revealRequested = true;
+        }
     }
 
     /// <summary>The path from a top-level row down to the session row keyed <paramref name="key"/>
@@ -975,6 +1016,8 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
     {
         var tree = MonitorTreeBuilder.Build(snapshot);
 
+        _revealRequested = false;
+        TreeRebuilding?.Invoke();
         _rebuilding = true;
         try
         {
@@ -1047,7 +1090,25 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
         }
 
         UpdateCounters(snapshot);
+        TreeRebuilt?.Invoke(_revealRequested);
     }
+
+    /// <summary>
+    /// Raised just before a snapshot replaces every node. A rebuild happens on every telemetry tick
+    /// (several a second while a session is working) and re-creates every row, so the view uses this to
+    /// note the scroll position it must not lose.
+    /// </summary>
+    public event Action? TreeRebuilding;
+
+    /// <summary>
+    /// Raised after a rebuild. The argument says whether the selection was deliberately moved to a row
+    /// that should be scrolled to (<see langword="true"/>); otherwise the new rows merely re-apply the
+    /// old selection and the view must not scroll to it - that is what kept dragging the panel back to
+    /// the open session while the user was scrolling it by hand.
+    /// </summary>
+    public event Action<bool>? TreeRebuilt;
+
+    private bool _revealRequested;
 
     private void UpdateCounters(RootsTreeDto? snapshot)
     {

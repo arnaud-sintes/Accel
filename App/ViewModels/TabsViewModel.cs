@@ -170,6 +170,15 @@ public sealed partial class TabViewModel : ObservableObject
     /// terminal vs. file viewer.</summary>
     public TabKind Kind { get; }
 
+    /// <summary>The folder a session/terminal tab was launched in (what "restore my tabs" relaunches it
+    /// in). Null for file/git tabs, which are identified by their own path.</summary>
+    public string? WorkingDirectory { get; set; }
+
+    /// <summary>The configured project root that hosts this tab's <see cref="WorkingDirectory"/> (or the
+    /// directory itself when no root contains it). What a new terminal uses to find the tabs of "its"
+    /// project, so it can sit right next to them in the strip.</summary>
+    public string? ProjectPath { get; set; }
+
     /// <summary>Only set for <see cref="TabKind.GitChange"/> - see <see cref="ForGitChange"/>.</summary>
     public string? GitRepoRootPath { get; private init; }
 
@@ -470,14 +479,65 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
         _host.SessionEnded += OnSessionEnded;
         SyncFromHost();
 
+        // Add/remove/drag-reorder all land here, which is what lets the window remember the tab set
+        // without every one of those code paths knowing about persistence.
+        Tabs.CollectionChanged += (_, _) => TabSetChanged?.Invoke();
+
         if (statusPollInterval is { } interval && interval > TimeSpan.Zero)
         {
             _statusPollTimer = new System.Threading.Timer(_ => PollFocusedSessionId(), null, interval, interval);
         }
     }
 
-    /// <summary>The tabs, in the order they were opened.</summary>
+    /// <summary>The tabs, in strip order (new session tabs append; a new terminal is placed beside its
+    /// project's tabs, see <see cref="AddShellTab"/>; the user can drag them around).</summary>
     public ObservableCollection<TabViewModel> Tabs { get; } = new();
+
+    /// <summary>Raised after the set or order of tabs changed, or the selection moved. The window uses it
+    /// to keep the "tabs to restore next launch" file current.</summary>
+    public event Action? TabSetChanged;
+
+    /// <summary>
+    /// Raised with the file's full path when a file/git tab becomes the selected one. Such a tab
+    /// deliberately does not change the focused session (see <see cref="OnSelectedTabChanged"/>), so
+    /// this is how panel A learns which project the file belongs to and can show it.
+    /// </summary>
+    public event Action<string>? FileTabActivated;
+
+    /// <summary>
+    /// What to bring back next launch: every live session, terminal and plain file tab, in strip order,
+    /// plus the selected one. Ended tabs (their process is gone) and git change/diff tabs are left out.
+    /// </summary>
+    public SavedTabSet CreateRestoreSnapshot()
+    {
+        var saved = new List<SavedTab>();
+        int? selectedIndex = null;
+
+        foreach (var tab in Tabs)
+        {
+            SavedTab? entry = tab.Kind switch
+            {
+                TabKind.Session when !tab.HasEnded => new SavedTab(SavedTabKind.Session, tab.TabId, tab.Title, tab.WorkingDirectory),
+                TabKind.Shell when !tab.HasEnded => new SavedTab(SavedTabKind.Shell, tab.TabId, tab.Title, tab.WorkingDirectory),
+                TabKind.File => new SavedTab(SavedTabKind.File, tab.TabId, tab.Title, null),
+                _ => null,
+            };
+
+            if (entry is null)
+            {
+                continue;
+            }
+
+            if (ReferenceEquals(tab, SelectedTab))
+            {
+                selectedIndex = saved.Count;
+            }
+
+            saved.Add(entry);
+        }
+
+        return new SavedTabSet(saved, selectedIndex);
+    }
 
     /// <summary>
     /// Panel D's attach hook: <c>tabId =&gt; TerminalView.AttachPtyAsync(tabId, port)</c>, set by the
@@ -586,6 +646,7 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
     partial void OnSelectedTabChanged(TabViewModel? value)
     {
         OnPropertyChanged(nameof(SelectedTabId));
+        TabSetChanged?.Invoke();
 
         if (value is null)
         {
@@ -607,7 +668,9 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
             // has a session behind it, and TabId here is a filesystem path, not a session id -
             // broadcasting it would corrupt every other panel's resolution (files/git/agent graph,
             // panel A's highlight), which all key off FocusedSessionId. Whatever session was last
-            // focused stays focused.
+            // focused stays focused. Panel A is told which file instead, so it can show the project
+            // that hosts it.
+            FileTabActivated?.Invoke(value.TabId);
             LastAttach = ShowFileSafelyAsync(value);
             return;
         }
@@ -633,7 +696,7 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
     /// registry, and selects it (a newly created session is what the user wants to look at). Idempotent
     /// for a tabId that already has a tab - it is selected instead of duplicated.
     /// </summary>
-    public TabViewModel AddTab(string tabId, string? title = null)
+    public TabViewModel AddTab(string tabId, string? title = null, string? workingDirectory = null, string? projectPath = null)
     {
         ArgumentException.ThrowIfNullOrEmpty(tabId);
 
@@ -644,7 +707,11 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
             return existing;
         }
 
-        var tab = new TabViewModel(tabId, title ?? string.Empty);
+        var tab = new TabViewModel(tabId, title ?? string.Empty)
+        {
+            WorkingDirectory = workingDirectory,
+            ProjectPath = projectPath,
+        };
         Tabs.Add(tab);
         OnPropertyChanged(nameof(IsEmpty));
         SelectedTab = tab;
@@ -659,7 +726,12 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
     /// only difference is the tab this constructs is <see cref="TabKind.Shell"/>, not
     /// <see cref="TabKind.Session"/>, so panel C renders it with its own distinct glyph/colour.
     /// </summary>
-    public TabViewModel AddShellTab(string tabId, string? title = null)
+    public TabViewModel AddShellTab(
+        string tabId,
+        string? title = null,
+        string? workingDirectory = null,
+        string? projectPath = null,
+        bool placeNextToProject = true)
     {
         ArgumentException.ThrowIfNullOrEmpty(tabId);
 
@@ -671,10 +743,38 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
         }
 
         var tab = TabViewModel.ForShell(tabId, title ?? string.Empty);
-        Tabs.Add(tab);
+        tab.WorkingDirectory = workingDirectory;
+        tab.ProjectPath = projectPath;
+
+        // Right after the rightmost session/terminal tab of the same project, so a terminal opened for a
+        // project sits beside that project's sessions rather than at the far end of the strip. With no
+        // such tab (or when restoring a saved order verbatim) it appends like any other tab.
+        int index = placeNextToProject ? IndexAfterProjectTabs(projectPath) : Tabs.Count;
+        Tabs.Insert(index, tab);
         OnPropertyChanged(nameof(IsEmpty));
         SelectedTab = tab;
         return tab;
+    }
+
+    /// <summary>The strip index just right of the rightmost session/terminal tab whose project is
+    /// <paramref name="projectPath"/>; the end of the strip when there is none.</summary>
+    private int IndexAfterProjectTabs(string? projectPath)
+    {
+        if (string.IsNullOrEmpty(projectPath))
+        {
+            return Tabs.Count;
+        }
+
+        int last = -1;
+        for (int i = 0; i < Tabs.Count; i++)
+        {
+            if (Tabs[i].HasPtySession && ProjectPaths.AreSame(Tabs[i].ProjectPath, projectPath))
+            {
+                last = i;
+            }
+        }
+
+        return last < 0 ? Tabs.Count : last + 1;
     }
 
     /// <summary>

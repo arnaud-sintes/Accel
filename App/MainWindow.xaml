@@ -444,6 +444,14 @@
                                 <Setter Property="Visibility" Value="{Binding IsVisible, Converter={StaticResource BoolToVis}}" />
                                 <Setter Property="Tag" Value="{Binding RelativeSource={RelativeSource AncestorType=TreeView}, Path=DataContext}" />
                                 <!--
+                                    Every telemetry tick rebuilds this tree and re-selects the old row on the
+                                    fresh TreeViewItems, and a newly selected TreeViewItem asks to be scrolled
+                                    into view - which dragged the panel back to the open session while the user
+                                    was scrolling it by hand. MainWindow.RootsTreeViewItem_RequestBringIntoView
+                                    swallows that request for the duration of a rebuild.
+                                -->
+                                <EventSetter Event="RequestBringIntoView" Handler="RootsTreeViewItem_RequestBringIntoView" />
+                                <!--
                                     Stretch (not the TreeViewItem default of Left) so each row's
                                     Grid below actually fills the available tree width instead of
                                     sizing to content - that Star-width name column is what lets
