@@ -456,16 +456,18 @@ public sealed class PtySession : IDisposable
         switch (resolved.Kind)
         {
             case ClaudeCliResolutionKind.Missing:
+                // These two are shown to users in the Create-session dialog, so they say what to do, not
+                // which internal decision forbids it.
                 throw new PtySessionLaunchException(
-                    "Cannot launch `claude`: it was not found on PATH. Install Claude Code, or run `accel doctor` " +
-                    "to see what this machine resolves.");
+                    "Claude Code was not found: `claude` is not found on PATH. Install Claude Code, then restart " +
+                    "Accel so it picks up the updated PATH. (Running `accel doctor` shows what this machine resolves.)");
 
             case ClaudeCliResolutionKind.Shim:
                 throw new PtySessionLaunchException(
-                    $"Cannot launch `claude`: it resolved to the shim '{resolved.Path}', not a native claude.exe. " +
-                    "Per locked-in decision 2 a shim must be launched as node.exe plus the JS entry point rather than " +
-                    "ConPTY-attached; that path is not implemented. This is a hard stop rather than a best-effort " +
-                    "attempt precisely so the difference cannot be discovered as mysterious terminal misbehaviour.");
+                    $"Claude Code was found at '{resolved.Path}', but that is an npm-style launcher script (a shim), " +
+                    "and Accel can only start the native claude.exe - launching a shim through node.exe is not " +
+                    "supported yet. Install the native build of Claude Code (it puts claude.exe in " +
+                    "%USERPROFILE%\\.local\\bin), make sure that folder is on PATH, and restart Accel.");
         }
 
         var spec = new PtyLaunchSpec

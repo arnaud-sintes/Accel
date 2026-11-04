@@ -3,7 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:controls="clr-namespace:Accel.App.Controls"
         xmlns:conv="clr-namespace:Accel.App.Converters"
-        Title="Create session" Height="620" Width="560"
+        Title="Create session" MinHeight="620" Width="560" SizeToContent="Height"
         WindowStartupLocation="CenterOwner" ResizeMode="NoResize"
         ShowInTaskbar="False" WindowStyle="None" Style="{DynamicResource DialogWindowStyle}">
     <!--
@@ -184,14 +184,22 @@
                  ToolTip="e.g. --add-dir C:\some\path"
                  Margin="0,0,0,16" />
 
-        <!-- Validation error: an inset danger card, so it reads as a distinct block rather than stray red text. -->
+        <!--
+            Validation error: an inset danger card, so it reads as a distinct block rather than stray red text.
+            The window is SizeToContent=Height (MinHeight keeps the usual size), so the card gets the room its
+            text needs instead of whatever a fixed-height window had left over - a multi-line launch error
+            used to be squeezed into a one-line strip and cut off. A very long message scrolls inside the
+            card (MaxHeight) rather than pushing the buttons off screen.
+        -->
         <Border Grid.Row="12" Background="#1FE98F8F" BorderBrush="#4DE98F8F" BorderThickness="1"
-                CornerRadius="6" Padding="12,8"
+                CornerRadius="6" Padding="12,8" VerticalAlignment="Top"
                 Visibility="{Binding Visibility, ElementName=ErrorText}">
-            <TextBlock x:Name="ErrorText"
-                       Text="{Binding ErrorMessage}"
-                       Foreground="{StaticResource DangerBrush}" TextWrapping="Wrap"
-                       Visibility="Collapsed" />
+            <ScrollViewer MaxHeight="150" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                <TextBlock x:Name="ErrorText"
+                           Text="{Binding ErrorMessage}"
+                           Foreground="{StaticResource DangerBrush}" TextWrapping="Wrap"
+                           Visibility="Collapsed" />
+            </ScrollViewer>
         </Border>
 
         <StackPanel Grid.Row="14" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,20,0,0">

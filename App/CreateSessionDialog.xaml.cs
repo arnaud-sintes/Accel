@@ -53,8 +53,36 @@ public partial class CreateSessionDialog : Window
         }
     }
 
-    private void UpdateErrorVisibility() =>
+    private void UpdateErrorVisibility()
+    {
         ErrorText.Visibility = string.IsNullOrEmpty(_viewModel.ErrorMessage) ? Visibility.Collapsed : Visibility.Visible;
+
+        if (ErrorText.Visibility == Visibility.Visible)
+        {
+            KeepOnScreen();
+        }
+    }
+
+    /// <summary>The window grows to fit an error (SizeToContent), downwards from where it was centred; on a
+    /// short screen that can push the buttons below the work area, so nudge it back up once it has grown.</summary>
+    private void KeepOnScreen()
+    {
+        if (!IsLoaded)
+        {
+            return;
+        }
+
+        Dispatcher.BeginInvoke(
+            System.Windows.Threading.DispatcherPriority.Loaded,
+            new Action(() =>
+            {
+                var workArea = SystemParameters.WorkArea;
+                if (Top + ActualHeight > workArea.Bottom)
+                {
+                    Top = Math.Max(workArea.Top, workArea.Bottom - ActualHeight);
+                }
+            }));
+    }
 
     private void OnRequestClose(object? sender, bool confirmed)
     {
