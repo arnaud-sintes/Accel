@@ -93,7 +93,7 @@ public sealed partial class AgentGraphViewModel : ObservableObject, IDisposable
             return;
         }
 
-        var tree = MonitorTreeBuilder.Build(snapshot);
+        var tree = MonitorTreeBuilder.BuildCached(snapshot);
         var focusedId = _selection?.FocusedSessionId;
 
         if (string.IsNullOrEmpty(focusedId))

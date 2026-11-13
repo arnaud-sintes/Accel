@@ -60,13 +60,30 @@ public sealed class WpfUiThreadDispatcher : IUiThreadDispatcher
 
         if (_dispatcher.CheckAccess())
         {
-            action();
+            using (UiPerf.Measure(action))
+            {
+                action();
+            }
+
             return;
         }
 
         try
         {
-            _dispatcher.BeginInvoke(action);
+            // Input priority, not the default Normal: Normal outranks the mouse and keyboard, so a tree
+            // rebuild posted from a background thread was served ahead of a pending right-click. At Input
+            // the update queues behind input already waiting (same level, first in first out) instead of
+            // in front of it. Not lower (Background): that would let every mouse move pre-empt the update
+            // and stretch the window in which the next build is held back.
+            //
+            // The wrapper times the action when diagnostics are on (UiPerf), labelled with the method that queued it.
+            _dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Input, new Action(() =>
+            {
+                using (UiPerf.Measure(action))
+                {
+                    action();
+                }
+            }));
         }
         catch (InvalidOperationException)
         {

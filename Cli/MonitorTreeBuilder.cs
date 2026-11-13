@@ -86,6 +86,17 @@ public static class MonitorTreeBuilder
     private const string NoSessionsLabel = "(no sessions)";
     private const string EmDash = "—";
 
+    // One snapshot is turned into a tree once, however many panels ask. The telemetry feed builds it on its
+    // background thread (BuildCached right after the scan), so the UI-thread subscribers - panel A and the
+    // agent graph, which both used to run Build themselves on every tick - find it ready. Weak on the
+    // snapshot: the entry goes away with it. A null snapshot is not cached (there is nothing to key on).
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<RootsTreeDto, MonitorTree> Cache = new();
+
+    /// <summary><see cref="Build"/>, memoised per snapshot instance. Safe to call from any thread; the
+    /// result is an immutable value shared by every caller.</summary>
+    public static MonitorTree BuildCached(RootsTreeDto? dto) =>
+        dto is null ? Build(null) : Cache.GetValue(dto, key => Build(key));
+
     public static MonitorTree Build(RootsTreeDto? dto)
     {
         var rootDtos = dto?.Roots ?? Array.Empty<RootTreeDto>();

@@ -362,7 +362,21 @@ public sealed partial class GitPanelViewModel : ObservableObject, IDisposable
         _resolvedRootPath = rootPath;
         _expandedFolderPath = null;
 
-        RefreshDisplay(refreshBranchList: true);
+        // Off the UI thread: a focus change is every tab switch between projects, and reading git is half a
+        // dozen subprocesses (hundreds of ms, seconds on a big repo or under a virus scanner). Until the read
+        // lands, say so instead of leaving the previous project's changes under the new project's tab.
+        ShowReading();
+        Refresh(refreshBranchList: true);
+    }
+
+    /// <summary>Empties the lists and the header while a read for a newly targeted folder is in flight.</summary>
+    private void ShowReading()
+    {
+        StagedChanges.Clear();
+        Changes.Clear();
+        Conflicts.Clear();
+        ClearSummary();
+        StatusText = string.IsNullOrEmpty(_resolvedRootPath) ? "No folder or session focused." : $"Reading git status: {_resolvedRootPath}";
     }
 
     /// <summary>Called (via the composition root's wiring) whenever the file tree's
@@ -371,7 +385,7 @@ public sealed partial class GitPanelViewModel : ObservableObject, IDisposable
     public void OnFilesPanelFolderExpanded(string folderPath)
     {
         _expandedFolderPath = folderPath;
-        RefreshDisplay(refreshBranchList: true);
+        Refresh(refreshBranchList: true);
     }
 
     /// <summary>Called (via the composition root's wiring) whenever the file tree's
@@ -396,7 +410,7 @@ public sealed partial class GitPanelViewModel : ObservableObject, IDisposable
         }
 
         _expandedFolderPath = nearestExpandedAncestor;
-        RefreshDisplay(refreshBranchList: true);
+        Refresh(refreshBranchList: true);
     }
 
     /// <summary>
@@ -413,12 +427,28 @@ public sealed partial class GitPanelViewModel : ObservableObject, IDisposable
     /// <para>Fire-and-forget by design - the caller is an event handler with nowhere to await. See
     /// <see cref="LastRefreshTask"/> for how a test observes completion.</para>
     /// </summary>
-    public void Refresh() => LastRefreshTask = RefreshAsync();
+    public void Refresh(bool refreshBranchList = false)
+    {
+        var started = RefreshAsync(refreshBranchList);
 
-    /// <summary>The task started by the most recent <see cref="Refresh"/>, exposed purely so a test
-    /// can await the refresh it just triggered rather than race it. Never awaited in production, where
-    /// the whole point is not to block the UI thread on it.</summary>
+        // A call that lands while a read is in flight only queues a follow-up pass inside that read's loop and
+        // returns at once - the loop is what finishes last, so that is the task to expose.
+        if (_refreshLoop is null || _refreshLoop.IsCompleted)
+        {
+            _refreshLoop = started;
+        }
+
+        LastRefreshTask = _refreshLoop;
+    }
+
+    private Task? _refreshLoop;
+
+    /// <summary>The task that finishes the refresh work started by the most recent <see cref="Refresh"/>
+    /// (including any pass queued behind it), exposed purely so a test can await it rather than race it.
+    /// Never awaited in production, where the whole point is not to block the UI thread on it.</summary>
     internal Task? LastRefreshTask { get; private set; }
+
+    private bool _branchListRefreshQueued;
 
     /// <summary>
     /// The off-UI-thread half of <see cref="Refresh"/>: reads git on a thread pool thread, then
@@ -435,8 +465,12 @@ public sealed partial class GitPanelViewModel : ObservableObject, IDisposable
     /// focus moved in between, that move has already triggered its own refresh, so applying this
     /// now-stale read would briefly show the previous repository's changes under the new one's name.</para>
     /// </remarks>
-    internal async Task RefreshAsync()
+    internal async Task RefreshAsync(bool refreshBranchList = false)
     {
+        // Remembered across an early return or a superseded read: the pass that finally applies must still
+        // re-read the branch list if any request asked for it.
+        _branchListRefreshQueued |= refreshBranchList;
+
         if (IsBusy || _disposed)
         {
             return;
@@ -454,19 +488,36 @@ public sealed partial class GitPanelViewModel : ObservableObject, IDisposable
             do
             {
                 _refreshQueued = false;
+                bool readBranches = _branchListRefreshQueued;
+                _branchListRefreshQueued = false;
 
                 string? resolvedRoot = _resolvedRootPath;
                 string? expandedFolder = _expandedFolderPath;
-                var state = await Task.Run(() => ReadDisplayState(resolvedRoot, expandedFolder)).ConfigureAwait(true);
+                string? previousRepoPath = _effectiveRepoPath;
+                var state = await Task.Run(() => ReadDisplayState(resolvedRoot, expandedFolder, previousRepoPath)).ConfigureAwait(true);
 
-                if (_disposed || IsBusy
-                    || !string.Equals(resolvedRoot, _resolvedRootPath, StringComparison.Ordinal)
-                    || !string.Equals(expandedFolder, _expandedFolderPath, StringComparison.Ordinal))
+                if (_disposed)
                 {
                     return;
                 }
 
-                ApplyDisplayState(state, refreshBranchList: false);
+                if (IsBusy)
+                {
+                    // One of this panel's own commands started mid-read and refreshes when it finishes.
+                    _branchListRefreshQueued |= readBranches;
+                    return;
+                }
+
+                if (!string.Equals(resolvedRoot, _resolvedRootPath, StringComparison.Ordinal)
+                    || !string.Equals(expandedFolder, _expandedFolderPath, StringComparison.Ordinal))
+                {
+                    // Focus moved while git was being read: this result belongs to the previous target. The move
+                    // queued its own pass (it was an async refresh too), which the loop below runs.
+                    _branchListRefreshQueued |= readBranches;
+                    continue;
+                }
+
+                ApplyDisplayState(state, readBranches);
             }
             while (_refreshQueued);
         }
@@ -496,7 +547,8 @@ public sealed partial class GitPanelViewModel : ObservableObject, IDisposable
     /// <summary>Everything one refresh reads from git, as a plain value: which folder the status
     /// actually came from, its entries (null when that folder is not in a repository at all), and the
     /// header summary. Exists so the reading and the rendering can happen on different threads.</summary>
-    private sealed record GitDisplayState(string? EffectivePath, GitChangeEntry[]? Entries, GitRepoSummary? Summary);
+    private sealed record GitDisplayState(
+        string? EffectivePath, GitChangeEntry[]? Entries, GitRepoSummary? Summary, string? WatchRoot = null);
 
     /// <summary>
     /// The whole git-reading half of a refresh, as a static function of its two inputs - it touches no
@@ -504,7 +556,7 @@ public sealed partial class GitPanelViewModel : ObservableObject, IDisposable
     /// thread from <see cref="RefreshAsync"/>. The expanded-folder override wins when it resolves to a
     /// repository; otherwise the resolved root does (see this class's remarks).
     /// </summary>
-    private static GitDisplayState ReadDisplayState(string? resolvedRootPath, string? expandedFolderPath)
+    private static GitDisplayState ReadDisplayState(string? resolvedRootPath, string? expandedFolderPath, string? previousRepoPath)
     {
         string? effectivePath = resolvedRootPath ?? expandedFolderPath;
 
@@ -531,16 +583,25 @@ public sealed partial class GitPanelViewModel : ObservableObject, IDisposable
             effectivePath = resolvedRootPath;
         }
 
-        return entries is null
-            ? new GitDisplayState(effectivePath, null, null)
-            : new GitDisplayState(effectivePath, entries, GitStatusBuilder.BuildSummary(effectivePath));
+        if (entries is null)
+        {
+            return new GitDisplayState(effectivePath, null, null);
+        }
+
+        // The folder the watcher must follow is another `git` subprocess to resolve. Do it here, off the UI
+        // thread, and only when the repository actually changed (a watcher tick on the same repo needs none).
+        string? watchRoot = string.Equals(previousRepoPath, effectivePath, StringComparison.Ordinal)
+            ? null
+            : GitStatusBuilder.FindRepositoryRoot(effectivePath!) ?? effectivePath;
+
+        return new GitDisplayState(effectivePath, entries, GitStatusBuilder.BuildSummary(effectivePath), watchRoot);
     }
 
     /// <summary>The synchronous refresh: read then apply, both inline. Used by a focus change and by
     /// this panel's own commands - see this class's remarks for why those two stay synchronous while
     /// the watcher-driven path does not.</summary>
     private void RefreshDisplay(bool refreshBranchList = false) =>
-        ApplyDisplayState(ReadDisplayState(_resolvedRootPath, _expandedFolderPath), refreshBranchList);
+        ApplyDisplayState(ReadDisplayState(_resolvedRootPath, _expandedFolderPath, _effectiveRepoPath), refreshBranchList);
 
     /// <summary>Renders a <see cref="GitDisplayState"/> into this ViewModel's observable state. Must
     /// run on the UI thread; does no git I/O of its own except the watcher re-target in
@@ -585,7 +646,7 @@ public sealed partial class GitPanelViewModel : ObservableObject, IDisposable
         HasRepo = true;
         StatusText = entries.Length == 0 ? $"{effectivePath} (clean)" : effectivePath!;
         bool repoChanged = !string.Equals(_effectiveRepoPath, effectivePath, StringComparison.Ordinal);
-        SetEffectiveRepoPath(effectivePath);
+        SetEffectiveRepoPath(effectivePath, state.WatchRoot);
 
         var summary = state.Summary;
         RepoName = summary?.RepoName ?? string.Empty;
@@ -626,7 +687,7 @@ public sealed partial class GitPanelViewModel : ObservableObject, IDisposable
     /// class's remarks for why those two are not the same folder. Falls back to
     /// <paramref name="path"/> when git cannot name a root (git missing, or the folder is not in a
     /// repository, in which case there is nothing to show and nothing useful to watch anyway).</summary>
-    private void SetEffectiveRepoPath(string? path)
+    private void SetEffectiveRepoPath(string? path, string? resolvedWatchRoot = null)
     {
         string? previous = _effectiveRepoPath;
         _effectiveRepoPath = path;
@@ -639,7 +700,9 @@ public sealed partial class GitPanelViewModel : ObservableObject, IDisposable
             return;
         }
 
-        _watcher.Watch(path is null ? null : GitStatusBuilder.FindRepositoryRoot(path) ?? path);
+        // The root normally arrives already resolved (the read did it off the UI thread); resolving it here is
+        // only the fallback for a read that began before the repository changed underneath it.
+        _watcher.Watch(path is null ? null : resolvedWatchRoot ?? GitStatusBuilder.FindRepositoryRoot(path) ?? path);
     }
 
     private void ClearSummary()

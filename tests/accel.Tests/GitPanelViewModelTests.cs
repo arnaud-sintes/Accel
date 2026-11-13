@@ -71,6 +71,9 @@ public sealed class GitPanelViewModelTests : IDisposable
         return (vm, feed, writer, watcher);
     }
 
+    /// <summary>Waits for the background git read a retarget just started (focus change, folder expand/collapse).</summary>
+    private static void Settle(GitPanelViewModel vm) => vm.LastRefreshTask?.GetAwaiter().GetResult();
+
     private static void Focus(FakeTelemetryFeed feed, ISessionSelectionWriter writer, string root)
     {
         var session = TelemetryFixtures.Session("session-1", isLive: true) with { Cwd = root };
@@ -95,8 +98,10 @@ public sealed class GitPanelViewModelTests : IDisposable
         var (vm, feed, _, writer) = Build();
         var session = TelemetryFixtures.Session("session-1", isLive: true) with { Cwd = _root };
         writer.SetFocused("session-1");
+        Settle(vm);
 
         feed.Publish(TelemetryFixtures.Tree(new[] { TelemetryFixtures.Root(_root, session) }));
+        Settle(vm);
 
         Assert.False(vm.HasRepo);
         Assert.Equal($"Not a git repository: {_root}", vm.StatusText);
@@ -111,8 +116,10 @@ public sealed class GitPanelViewModelTests : IDisposable
         var (vm, feed, _, writer) = Build();
         var session = TelemetryFixtures.Session("session-1", isLive: true) with { Cwd = _root };
         writer.SetFocused("session-1");
+        Settle(vm);
 
         feed.Publish(TelemetryFixtures.Tree(new[] { TelemetryFixtures.Root(_root, session) }));
+        Settle(vm);
 
         Assert.True(vm.HasRepo);
         Assert.Empty(vm.StagedChanges);
@@ -130,11 +137,14 @@ public sealed class GitPanelViewModelTests : IDisposable
         var (vm, feed, _, writer) = Build();
         var session = TelemetryFixtures.Session("session-1", isLive: true) with { Cwd = _root };
         writer.SetFocused("session-1");
+        Settle(vm);
         feed.Publish(TelemetryFixtures.Tree(new[] { TelemetryFixtures.Root(_root, session) }));
+        Settle(vm);
 
         Assert.False(vm.HasRepo); // the resolved root (_root) isn't a repo itself.
 
         vm.OnFilesPanelFolderExpanded(nestedRepo);
+        Settle(vm);
 
         Assert.True(vm.HasRepo);
         Assert.Equal(nestedRepo, vm.StatusText);
@@ -151,11 +161,14 @@ public sealed class GitPanelViewModelTests : IDisposable
         var (vm, feed, _, writer) = Build();
         var session = TelemetryFixtures.Session("session-1", isLive: true) with { Cwd = _root };
         writer.SetFocused("session-1");
+        Settle(vm);
         feed.Publish(TelemetryFixtures.Tree(new[] { TelemetryFixtures.Root(_root, session) }));
+        Settle(vm);
 
         // "subfolder" isn't a repo root itself, but `git status` run from inside it still resolves
         // to the same containing repo (_root) - so the displayed entries are unchanged.
         vm.OnFilesPanelFolderExpanded(Path.Combine(_root, "subfolder"));
+        Settle(vm);
 
         Assert.True(vm.HasRepo);
         Assert.Equal("new.txt", Assert.Single(vm.Changes).Path);
@@ -170,7 +183,9 @@ public sealed class GitPanelViewModelTests : IDisposable
         var (vm, feed, _, writer) = Build();
         var session = TelemetryFixtures.Session("session-1", isLive: true) with { Cwd = _root };
         writer.SetFocused("session-1");
+        Settle(vm);
         feed.Publish(TelemetryFixtures.Tree(new[] { TelemetryFixtures.Root(_root, session) }));
+        Settle(vm);
 
         string expectedRepoName = Path.GetFileName(_root.TrimEnd('\\', '/'));
         Assert.Equal(expectedRepoName, vm.RepoName);
@@ -199,14 +214,18 @@ public sealed class GitPanelViewModelTests : IDisposable
         var (vm, feed, _, writer) = Build();
         var session = TelemetryFixtures.Session("session-1", isLive: true) with { Cwd = _root };
         writer.SetFocused("session-1");
+        Settle(vm);
         feed.Publish(TelemetryFixtures.Tree(new[] { TelemetryFixtures.Root(_root, session) }));
+        Settle(vm);
 
         vm.OnFilesPanelFolderExpanded(repoB);
+        Settle(vm);
         Assert.Equal(repoB, vm.StatusText);
 
         // A genuine focus change (session-2 isn't in the published snapshot, so it resolves to "no
         // folder focused") must drop the stale override rather than keep showing repo-b.
         writer.SetFocused("session-2");
+        Settle(vm);
 
         Assert.False(vm.HasRepo);
         Assert.Equal("No folder or session focused.", vm.StatusText);
@@ -220,6 +239,7 @@ public sealed class GitPanelViewModelTests : IDisposable
 
         var (vm, feed, _, writer) = Build();
         Focus(feed, writer, _root);
+        Settle(vm);
 
         var entry = Assert.Single(vm.Changes);
         await vm.StageFileCommand.ExecuteAsync(entry);
@@ -238,6 +258,7 @@ public sealed class GitPanelViewModelTests : IDisposable
 
         var (vm, feed, _, writer) = Build();
         Focus(feed, writer, _root);
+        Settle(vm);
 
         var entry = Assert.Single(vm.StagedChanges);
         await vm.UnstageFileCommand.ExecuteAsync(entry);
@@ -256,6 +277,7 @@ public sealed class GitPanelViewModelTests : IDisposable
 
         var (vm, feed, _, writer) = Build();
         Focus(feed, writer, _root);
+        Settle(vm);
 
         await vm.StageAllCommand.ExecuteAsync(null);
 
@@ -271,6 +293,7 @@ public sealed class GitPanelViewModelTests : IDisposable
 
         var (vm, feed, _, writer) = Build();
         Focus(feed, writer, _root);
+        Settle(vm);
 
         await vm.StageAllCommand.ExecuteAsync(null);
 
@@ -289,6 +312,7 @@ public sealed class GitPanelViewModelTests : IDisposable
         var (vm, feed, _, writer, _, confirmation) = BuildWithActionFakes();
         confirmation.ConfirmDiscardChangesResult = true;
         Focus(feed, writer, _root);
+        Settle(vm);
 
         var entry = Assert.Single(vm.Changes);
         await vm.DiscardFileCommand.ExecuteAsync(entry);
@@ -309,6 +333,7 @@ public sealed class GitPanelViewModelTests : IDisposable
         var (vm, feed, _, writer, _, confirmation) = BuildWithActionFakes();
         confirmation.ConfirmDiscardChangesResult = false;
         Focus(feed, writer, _root);
+        Settle(vm);
 
         var entry = Assert.Single(vm.Changes);
         await vm.DiscardFileCommand.ExecuteAsync(entry);
@@ -327,6 +352,7 @@ public sealed class GitPanelViewModelTests : IDisposable
         var (vm, feed, _, writer, actionDialogs, _) = BuildWithActionFakes();
         actionDialogs.CommitMessage = "A commit message";
         Focus(feed, writer, _root);
+        Settle(vm);
 
         await vm.CommitCommand.ExecuteAsync(null);
 
@@ -345,6 +371,7 @@ public sealed class GitPanelViewModelTests : IDisposable
         var (vm, feed, _, writer, actionDialogs, _) = BuildWithActionFakes();
         actionDialogs.CommitMessage = null;
         Focus(feed, writer, _root);
+        Settle(vm);
 
         await vm.CommitCommand.ExecuteAsync(null);
 
@@ -361,6 +388,7 @@ public sealed class GitPanelViewModelTests : IDisposable
 
         var (vm, feed, _, writer) = Build();
         Focus(feed, writer, _root);
+        Settle(vm);
 
         await vm.CommitCommand.ExecuteAsync(null);
 
@@ -378,6 +406,7 @@ public sealed class GitPanelViewModelTests : IDisposable
 
         var (vm, feed, _, writer) = Build();
         Focus(feed, writer, _root);
+        Settle(vm);
 
         await vm.SwitchBranchAsync("feature-a");
 
@@ -398,6 +427,7 @@ public sealed class GitPanelViewModelTests : IDisposable
         string repo = InitRepo(Path.Combine(_root, "repo"));
         var (vm, feed, writer, watcher) = BuildWithWatcher();
         Focus(feed, writer, repo);
+        Settle(vm);
         Assert.Empty(vm.Changes);
 
         // Stands in for a Claude Code session (or any other tool) writing in this repo.
@@ -415,6 +445,7 @@ public sealed class GitPanelViewModelTests : IDisposable
         string repo = InitRepo(Path.Combine(_root, "repo"));
         var (vm, feed, writer, watcher) = BuildWithWatcher();
         Focus(feed, writer, repo);
+        Settle(vm);
 
         File.WriteAllText(Path.Combine(repo, "mid-command.txt"), "x");
         vm.IsBusy = true;
@@ -432,6 +463,7 @@ public sealed class GitPanelViewModelTests : IDisposable
         string repo = InitRepo(Path.Combine(_root, "repo"));
         var (vm, feed, writer, watcher) = BuildWithWatcher();
         Focus(feed, writer, repo);
+        Settle(vm);
 
         // A burst, as a rebase or a large checkout produces: whatever overlaps the in-flight read must
         // not start a fresh set of git processes per tick, and the final state must still be correct.
@@ -457,6 +489,7 @@ public sealed class GitPanelViewModelTests : IDisposable
         var (vm, feed, writer, watcher) = BuildWithWatcher();
 
         Focus(feed, writer, subfolder);
+        Settle(vm);
 
         // .git only exists at the root, so watching the subfolder would miss every commit, push and
         // checkout - the changes this panel most needs to notice.
@@ -473,11 +506,14 @@ public sealed class GitPanelViewModelTests : IDisposable
         var (vm, feed, writer, watcher) = BuildWithWatcher();
 
         Focus(feed, writer, repo);
+        Settle(vm);
         Assert.Equal(repo, watcher.WatchedPath);
 
         var session = TelemetryFixtures.Session("session-2", isLive: true) with { Cwd = plain };
         writer.SetFocused("session-2");
+        Settle(vm);
         feed.Publish(TelemetryFixtures.Tree(new[] { TelemetryFixtures.Root(plain, session) }));
+        Settle(vm);
 
         Assert.False(vm.HasRepo);
         Assert.Null(watcher.WatchedPath);
@@ -490,6 +526,7 @@ public sealed class GitPanelViewModelTests : IDisposable
         File.WriteAllText(Path.Combine(repo, "new.txt"), "x");
         var (vm, feed, _, writer, _, _) = BuildWithActionFakes();
         Focus(feed, writer, repo);
+        Settle(vm);
         Assert.Single(vm.Changes);
 
         await vm.StageAllCommand.ExecuteAsync(null);
@@ -506,6 +543,7 @@ public sealed class GitPanelViewModelTests : IDisposable
         File.WriteAllText(Path.Combine(repo, "new.txt"), "x");
         var (vm, feed, _, writer, actionDialogs, _) = BuildWithActionFakes();
         Focus(feed, writer, repo);
+        Settle(vm);
         await vm.StageAllCommand.ExecuteAsync(null);
         Assert.Single(vm.StagedChanges);
 
@@ -530,6 +568,7 @@ public sealed class GitPanelViewModelTests : IDisposable
 
         var (vm, feed, _, writer) = Build();
         Focus(feed, writer, _root);
+        Settle(vm);
 
         var conflict = Assert.Single(vm.Conflicts);
         Assert.Equal("conflict.txt", conflict.Path);
@@ -546,6 +585,7 @@ public sealed class GitPanelViewModelTests : IDisposable
 
         var (vm, feed, _, writer) = Build();
         Focus(feed, writer, _root);
+        Settle(vm);
 
         var conflict = Assert.Single(vm.Conflicts);
         Assert.True(conflict.IsOpenable);
@@ -561,6 +601,7 @@ public sealed class GitPanelViewModelTests : IDisposable
 
         var (vm, feed, _, writer) = Build();
         Focus(feed, writer, _root);
+        Settle(vm);
 
         int expected = vm.StagedChanges.Count + vm.Changes.Count + vm.Conflicts.Count;
         Assert.Equal($"{expected} change(s)", vm.ChangesSummaryText);
@@ -575,6 +616,7 @@ public sealed class GitPanelViewModelTests : IDisposable
 
         var (vm, feed, _, writer) = Build();
         Focus(feed, writer, _root);
+        Settle(vm);
 
         var entry = Assert.Single(vm.Changes);
         Assert.Equal("+", entry.StatusLetter);
@@ -589,6 +631,7 @@ public sealed class GitPanelViewModelTests : IDisposable
 
         var (vm, feed, _, writer) = Build();
         Focus(feed, writer, _root);
+        Settle(vm);
 
         Assert.True(vm.HasInProgressOperation);
         Assert.Equal("Merging — 1 conflict(s) to resolve", vm.InProgressOperationText);
@@ -603,6 +646,7 @@ public sealed class GitPanelViewModelTests : IDisposable
 
         var (vm, feed, _, writer, _, confirmation) = BuildWithActionFakes();
         Focus(feed, writer, _root);
+        Settle(vm);
 
         await vm.MarkResolvedCommand.ExecuteAsync(Assert.Single(vm.Conflicts));
 
@@ -620,6 +664,7 @@ public sealed class GitPanelViewModelTests : IDisposable
         var (vm, feed, _, writer, _, confirmation) = BuildWithActionFakes();
         confirmation.ConfirmMarkResolvedWithMarkersResult = false;
         Focus(feed, writer, _root);
+        Settle(vm);
 
         await vm.MarkResolvedCommand.ExecuteAsync(Assert.Single(vm.Conflicts));
 
@@ -634,6 +679,7 @@ public sealed class GitPanelViewModelTests : IDisposable
 
         var (vm, feed, _, writer) = Build();
         Focus(feed, writer, _root);
+        Settle(vm);
 
         await vm.AcceptTheirsCommand.ExecuteAsync(Assert.Single(vm.Conflicts));
 
@@ -648,6 +694,7 @@ public sealed class GitPanelViewModelTests : IDisposable
 
         var (vm, feed, _, writer) = Build();
         Focus(feed, writer, _root);
+        Settle(vm);
 
         await vm.AcceptOursCommand.ExecuteAsync(Assert.Single(vm.Conflicts));
 
@@ -662,6 +709,7 @@ public sealed class GitPanelViewModelTests : IDisposable
 
         var (vm, feed, _, writer) = Build();
         Focus(feed, writer, _root);
+        Settle(vm);
 
         await vm.ContinueOperationCommand.ExecuteAsync(null);
 
@@ -676,6 +724,7 @@ public sealed class GitPanelViewModelTests : IDisposable
 
         var (vm, feed, _, writer) = Build();
         Focus(feed, writer, _root);
+        Settle(vm);
 
         await vm.AcceptTheirsCommand.ExecuteAsync(Assert.Single(vm.Conflicts));
         await vm.ContinueOperationCommand.ExecuteAsync(null);
@@ -692,6 +741,7 @@ public sealed class GitPanelViewModelTests : IDisposable
 
         var (vm, feed, _, writer, _, _) = BuildWithActionFakes();
         Focus(feed, writer, _root);
+        Settle(vm);
 
         await vm.AbortOperationCommand.ExecuteAsync(null);
 
@@ -708,11 +758,58 @@ public sealed class GitPanelViewModelTests : IDisposable
         var (vm, feed, _, writer, _, confirmation) = BuildWithActionFakes();
         confirmation.ConfirmAbortOperationResult = false;
         Focus(feed, writer, _root);
+        Settle(vm);
 
         await vm.AbortOperationCommand.ExecuteAsync(null);
 
         Assert.True(vm.HasInProgressOperation);
         Assert.Single(vm.Conflicts);
+    }
+
+    // --- a focus change must not block the UI thread on git ------------------------------------------------
+
+    [Fact]
+    public void AFocusChange_ReturnsBeforeGitHasBeenRead_AndSaysSo()
+    {
+        InitRepo(_root);
+        File.WriteAllText(Path.Combine(_root, "new.txt"), "content");
+        var (vm, feed, _, writer) = Build();
+
+        Focus(feed, writer, _root); // no Settle: look at the state the UI thread is left with
+
+        // Reading git is hundreds of milliseconds of subprocesses; the call returned without waiting for it.
+        Assert.Equal($"Reading git status: {_root}", vm.StatusText);
+        Assert.Empty(vm.Changes);
+
+        Settle(vm);
+
+        Assert.True(vm.HasRepo);
+        Assert.Equal("new.txt", Assert.Single(vm.Changes).Path);
+    }
+
+    [Fact]
+    public void AFocusChangeDuringARead_EndsOnTheLatestFolder_NotTheOneBeingRead()
+    {
+        string repoA = InitRepo(Path.Combine(_root, "repo-a"));
+        string repoB = InitRepo(Path.Combine(_root, "repo-b"));
+        File.WriteAllText(Path.Combine(repoA, "a.txt"), "a");
+        File.WriteAllText(Path.Combine(repoB, "b.txt"), "b");
+
+        var (vm, feed, _, writer) = Build();
+        var sessionA = TelemetryFixtures.Session("session-a", isLive: true) with { Cwd = repoA };
+        var sessionB = TelemetryFixtures.Session("session-b", isLive: true) with { Cwd = repoB };
+        feed.Publish(TelemetryFixtures.Tree(new[]
+        {
+            TelemetryFixtures.Root(repoA, sessionA),
+            TelemetryFixtures.Root(repoB, sessionB),
+        }));
+
+        writer.SetFocused("session-a"); // starts a read of repo-a...
+        writer.SetFocused("session-b"); // ...and the user switches tab before it lands
+        Settle(vm);
+
+        Assert.Equal(repoB, vm.StatusText);
+        Assert.Equal("b.txt", Assert.Single(vm.Changes).Path);
     }
 
     [Fact]

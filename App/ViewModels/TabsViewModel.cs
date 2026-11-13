@@ -505,6 +505,15 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
     public event Action<string>? FileTabActivated;
 
     /// <summary>
+    /// Raised whenever a tab becomes the selected one, whatever its kind (session, terminal, file, git).
+    /// Panel A uses it to scroll to the related project folder. It fires for every selection - a click, a new
+    /// or restored tab, the neighbour chosen when a tab closes - which is intended: wherever the highlight
+    /// goes, the project it belongs to is brought into view. (Re-clicking the already-selected tab raises no
+    /// selection change; the strip's mouse-down handler covers that.)
+    /// </summary>
+    public event Action<TabViewModel>? TabActivated;
+
+    /// <summary>
     /// What to bring back next launch: every live session, terminal and plain file tab, in strip order,
     /// plus the selected one. Ended tabs (their process is gone) and git change/diff tabs are left out.
     /// </summary>
@@ -645,6 +654,16 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
 
     partial void OnSelectedTabChanged(TabViewModel? value)
     {
+        // Everything the other panels do synchronously in response to a tab switch (the focus message is
+        // delivered inline) lands inside this scope.
+        using (UiPerf.Measure("tab switch: selection-changed handlers (synchronous)", thresholdMs: 40))
+        {
+            OnSelectedTabChangedCore(value);
+        }
+    }
+
+    private void OnSelectedTabChangedCore(TabViewModel? value)
+    {
         OnPropertyChanged(nameof(SelectedTabId));
         TabSetChanged?.Invoke();
 
@@ -671,6 +690,7 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
             // focused stays focused. Panel A is told which file instead, so it can show the project
             // that hosts it.
             FileTabActivated?.Invoke(value.TabId);
+            TabActivated?.Invoke(value);
             LastAttach = ShowFileSafelyAsync(value);
             return;
         }
@@ -682,6 +702,7 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
         // would hit if its transcript had not been scanned yet.
         _selection.SetFocused(value.TabId);
         HideFileViewer?.Invoke();
+        TabActivated?.Invoke(value);
 
         if (AttachTerminalAsync is null)
         {
@@ -1129,7 +1150,11 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
             var attach = AttachTerminalAsync;
             if (attach is not null)
             {
-                await attach(tabId).ConfigureAwait(true);
+                // Awaited, so this measures the round trip to the page (not time the UI thread was held).
+                using (UiPerf.Measure("tab attach round trip (ExecuteScript)", thresholdMs: 150))
+                {
+                    await attach(tabId).ConfigureAwait(true);
+                }
             }
         }
         catch

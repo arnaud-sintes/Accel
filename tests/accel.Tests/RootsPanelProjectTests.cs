@@ -69,15 +69,20 @@ public class RootsPanelProjectTests
         var (vm, feed) = Build();
         var events = new List<string>();
         vm.TreeRebuilding += () => events.Add("rebuilding");
-        vm.TreeRebuilt += reveal => events.Add("rebuilt:" + reveal);
+        vm.TreeRebuilt += revealKey => events.Add("rebuilt:" + (revealKey ?? "none"));
 
         PublishTwoRoots(feed);
         vm.SelectRootContaining(@"C:\projects\a\x.cs");
         events.Clear();
 
-        // A telemetry tick re-applies the user's selection to fresh rows; that must not be a reveal.
-        PublishTwoRoots(feed);
+        // A telemetry tick that changes a row re-applies the user's selection to fresh rows; that must not be
+        // a reveal.
+        feed.Publish(TelemetryFixtures.Tree(new[]
+        {
+            TelemetryFixtures.Root(RootA, TelemetryFixtures.Session("s-a", isLive: true), TelemetryFixtures.Session("s-b")),
+            TelemetryFixtures.Root(RootB),
+        }));
 
-        Assert.Equal(new[] { "rebuilding", "rebuilt:False" }, events);
+        Assert.Equal(new[] { "rebuilding", "rebuilt:none" }, events);
     }
 }

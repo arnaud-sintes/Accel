@@ -195,6 +195,7 @@
     });
 
     installNativeSelection();
+    installCopyHandling();
 
     // Must come after term.open() (the WebGL addon needs the element/renderer to exist) and
     // before the first fit/snap below, so cell metrics are measured against the renderer that
@@ -248,6 +249,14 @@
       // (return true, no handling here) otherwise. Matches Windows Terminal/most modern terminal
       // emulators' own Ctrl+C convention.
       if (event.type === "keydown" && event.ctrlKey && !event.shiftKey && !event.altKey && event.key === "c" && term.hasSelection()) {
+        event.preventDefault();
+        copySelection();
+        return false;
+      }
+
+      // Ctrl+Shift+C: copy, and never the interrupt byte (Windows Terminal's convention). Unlike plain
+      // Ctrl+C this is swallowed even with no selection, so it cannot kill a running turn by accident.
+      if (event.type === "keydown" && event.ctrlKey && event.shiftKey && !event.altKey && (event.key === "C" || event.key === "c")) {
         event.preventDefault();
         copySelection();
         return false;
@@ -349,7 +358,78 @@
       sendResize();
     });
     resizeObserver.observe(document.getElementById("term"));
+
+    // From here on a renderer swap or a display-scale change must re-fit (see refit).
+    terminalReady = true;
+    watchDevicePixelRatio();
   }
+
+  // The terminal's own geometry, recomputed from scratch and sent to the server. Needed after anything that
+  // changes the CELL WIDTH without changing the container: xterm keeps `cols` when the renderer is swapped
+  // (WebGL <-> DOM compute the cell width differently: WebGL floors the glyph width in device pixels, the DOM
+  // renderer does not) or when devicePixelRatio changes (moving between monitors, docking, RDP). With a stale
+  // `cols` the screen ends up wider than its container and the last columns are clipped.
+  var terminalReady = false;
+
+  function refit() {
+    if (!terminalReady || !term || !fitAddon) {
+      return;
+    }
+
+    try {
+      term.options.letterSpacing = 0;
+      fitAddon.fit();
+      snapCellWidthToIntegerPixels();
+      sendResize();
+    } catch (e) {
+      // Best-effort: a failed refit leaves the previous geometry, which is what happened before.
+    }
+  }
+
+  // matchMedia("(resolution: Ndppx)") only fires for the ratio it was created with, so it is re-armed on
+  // every change (the standard way to observe devicePixelRatio).
+  function watchDevicePixelRatio() {
+    try {
+      var query = window.matchMedia("(resolution: " + window.devicePixelRatio + "dppx)");
+      query.addEventListener("change", function () {
+        setTimeout(refit, 50);
+        watchDevicePixelRatio();
+      }, { once: true });
+    } catch (e) {
+      // matchMedia unavailable - no DPR tracking, as before.
+    }
+  }
+
+  // Everything needed to tell the "missing last letter" family of problems apart from a field report:
+  // xterm's columns vs what FitAddon would propose now, the container/screen/scrollbar rectangles, the
+  // renderer, the pixel ratio and cell metrics. Call from DevTools or ExecuteScriptAsync.
+  window.accelDiag = function () {
+    function rect(el) {
+      if (!el) {
+        return null;
+      }
+      var r = el.getBoundingClientRect();
+      return { left: r.left, right: r.right, width: r.width, height: r.height };
+    }
+    var proposed = null;
+    try {
+      proposed = fitAddon && fitAddon.proposeDimensions();
+    } catch (e) {
+      proposed = String(e);
+    }
+    return {
+      cols: term && term.cols,
+      rows: term && term.rows,
+      proposed: proposed,
+      dpr: window.devicePixelRatio,
+      renderer: window.accelRendererType && window.accelRendererType(),
+      cell: window.accelCellMetrics && window.accelCellMetrics(),
+      term: rect(document.getElementById("term")),
+      screen: rect(document.querySelector(".xterm-screen")),
+      viewport: rect(document.querySelector(".xterm-viewport")),
+      scrollbar: rect(document.getElementById("accel-scrollbar")),
+    };
+  };
 
   // Reported bug: scrolling Claude Code's transcript left a "remanence" of previous content -
   // stale glyph pixels (notably the first-column `⏺`/`●` bullets) persisting over areas that
@@ -391,12 +471,16 @@
         }
         webglActive = false;
         retryWebglAfterContextLoss();
+        // The DOM renderer measures a different cell width than WebGL did: re-fit (see refit).
+        setTimeout(refit, 0);
       });
 
       term.loadAddon(webglAddon);
       webglActive = true;
       webglRetryAttempts = 0;
       logTerminalEvent("log", "WebGL renderer active");
+      // Coming back from the DOM fallback changes the cell width again (no-op during first start-up).
+      setTimeout(refit, 0);
     } catch (e) {
       // WebGL context creation failed (e.g. GPU/driver blocklisted, remote session without GPU) -
       // stay on the DOM renderer, which is functionally complete, just artifact-prone. Previously
@@ -778,13 +862,73 @@
   // navigator.clipboard.writeText() is allowed for a same-page, user-gesture-triggered call with
   // no permission prompt (unlike readText() below) - see TerminalView.InitializeAsync's
   // PermissionRequested handler for the read side.
-  function copySelection() {
+  // Whether the current selection was started with Alt held, which is xterm's column (rectangular)
+  // selection: its per-row whitespace is the user's choice, so it is not trimmed (see copytext.js).
+  var columnSelect = false;
+
+  // The selection as it should reach the clipboard: xterm's text with the padding Claude Code / ConPTY
+  // write at line ends removed (copytext.js has the why). Falls back to the raw text if copytext.js did not load.
+  function selectionForClipboard() {
     var text = term.getSelection();
+    var api = window.accelCopyText;
+    if (!api) {
+      return text;
+    }
+
+    // Where the selection began on its first row: a partial first row looks shorter than it was, which would
+    // hide that it ended in a soft wrap (copytext.js joins those back into one sentence).
+    var position = term.getSelectionPosition && term.getSelectionPosition();
+    return api.normalizeTerminalCopy(text, {
+      rectangular: columnSelect,
+      columns: term.cols,
+      startColumn: position && position.start ? position.start.x : 0,
+    });
+  }
+
+  function copySelection() {
+    if (!term.hasSelection()) {
+      return;
+    }
+
+    var text = selectionForClipboard();
     if (text) {
       navigator.clipboard.writeText(text).catch(function () {
         // Best-effort - nothing actionable client-side if the OS clipboard write itself fails.
       });
     }
+
+    // Clear it like Windows Terminal does: a second Ctrl+C with no selection is then the interrupt byte,
+    // instead of silently re-copying until the user types or clicks.
+    term.clearSelection();
+  }
+
+  // xterm has two more copy routes of its own, both of which would bypass copySelection and hand the clipboard
+  // the raw (padded) selection: the browser `copy` event (Ctrl+Insert, the context menu's Copy), and the
+  // right-click handler, which parks the selection text in xterm's hidden textarea for the native menu.
+  function installCopyHandling() {
+    var host = document.getElementById("term");
+    host.addEventListener("mousedown", function (event) {
+      columnSelect = event.altKey;
+    }, true);
+
+    // Capture phase on an ancestor, so this runs before - and, by stopping propagation, instead of - xterm's.
+    host.addEventListener("copy", function (event) {
+      if (!term.hasSelection() || !event.clipboardData) {
+        return;
+      }
+      event.clipboardData.setData("text/plain", selectionForClipboard());
+      event.preventDefault();
+      event.stopPropagation();
+    }, true);
+
+    // Registered after term.open(), on the same element as xterm's own handler, so it runs after it and
+    // overwrites the text xterm just parked in the textarea.
+    term.element.addEventListener("contextmenu", function () {
+      if (term.hasSelection() && term.textarea) {
+        term.textarea.value = selectionForClipboard();
+        term.textarea.select();
+      }
+    });
   }
 
   function pasteFromClipboard() {
@@ -831,10 +975,83 @@
     socket.send(JSON.stringify({ resize: [term.cols, term.rows] }));
   }
 
+  // --- performance reporting -------------------------------------------------------------------------------
+  // Slow things are posted to the host (source "terminal-perf"), which writes them to accel-perf.log next to
+  // the host's own UI-thread measurements, so "switching tabs is slow" can be told apart: the WPF UI thread,
+  // the page's own main thread, or the attach itself (connect, replay, the app's redraw).
+  function postPerf(text) {
+    try {
+      if (window.chrome && window.chrome.webview) {
+        window.chrome.webview.postMessage({ source: "terminal-perf", message: text });
+      }
+    } catch (bridgeError) {
+      // Best-effort.
+    }
+  }
+
+  // Main-thread tasks over 100 ms in this page: a busy page delays input and painting for the whole terminal.
+  try {
+    if (window.PerformanceObserver) {
+      new PerformanceObserver(function (list) {
+        list.getEntries().forEach(function (entry) {
+          postPerf("page long task " + Math.round(entry.duration) + " ms");
+        });
+      }).observe({ entryTypes: ["longtask"] });
+    }
+  } catch (observerError) {
+    // longtask is not available everywhere; this is diagnostics only.
+  }
+
+  // One attach, from the host's accelAttachPty call to the point the output went quiet: how long the socket took
+  // to open, to the first byte (server attach + replay), and until the stream settled (the app's own redraw).
+  var attachTiming = null;
+
+  function startAttachTiming(tabId) {
+    if (attachTiming && attachTiming.timer) {
+      clearTimeout(attachTiming.timer);
+    }
+    attachTiming = { tabId: tabId, t0: performance.now(), open: null, first: null, last: null, chars: 0, timer: null };
+  }
+
+  function noteAttachOpen() {
+    if (attachTiming && attachTiming.open === null) {
+      attachTiming.open = performance.now() - attachTiming.t0;
+    }
+  }
+
+  function noteAttachData(length) {
+    var timing = attachTiming;
+    if (!timing) {
+      return;
+    }
+
+    var elapsed = performance.now() - timing.t0;
+    if (timing.first === null) {
+      timing.first = elapsed;
+    }
+    timing.last = elapsed;
+    timing.chars += length;
+
+    if (timing.timer) {
+      clearTimeout(timing.timer);
+    }
+    timing.timer = setTimeout(function () {
+      if (attachTiming === timing) {
+        attachTiming = null;
+      }
+      if (timing.last >= 150) {
+        postPerf("attach tab=" + timing.tabId.slice(0, 8) + " open=" + Math.round(timing.open || 0) +
+          " ms firstData=" + Math.round(timing.first) + " ms settled=" + Math.round(timing.last) +
+          " ms chars=" + timing.chars);
+      }
+    }, 300);
+  }
+
   // Called from C# (TerminalView.AttachPtyAsync) once CoreWebView2 navigation has completed and
   // xterm.js is already initialized - see TerminalView.BuildAttachScript's doc comment for the
   // tabId/port-passing mechanism (P2-T5b's stopgap, ahead of Phase 3's real tab/registry).
   window.accelAttachPty = function (tabId, port) {
+    startAttachTiming(tabId);
     if (!term) {
       createTerminal();
     }
@@ -915,6 +1132,7 @@
     mySocket.onopen = function () {
       if (socket === mySocket) {
         reconnectAttempts = 0;
+        noteAttachOpen();
         sendResize();
       }
     };
@@ -927,8 +1145,19 @@
       // Server -> client is always a text frame (PtyRoutes.PumpOutputAsync), which the WebSocket
       // API always delivers here as a JS string, never an ArrayBuffer - nothing to decode.
       if (typeof event.data === "string") {
-        window.accelReceivedText += event.data;
-        term.write(event.data);
+        // A test hook (the smoke tests read it back), capped so it cannot grow for as long as a tab stays attached.
+        window.accelReceivedText = (window.accelReceivedText + event.data).slice(-262144);
+        noteAttachData(event.data.length);
+
+        var writtenAt = performance.now();
+        var chars = event.data.length;
+        term.write(event.data, function () {
+          // The callback runs once xterm has parsed this chunk: a big one that takes long is a page-side stall.
+          var took = performance.now() - writtenAt;
+          if (took >= 100) {
+            postPerf("xterm write of " + chars + " chars took " + Math.round(took) + " ms");
+          }
+        });
       }
     };
 

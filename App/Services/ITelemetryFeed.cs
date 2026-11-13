@@ -279,6 +279,10 @@ public sealed class TelemetryFeed : ITelemetryFeed
             try
             {
                 snapshot = _source.BuildSnapshot();
+
+                // Build the panel tree here, on the background thread: panel A and the agent graph both need
+                // it and used to each build it on the UI thread on every tick. They ask for the cached copy.
+                MonitorTreeBuilder.BuildCached(snapshot);
             }
             catch (Exception ex)
             {
@@ -304,8 +308,13 @@ public sealed class TelemetryFeed : ITelemetryFeed
 
                 if (_rebuildPending)
                 {
+                    // Re-arm the debounce rather than publishing straight away. Publishing at once let the
+                    // feed degenerate into back-to-back builds, each followed by a full UI-thread update,
+                    // whenever signals arrived faster than a build took (several live sessions: status-line
+                    // and hook posts, transcript writes) - the debounce's 250 ms floor was bypassed. With
+                    // this, the next build starts at least one quiet window after the last signal.
                     _rebuildPending = false;
-                    Publish();
+                    _coalescer.Signal();
                 }
             });
         });

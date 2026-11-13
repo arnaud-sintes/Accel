@@ -1164,6 +1164,7 @@ internal sealed class PtyOutputPump
             return true;
         }
 
+        var blockedFor = Stopwatch.StartNew();
         try
         {
             // Blocking on purpose: this is a dedicated thread whose entire job is this pipe, and the
@@ -1171,6 +1172,16 @@ internal sealed class PtyOutputPump
             // ever raised by Dispose) is what unblocks it.
             _writer.WriteAsync(text, stopToken).AsTask().GetAwaiter().GetResult();
             Interlocked.Increment(ref _chunksPublished);
+
+            // A long block means the child was frozen for that long (nobody was reading this session). The
+            // hub reads every session permanently, so seeing this at all is a regression worth a log line.
+            if (blockedFor.Elapsed >= TimeSpan.FromSeconds(1))
+            {
+                Trace.TraceWarning(
+                    $"PtyOutputPump: output blocked for {blockedFor.Elapsed.TotalSeconds:F1}s " +
+                    $"(published {ChunksPublished} chunks) - the session was frozen while nobody read it.");
+            }
+
             return true;
         }
         catch (OperationCanceledException)

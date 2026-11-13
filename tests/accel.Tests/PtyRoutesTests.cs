@@ -183,8 +183,11 @@ public class PtyRoutesTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Attach_ForcesARedraw_ByJigglingTheSizeOnceThePrefixIsOut()
+    public async Task AResizeFrame_IsForwardedExactlyOnce_WithNoShrinkAndRestoreAroundIt()
     {
+        // The client's resize on attach is what makes conhost repaint (a same-size resize repaints the whole
+        // screen). The old redraw trick shrank the pseudo-console one column and restored it, which in the
+        // alternate screen lost the last column of every full row - so no extra resize may follow this one.
         string tabId = Guid.NewGuid().ToString("N");
         var fake = new FakePtyEndpoint();
         _registry!.Register(tabId, fake);
@@ -195,12 +198,7 @@ public class PtyRoutesTests : IAsyncLifetime
         await socket.SendAsync(Encoding.UTF8.GetBytes("{\"resize\":[100,30]}"), WebSocketMessageType.Text, endOfMessage: true, CancellationToken.None);
 
         Assert.Equal((100, 30), await fake.NextResizeAsync(TimeSpan.FromSeconds(5)));
-        Assert.Equal((99, 30), await fake.NextResizeAsync(TimeSpan.FromSeconds(5)));
-        Assert.Equal((100, 30), await fake.NextResizeAsync(TimeSpan.FromSeconds(5)));
-
-        // Only once per attach: a later resize is just a resize.
-        await socket.SendAsync(Encoding.UTF8.GetBytes("{\"resize\":[90,30]}"), WebSocketMessageType.Text, endOfMessage: true, CancellationToken.None);
-        Assert.Equal((90, 30), await fake.NextResizeAsync(TimeSpan.FromSeconds(5)));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => fake.NextResizeAsync(TimeSpan.FromMilliseconds(400)));
 
         await CloseAsync(socket);
     }

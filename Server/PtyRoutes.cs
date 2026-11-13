@@ -72,14 +72,29 @@ public sealed class PtyRouteRegistry
     {
         ArgumentException.ThrowIfNullOrEmpty(tabId);
         ArgumentNullException.ThrowIfNull(endpoint);
-        _hubs[tabId] = new PtyOutputHub(endpoint);
+
+        // A replaced registration stops being read: its hub's permanent reader is cancelled so it does not
+        // keep consuming (and tracking) the old endpoint's output.
+        var hub = new PtyOutputHub(endpoint);
+        _hubs.TryGetValue(tabId, out var old);
+        _hubs[tabId] = hub;
+        old?.Dispose();
     }
 
     /// <summary>Convenience over <see cref="Register(string, IPtyEndpoint)"/> for a real <see cref="PtySession"/>.</summary>
     public void RegisterSession(string tabId, PtySession session) => Register(tabId, new PtySessionEndpoint(session));
 
     /// <summary>Removes the registration for <paramref name="tabId"/>, if any. Does not dispose the endpoint.</summary>
-    public bool Unregister(string tabId) => _hubs.TryRemove(tabId, out _);
+    public bool Unregister(string tabId)
+    {
+        if (!_hubs.TryRemove(tabId, out var hub))
+        {
+            return false;
+        }
+
+        hub.Dispose();
+        return true;
+    }
 
     /// <summary>Looks up <paramref name="tabId"/>. False for anything not registered, with no further detail.</summary>
     public bool TryGet(string tabId, out IPtyEndpoint? endpoint)
@@ -223,7 +238,12 @@ public static class PtyRoutes
     {
         using var pumpCts = CancellationTokenSource.CreateLinkedTokenSource(connectionAborted);
 
-        Task outputTask = PumpOutputAsync(socket, hub, pumpCts.Token);
+        // Attach BEFORE either pump starts: the hub's output sink must exist before the first input frame
+        // (the client's resize, which makes conhost repaint the screen) is handled, so that repaint is queued
+        // behind the reset + mode replay instead of being dropped as output nobody is attached to.
+        using var attachment = hub.Attach(pumpCts.Token);
+
+        Task outputTask = PumpOutputAsync(socket, attachment, pumpCts.Token);
         Task inputTask = PumpInputAsync(socket, hub, pumpCts.Token);
 
         try
@@ -261,19 +281,18 @@ public static class PtyRoutes
 
     /// <summary><see cref="PtySession.Output"/> (or a fake's equivalent) to the client, one text frame
     /// per decoded chunk. Ends when the channel completes (session gone) or is cancelled.</summary>
-    private static async Task PumpOutputAsync(WebSocket socket, PtyOutputHub hub, CancellationToken cancellationToken)
+    private static async Task PumpOutputAsync(WebSocket socket, PtyOutputHub.PtyAttachment attachment, CancellationToken cancellationToken)
     {
         try
         {
-            // The hub owns the read loop (single consumer, mode tracking, reset+replay prefix); this
+            // The hub owns the read loop (permanent reader, mode tracking, reset+replay prefix); this
             // route only supplies how one chunk is framed onto the socket.
-            await hub.PumpOutputAsync(
+            await attachment.PumpAsync(
                 async (chunk, ct) =>
                 {
                     byte[] bytes = Encoding.UTF8.GetBytes(chunk);
                     await socket.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, ct);
-                },
-                cancellationToken);
+                });
         }
         catch (OperationCanceledException)
         {
@@ -322,7 +341,10 @@ public static class PtyRoutes
 
                 if (result.MessageType == WebSocketMessageType.Binary)
                 {
-                    WriteInput(endpoint, message);
+                    // Off this request thread: a pipe write blocks if the child is not reading stdin (a wedged
+                    // session), and that must not hold a web-server thread. Awaited, so keystrokes still reach
+                    // the child in the order they arrived.
+                    await Task.Run(() => WriteInput(endpoint, message), CancellationToken.None);
                 }
                 else if (result.MessageType == WebSocketMessageType.Text)
                 {

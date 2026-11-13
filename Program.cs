@@ -167,6 +167,15 @@ static async Task<int> RunCombinedAsync(int port, string? dumpRawDir, bool verbo
     {
         var wpfApp = new Accel.App.App();
 
+        // Slow UI-thread work is written to %USERPROFILE%\.claude\accel-perf.log (App/Services/UiPerf.cs): the
+        // answer to "what made it slow" for a report, at no cost while nothing is slow.
+        Accel.App.Services.UiPerf.Install(
+            System.Windows.Threading.Dispatcher.CurrentDispatcher,
+            typeof(Program).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
+                is [System.Reflection.AssemblyInformationalVersionAttribute info, ..]
+                ? info.InformationalVersion
+                : "unknown");
+
         // The real startup composition: an EventServer instance's in-process State/Roots/RootsTree
         // feeds panel A (no HTTP, no /roots/tree polling) and the same Kestrel host already started
         // above serves panel D's /pty/{tabId} route, so the port is already known - no ephemeral-port
@@ -188,25 +197,43 @@ static async Task<int> RunCombinedAsync(int port, string? dumpRawDir, bool verbo
         // exits or Accel restarts. Wired here (rather than into RootsTreeRoute/RootsPanelViewModel
         // themselves) so it only ever runs against the real config file in the real running app,
         // never against a test double's fixture path.
+        // PersistLiveRenames runs on the UI thread on every snapshot, so it must cost almost nothing when there
+        // is nothing to do: it returns before touching the disk unless some session actually carries a live name,
+        // and re-reads the config only when the file changed (a stat, not a read-and-parse, per tick). These
+        // are declared before the subscription because the local function captures them.
+        string? cachedConfigPath = null;
+        DateTime cachedConfigWriteUtc = default;
+        IReadOnlyDictionary<string, Accel.Server.SessionOverride>? cachedOverrides = null;
+
         feed.SnapshotAvailable += PersistLiveRenames;
 
         void PersistLiveRenames(Accel.Metrics.RootsTreeDto tree)
         {
-            string configPath = Accel.Server.RootFoldersConfig.ResolveWritePath();
-            var overrides = Accel.Server.RootFoldersConfig.LoadFull(new[] { configPath }).Sessions;
-
-            foreach (var s in tree.Roots.SelectMany(r => r.Sessions).Concat(tree.UnattributedSessions))
+            var liveNamed = tree.Roots.SelectMany(r => r.Sessions).Concat(tree.UnattributedSessions)
+                .Where(s => s.NameSource == "status_line")
+                .ToList();
+            if (liveNamed.Count == 0)
             {
-                if (s.NameSource != "status_line")
-                {
-                    continue;
-                }
+                return;
+            }
 
-                bool alreadyCaptured = overrides.TryGetValue(s.SessionId, out var existing)
+            string configPath = Accel.Server.RootFoldersConfig.ResolveWritePath();
+            DateTime writeUtc = File.Exists(configPath) ? File.GetLastWriteTimeUtc(configPath) : default;
+            if (cachedOverrides is null || cachedConfigPath != configPath || cachedConfigWriteUtc != writeUtc)
+            {
+                cachedOverrides = Accel.Server.RootFoldersConfig.LoadFull(new[] { configPath }).Sessions;
+                cachedConfigPath = configPath;
+                cachedConfigWriteUtc = writeUtc;
+            }
+
+            foreach (var s in liveNamed)
+            {
+                bool alreadyCaptured = cachedOverrides.TryGetValue(s.SessionId, out var existing)
                     && string.Equals(existing.DisplayName, s.Name, StringComparison.Ordinal);
                 if (!alreadyCaptured)
                 {
                     Accel.App.Services.RootFolderEditor.SetSessionDisplayName(configPath, s.SessionId, s.Name);
+                    cachedOverrides = null; // the file changed under us: reload on the next snapshot
                 }
             }
         }

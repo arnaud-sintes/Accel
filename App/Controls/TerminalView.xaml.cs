@@ -237,6 +237,18 @@ public partial class TerminalView : UserControl, IDisposable
                         break;
                     }
 
+                    // Slow attaches / long page tasks (terminal.js postPerf) go to the same log as the host's own
+                    // UI-thread measurements.
+                    case "terminal-perf":
+                    {
+                        if (root.TryGetProperty("message", out var perfProp) && perfProp.GetString() is { } perfText)
+                        {
+                            UiPerf.Log("page: " + perfText);
+                        }
+
+                        break;
+                    }
+
                     // terminal.js's setFontSize reports every applied zoom step here (keyboard, wheel,
                     // or SetFontSizeAsync alike) so it can be restored on the next launch - the page
                     // itself has already re-fitted/re-snapped/resized the child by the time this

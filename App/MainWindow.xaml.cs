@@ -15,6 +15,7 @@ using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Threading;
 using Rectangle = System.Windows.Shapes.Rectangle;
+using TreeReveal = Accel.App.Controls.TreeReveal;
 using ICSharpCode.AvalonEdit.Document;
 using Accel.App.Services;
 using Accel.App.ViewModels;
@@ -324,6 +325,10 @@ public partial class MainWindow : Window
             // shows the project that hosts it.
             tabs.FileTabActivated += path => RootsPanel?.SelectRootContaining(path);
 
+            // Every tab selection (click, new, restored, neighbour after a close) brings the project it
+            // belongs to into view in panel A - see RevealTabInPanelA.
+            tabs.TabActivated += RevealTabInPanelA;
+
             // Keeps the "tabs to restore next launch" file current - see SaveOpenTabs.
             tabs.TabSetChanged += SaveOpenTabs;
         }
@@ -391,6 +396,7 @@ public partial class MainWindow : Window
             // See RootsTreeViewItem_RequestBringIntoView: keeps a rebuild from scrolling the panel.
             rootsPanel.TreeRebuilding += OnRootsTreeRebuilding;
             rootsPanel.TreeRebuilt += OnRootsTreeRebuilt;
+            rootsPanel.RevealRequested += OnRootsRevealRequested;
         }
 
         Closed += (_, _) =>
@@ -1482,13 +1488,14 @@ public partial class MainWindow : Window
         _suppressRootsBringIntoView = true;
     }
 
-    private void OnRootsTreeRebuilt(bool revealSelection)
+    private void OnRootsTreeRebuilt(string? revealKey)
     {
-        if (revealSelection)
+        // A reveal that waited for its row to exist (a new session's tab) is delivered here. It runs at
+        // Loaded priority, ahead of the ContextIdle restore below, and records the offset it ends on, so the
+        // restore puts the view back to the revealed position rather than to the one before it.
+        if (revealKey is not null)
         {
-            // A deliberate move to the focused row: let its scroll-into-view through.
-            _suppressRootsBringIntoView = false;
-            return;
+            ScheduleReveal(revealKey);
         }
 
         // The fresh rows are laid out after this returns, and that is when they ask to be scrolled to;
@@ -1510,6 +1517,82 @@ public partial class MainWindow : Window
         if (_suppressRootsBringIntoView)
         {
             e.Handled = true;
+        }
+    }
+
+    // --- Panel A: scroll to the folder of the tab that was just selected ---------------------------------------
+
+    private string? _pendingRevealKey;
+    private int _revealAttempts;
+
+    private void OnRootsRevealRequested(string key) => ScheduleReveal(key);
+
+    // Last request wins: a reveal is a position, so only the latest one matters.
+    private void ScheduleReveal(string key)
+    {
+        _pendingRevealKey = key;
+        _revealAttempts = 0;
+        Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(ExecuteReveal));
+    }
+
+    private void ExecuteReveal()
+    {
+        if (_pendingRevealKey is not { } key || RootsPanel is null)
+        {
+            return;
+        }
+
+        var chain = RootsPanel.FindChain(key);
+        var scroller = FindDescendant<ScrollViewer>(RootsTreeView);
+        if (chain is null || scroller is null)
+        {
+            _pendingRevealKey = null; // the row is gone (a rebuild replaced it, or it was filtered): nothing to do
+            return;
+        }
+
+        var items = chain.Cast<object>().ToList();
+        var outcome = TreeReveal.TryReveal(RootsTreeView, scroller, items, out var offset);
+        if (outcome == TreeReveal.Outcome.NeedsLayout)
+        {
+            // A just-listed row has no container until layout has run once.
+            RootsTreeView.UpdateLayout();
+            outcome = TreeReveal.TryReveal(RootsTreeView, scroller, items, out offset);
+        }
+
+        if (outcome == TreeReveal.Outcome.NeedsLayout && _revealAttempts++ < 3)
+        {
+            Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(ExecuteReveal));
+            return;
+        }
+
+        _pendingRevealKey = null;
+        if (outcome == TreeReveal.Outcome.Done)
+        {
+            // The new baseline: the pending ContextIdle restore of an earlier rebuild then restores to
+            // here instead of undoing the reveal.
+            _rootsScrollOffset = offset;
+        }
+    }
+
+    /// <summary>Scrolls panel A to what a tab belongs to: a session's row, a terminal's folder, a file's project.</summary>
+    private void RevealTabInPanelA(TabViewModel tab)
+    {
+        if (RootsPanel is null)
+        {
+            return;
+        }
+
+        switch (tab.Kind)
+        {
+            case TabKind.Session:
+                RootsPanel.RevealSession(tab.TabId);
+                break;
+            case TabKind.Shell:
+                RootsPanel.RevealRoot(tab.ProjectPath ?? tab.WorkingDirectory);
+                break;
+            default:
+                RootsPanel.RevealRoot(tab.TabId); // file / git tabs: the tab id is the file's path
+                break;
         }
     }
 
@@ -1661,9 +1744,16 @@ public partial class MainWindow : Window
     // the tab's own buttons (close/save), which must keep behaving as buttons.
     private void TabItem_PreviewMouseLeftButtonDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
-        _tabDragStart = e.OriginalSource is DependencyObject source && IsInsideButton(source, (DependencyObject)sender)
-            ? null
-            : e.GetPosition(this);
+        bool onButton = e.OriginalSource is DependencyObject source && IsInsideButton(source, (DependencyObject)sender);
+        _tabDragStart = onButton ? null : e.GetPosition(this);
+
+        // Clicking the tab that is already selected raises no selection change, so TabActivated never fires
+        // for it; the click itself is the gesture "show me where this tab lives" (e.g. after scrolling panel A
+        // away, or after a file tab -> back to the session tab that was already focused).
+        if (!onButton && (sender as ListBoxItem)?.DataContext is TabViewModel tab)
+        {
+            RevealTabInPanelA(tab);
+        }
     }
 
     private void TabItem_PreviewMouseMove(object sender, System.Windows.Input.MouseEventArgs e)

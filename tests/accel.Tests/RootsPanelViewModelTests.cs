@@ -301,7 +301,7 @@ public class RootsPanelViewModelTests
     }
 
     [Fact]
-    public void FocusChange_SelectsTheFocusedSession_AndExpandsItsRoot()
+    public void FocusChange_SelectsTheFocusedSession_AndOpensItsCollapsedRoot()
     {
         var (vm, feed, _, writer) = BuildWithSelection();
         feed.Publish(TelemetryFixtures.Tree(new[]
@@ -314,6 +314,8 @@ public class RootsPanelViewModelTests
 
         Assert.True(Node(vm, "s-2").IsSelected);
         Assert.Equal("s-2", vm.SelectedKey);
+
+        // A collapsed folder is opened so the focused row is actually shown.
         Assert.True(Node(vm, RootPath).IsExpanded);
     }
 

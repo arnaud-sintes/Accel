@@ -23,7 +23,7 @@
       Assembly.GetName().Version, and by publish.ps1 (installer/artifact naming). No git tags exist
       yet for this repo, so this starts pre-1.0; bump it by hand per release.
     -->
-    <Version>0.6.8</Version>
+    <Version>0.7.1</Version>
     <TargetFramework>net10.0-windows</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
     <UseWPF>true</UseWPF>
@@ -168,6 +168,13 @@
     <!-- P2-T5b: Accel's own glue script (not vendored) - see terminal.js's header comment. -->
     <Content Include="App\Controls\wwwroot\xterm\terminal.js">
       <Link>wwwroot\xterm\terminal.js</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <!-- Pure clipboard-text clean-up (trailing padding, NBSP, line endings), loaded before terminal.js and
+         unit-tested under node (tests/accel.Tests/TerminalCopyTextTests.cs). -->
+    <Content Include="App\Controls\wwwroot\xterm\copytext.js">
+      <Link>wwwroot\xterm\copytext.js</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>

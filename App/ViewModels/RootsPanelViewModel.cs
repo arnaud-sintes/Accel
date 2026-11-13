@@ -826,6 +826,7 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
         {
             ApplyFocus();
             _selectFocusedPending = true;
+            _selectFocusedAttempts = 0;
             SelectFocusedSession();
         }
     });
@@ -833,19 +834,28 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
     /// <summary>
     /// Set when the focused session should be selected in the tree but its row is not there yet - a
     /// freshly created session's tab is focused before the next telemetry snapshot lists it. Cleared
-    /// once the row is found (here or in <see cref="Rebuild"/>), or when it cannot be selected for a
-    /// reason that will not resolve itself (see <see cref="SelectFocusedSession"/>).
+    /// once the row is found (here or in <see cref="Rebuild"/>), after <see cref="MaxSelectFocusedAttempts"/>
+    /// rebuilds without it, or when it cannot be selected for a reason that will not resolve itself (see
+    /// <see cref="SelectFocusedSession"/>).
     /// </summary>
     private bool _selectFocusedPending;
 
+    private int _selectFocusedAttempts;
+
+    /// <summary>How many snapshots a not-yet-listed focused session is waited for. A new session appears within
+    /// a snapshot or two; a plain-terminal tab's id never will (it has no transcript, so no row), and used to
+    /// be retried on every rebuild for as long as that tab stayed focused.</summary>
+    private const int MaxSelectFocusedAttempts = 40;
+
     /// <summary>
-    /// Makes panel A's tree selection follow panel C's focused tab: expands every ancestor of the
-    /// focused session's row (so its project root is open and the row is on screen) and selects it.
+    /// Makes panel A's tree selection follow panel C's focused tab: selects the focused session's row.
     /// Runs on a focus <i>change</i> only, never on every rebuild - a rebuild restores the user's own
     /// selection, and re-forcing the focused row there would fight them while they click around this
     /// panel. Selection here never writes focus back (panel A only reads it), so there is no loop.
     /// Does nothing while a search filter hides the row: surfacing it would mean clearing the filter
-    /// the user typed.
+    /// the user typed. It expands the row's folder when collapsed, so the focused row is actually shown.
+    /// Scrolling is not done here - selecting a row does not scroll it into view unless the tree has
+    /// keyboard focus, which a tab click never gives it - see <see cref="RevealSession"/>.
     /// </summary>
     private void SelectFocusedSession()
     {
@@ -859,7 +869,12 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
         var chain = FindAncestorChain(Roots, focusedId!);
         if (chain is null)
         {
-            // Not in the tree (yet) - keep the request for the next rebuild.
+            // Not in the tree (yet) - keep the request for the next rebuild, for a bounded number of them.
+            if (++_selectFocusedAttempts >= MaxSelectFocusedAttempts)
+            {
+                _selectFocusedPending = false;
+            }
+
             return;
         }
 
@@ -871,19 +886,102 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
             return;
         }
 
-        for (int i = 0; i < chain.Count - 1; i++)
-        {
-            chain[i].IsExpanded = true;
-        }
-
+        ExpandAncestors(chain);
         node.IsSelected = true;
+    }
 
-        // Landing on the focused row inside a rebuild is a deliberate "show me this" (its row just
-        // appeared); tell the view not to suppress the scroll that selection causes.
-        if (_rebuilding)
+    /// <summary>Opens every folder above the last row of <paramref name="chain"/> that is collapsed.</summary>
+    private static void ExpandAncestors(IReadOnlyList<RootsPanelNodeViewModel> chain)
+    {
+        for (var i = 0; i < chain.Count - 1; i++)
         {
-            _revealRequested = true;
+            if (!chain[i].IsExpanded)
+            {
+                chain[i].IsExpanded = true;
+            }
         }
+    }
+
+    // --- revealing a row in the view -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Raised with a node key when the view should scroll that row into view. A deliberate request from an
+    /// explicit tab gesture - unlike the selection a rebuild re-applies, which must never scroll.
+    /// </summary>
+    public event Action<string>? RevealRequested;
+
+    private string? _pendingRevealKey;
+
+    /// <summary>
+    /// Asks the view to scroll the session row <paramref name="sessionKey"/> into view (see
+    /// <see cref="RevealRequested"/>). A session that is not in the tree yet is remembered and revealed by the
+    /// rebuild that lists it; a row hidden by the search filter is left alone.
+    /// </summary>
+    public void RevealSession(string? sessionKey)
+    {
+        if (string.IsNullOrEmpty(sessionKey))
+        {
+            return;
+        }
+
+        var chain = FindChain(sessionKey);
+        if (chain is null)
+        {
+            _pendingRevealKey = sessionKey;
+            return;
+        }
+
+        _pendingRevealKey = null;
+        if (chain[^1].IsVisible)
+        {
+            ExpandAncestors(chain);
+            RevealRequested?.Invoke(chain[^1].Key);
+        }
+    }
+
+    /// <summary>
+    /// Asks the view to scroll the root row hosting <paramref name="path"/> into view: what a plain-terminal tab
+    /// (its folder) and a file/git tab (the project the file is in) reveal. Nothing when no root contains the
+    /// path or the row is hidden by the search filter.
+    /// </summary>
+    public void RevealRoot(string? path)
+    {
+        string? rootPath = RootPathContaining(path);
+        var node = rootPath is null
+            ? null
+            : Roots.FirstOrDefault(r => r.Kind == RootsPanelNodeKind.Root && r.Key == rootPath);
+        if (node is not null && node.IsVisible)
+        {
+            // The project is opened if collapsed: what the user asked for is to see the project, not just its header.
+            node.IsExpanded = true;
+            RevealRequested?.Invoke(node.Key);
+        }
+    }
+
+    /// <summary>The rows from a top-level row down to the node keyed <paramref name="key"/> (inclusive,
+    /// case-insensitive, any kind), or null if there is no such node. The view walks it to find the realised
+    /// containers.</summary>
+    public IReadOnlyList<RootsPanelNodeViewModel>? FindChain(string? key) =>
+        string.IsNullOrEmpty(key) ? null : FindChainByKey(Roots, key);
+
+    private static List<RootsPanelNodeViewModel>? FindChainByKey(IEnumerable<RootsPanelNodeViewModel> nodes, string key)
+    {
+        foreach (var node in nodes)
+        {
+            if (string.Equals(node.Key, key, StringComparison.OrdinalIgnoreCase))
+            {
+                return new List<RootsPanelNodeViewModel> { node };
+            }
+
+            var below = FindChainByKey(node.Children, key);
+            if (below is not null)
+            {
+                below.Insert(0, node);
+                return below;
+            }
+        }
+
+        return null;
     }
 
     /// <summary>The path from a top-level row down to the session row keyed <paramref name="key"/>
@@ -1014,9 +1112,22 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
     /// </summary>
     public void Rebuild(RootsTreeDto? snapshot)
     {
-        var tree = MonitorTreeBuilder.Build(snapshot);
+        var tree = MonitorTreeBuilder.BuildCached(snapshot);
 
-        _revealRequested = false;
+        // Most ticks change nothing this panel shows: a live session's transcript grows (and its duration and
+        // token counts with it) many times a second, but the rows only change when a name, state, model,
+        // effort or context figure does. Clearing and recreating every row and its WPF container for such a tick
+        // is the panel's whole recurring cost - and it throws away the very row a right-click is landing on.
+        string signature = ContentSignature(tree);
+        if (_haveAppliedSignature && string.Equals(signature, _lastAppliedSignature, StringComparison.Ordinal))
+        {
+            UpdateCounters(snapshot);
+            return;
+        }
+
+        _lastAppliedSignature = signature;
+        _haveAppliedSignature = true;
+
         TreeRebuilding?.Invoke();
         _rebuilding = true;
         try
@@ -1090,7 +1201,81 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
         }
 
         UpdateCounters(snapshot);
-        TreeRebuilt?.Invoke(_revealRequested);
+
+        // A reveal asked for before its row existed (a new session's tab) is delivered by the rebuild that
+        // finally lists it, so the scroll lands on the real row rather than being lost.
+        string? revealKey = null;
+        if (_pendingRevealKey is { } pending && FindChain(pending) is { } chain)
+        {
+            _pendingRevealKey = null;
+            if (chain[^1].IsVisible)
+            {
+                revealKey = chain[^1].Key;
+            }
+        }
+
+        TreeRebuilt?.Invoke(revealKey);
+    }
+
+    private string? _lastAppliedSignature;
+    private bool _haveAppliedSignature;
+
+    /// <summary>
+    /// Everything about a tree that the panel renders or acts on, as one string: row identity and order, the
+    /// label and tooltip text, the state glyph, the model/effort/context figures, and what "Remove" / "Resume" /
+    /// the waiting highlight read (project dir, cwd, the waiting timestamp). Deliberately <b>not</b> the raw
+    /// duration and token counts - nothing in this panel displays them, and they are what changes on every tick of
+    /// a running session. Two trees with the same signature produce identical rows.
+    /// </summary>
+    private static string ContentSignature(MonitorTree tree)
+    {
+        var sb = new System.Text.StringBuilder(4096);
+
+        static void Columns(System.Text.StringBuilder sb, MonitorRowColumns c) =>
+            sb.Append(c.Id).Append('\u001f').Append(c.Name).Append('\u001f').Append(c.Type).Append('\u001f')
+              .Append(c.Model).Append('\u001f').Append(c.Effort).Append('\u001f').Append(c.Context).Append('\u001f');
+
+        static void Agent(System.Text.StringBuilder sb, MonitorAgentNode a)
+        {
+            sb.Append('a').Append('\u001f').Append(a.AgentId).Append('\u001f').Append(a.Text).Append('\u001f').Append((int)a.State).Append('\u001f');
+            Columns(sb, a.Columns);
+            sb.Append('\u001e');
+        }
+
+        static void Root(System.Text.StringBuilder sb, MonitorRootNode r)
+        {
+            sb.Append('r').Append('\u001f').Append(r.Path).Append('\u001f').Append(r.Text).Append('\u001f');
+            Columns(sb, r.Columns);
+            sb.Append('\u001e');
+            foreach (var s in r.Sessions)
+            {
+                sb.Append('s').Append('\u001f').Append(s.SessionId).Append('\u001f').Append(s.Text).Append('\u001f').Append((int)s.State).Append('\u001f')
+                  .Append(s.ProjectDir).Append('\u001f').Append(s.Cwd).Append('\u001f').Append(s.WaitingSinceUtc?.Ticks).Append('\u001f');
+                Columns(sb, s.Columns);
+                sb.Append('\u001e');
+                foreach (var a in s.Agents)
+                {
+                    Agent(sb, a);
+                }
+            }
+
+            foreach (var a in r.OrphanAgents)
+            {
+                Agent(sb, a);
+            }
+        }
+
+        foreach (var root in tree.Roots)
+        {
+            Root(sb, root);
+        }
+
+        if (tree.Unattributed is not null)
+        {
+            Root(sb, tree.Unattributed);
+        }
+
+        return sb.ToString();
     }
 
     /// <summary>
@@ -1101,14 +1286,12 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
     public event Action? TreeRebuilding;
 
     /// <summary>
-    /// Raised after a rebuild. The argument says whether the selection was deliberately moved to a row
-    /// that should be scrolled to (<see langword="true"/>); otherwise the new rows merely re-apply the
-    /// old selection and the view must not scroll to it - that is what kept dragging the panel back to
-    /// the open session while the user was scrolling it by hand.
+    /// Raised after a rebuild. The argument is the key of a row a pending <see cref="RevealSession"/> asked
+    /// to be scrolled to now that it exists, or null. With null the new rows merely re-apply the old
+    /// selection and the view must not scroll to it - that is what kept dragging the panel back to the open
+    /// session while the user was scrolling it by hand.
     /// </summary>
-    public event Action<bool>? TreeRebuilt;
-
-    private bool _revealRequested;
+    public event Action<string?>? TreeRebuilt;
 
     private void UpdateCounters(RootsTreeDto? snapshot)
     {

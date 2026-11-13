@@ -194,6 +194,22 @@ self-invoked `accel.exe notify` calls) and (2) the top-level `statusLine`/`subag
   host), and a uniform 404 for malformed/unknown tabIds. `PumpAsync` runs output-pump and input-pump loops
   concurrently; binary WS frames are raw stdin bytes, text frames are JSON control messages (currently
   only `{"resize":[cols,rows]}`).
+  - **`PtyOutputHub`** (one per registered endpoint; created by `PtyRouteRegistry.Register`, disposed on
+    replace/`Unregister`) is the **sole, permanent reader** of `IPtyEndpoint.Output`, started in its
+    constructor — *not* tied to whether a WebSocket is attached. Previously only the selected tab's socket
+    read the channel; an unfocused tab's bounded queue (512) filled, `PtySession`'s pump blocked, conhost
+    stopped draining and the child froze mid-write. Now: output while nothing is attached is discarded in
+    the alternate screen (the redraw on re-attach repaints it) and kept in a 256K-char `OutputRing`
+    (drop-oldest, trimmed to a line start) in the normal screen; `TerminalModeTracker` keeps the
+    mode state (`BuildReplay()`) under `_sync`. `Attach(ct)` installs a per-attach bounded `Sink` first
+    (superseding any previous one), then returns a `PtyAttachment` whose `PumpAsync(send)` sends the
+    snapshot (mode replay + ring), the backlog, then live output. A wedged socket therefore only loses
+    its own sink, never the session. `PumpAsync` in `PtyRoutes` attaches *before* starting its pumps.
+  - **Redraw = a same-size resize, no jiggle.** The old shrink-by-one-column-then-restore "jiggle" lost the
+    last column in conhost's alternate screen (verified against a real ConPTY: shrink-then-grow loses the
+    last column; same-size resize re-emits a lossless full repaint). `PtyOutputHub.Resize` is serialized
+    (`_resizeSync`) and forwards exactly what the client sent; the client's same-size resize on attach is
+    the redraw trigger. `PtySession.TryPublish` traces a warning when the output channel stays blocked ≥ 1 s.
 - **`RootFoldersConfig.cs` / `RootsRoutes.cs` / `RootsTreeRoute.cs`** — a "root" is a user-configured
   top-level project folder Accel tracks, used to bucket sessions by the transcript's own `cwd`. Config
   supports v1 (flat array, legacy) and v2 (`{roots, sessions}` where `sessions` is a sparse per-session
@@ -446,16 +462,50 @@ and guarantees they don't outlive the app even across crashes.
   Rebuild-and-diff: captures expanded keys/selection before clearing, re-expands via
   `Cli.MonitorTreeExpansion`. Read-only consumer of `ISessionSelectionService` (sets `IsFocused`, never
   writes selection).
+  **Reveal** (selecting a tab scrolls panel A): selecting a `TreeViewItem` never scrolls it (WPF only scrolls
+  an item that takes keyboard focus; a tab click leaves focus in the tab strip), so `TabsViewModel.TabActivated`
+  → `MainWindow.RevealTabInPanelA` → `RootsPanelViewModel.RevealSession/RevealRoot` raises `RevealRequested`
+  (also when the row is already selected), and the view runs `App/Controls/TreeReveal`: pure scroll
+  arithmetic on the rows' `PART_Header` (`ComputeOffset`: folder header and row both visible when they fit,
+  else the row wins; minimal scroll, no centring). The VM opens a collapsed project first (`ExpandAncestors`
+  for a session row, the root itself for a plain-terminal or file/git tab; `SelectFocusedSession` does the
+  same on a focus change), the view never takes focus, and nothing happens for a row the search filter hides.
+  A row not listed yet is revealed by the rebuild that lists it (`TreeRebuilt` carries the pending key); a
+  focused id that never gets a row (a plain terminal tab) is given up on after `MaxSelectFocusedAttempts`.
+  **A tick that changes nothing visible is a no-op.** `Rebuild` computes `ContentSignature(tree)` (row
+  identity/order, text, state, model/effort/context, project dir, cwd, waiting timestamp - but *not* the raw
+  duration/token counts, which nothing here displays and which change on every tick of a running session)
+  and returns after `UpdateCounters` when it equals the last applied one: no `Roots.Clear()`, no container
+  churn, no `TreeRebuilding/Rebuilt`, expansion/selection untouched. Only a visible change rebuilds, so a row
+  under a right-click is no longer destroyed by the next transcript write. Because identical ticks do not
+  rebuild, the retry budgets (`MaxSelectFocusedAttempts`) count *changing* snapshots.
 - **`ITelemetryFeed`** — production stack: `EventServerTelemetrySource` wraps the in-process `EventServer`
   and calls the *same* `RootsTreeBuilder.Build` the Kestrel `/roots/tree` route calls (guaranteeing the UI
   and the HTTP route render byte-identical trees, with zero HTTP round-trip for the UI). `TelemetryFeed`
   composes that with a `FileSystemWatcher` on the projects directory and the reused `Cli.DebounceCoalescer`
   (250ms), all marshaled onto the UI thread via `IUiThreadDispatcher` before hitting the coalescer.
+  The background build is single-flight, but a request that arrives while one is running sets a flag and
+  re-enters the *debounce coalescer* (`_coalescer.Signal()`), never `Publish()` directly — publishing
+  immediately made back-to-back builds with many active sessions (the 0.6.3 slowness). The background
+  build also fills `MonitorTreeBuilder.BuildCached(snapshot)` (a `ConditionalWeakTable` keyed on the
+  snapshot), which `RootsPanelViewModel.Rebuild` and `AgentGraphViewModel` read so the tree is built once
+  per snapshot, off the UI thread. `WpfUiThreadDispatcher.Post` marshals cross-thread work at
+  `DispatcherPriority.Input` so a rebuild cannot starve typing. `Program.PersistLiveRenames` returns early
+  when no session has a `status_line` name and caches the config overrides by file write time.
 - **`ISessionSelectionService` / `ISessionSelectionWriter`** — app-wide "focused session" hub backed by a
   private `WeakReferenceMessenger` (never the shared `.Default`). The read interface has no mutator; only
   the single writer obtained via `AcquireWriter()` can change focus — enforced structurally, not by
   convention.
-- **`IUiThreadDispatcher` / `IDebounceTimer`** — seams over `Dispatcher`/`DispatcherTimer` purely for
+- **`UiPerf`** (`App/Services/UiPerf.cs`) - always-on, near-free diagnostics that write only slow events to
+  `%USERPROFILE%\.claude\accel-perf.log` (1 MB, rotated to `.1`): every `WpfUiThreadDispatcher.Post` action
+  over 30 ms (labelled by the queuing method), every dispatcher operation over 60 ms (priority + delegate -
+  this includes WPF's own input/layout/render passes), UI-thread stalls seen from a 100 ms timer (>= 150 ms),
+  mouse input latency (OS timestamp vs arrival: time spent *before* the dispatcher), right-click -> menu opened,
+  the tab-switch handler and attach round trip, and the terminal page's own slow attaches / `xterm.write`
+  calls / long tasks (`terminal.js` `postPerf`, source `terminal-perf`). Inert until `UiPerf.Install` (called
+  by `Program.cs` for the real app only), written on a background channel thread. First thing to read for
+  any "it is slow" report.
+- **`IUiThreadDispatcher` / `IDebounceTimer`** - seams over `Dispatcher`/`DispatcherTimer` purely for
   headless testability, mirroring the pattern used by the legacy WinForms monitor this UI replaced.
 - **`IDirectoryWatcher`** (`App/Services/IDirectoryWatcher.cs`) — panel B's *disk* input, alongside
   telemetry: a re-targetable recursive `FileSystemWatcher` behind the same `DebounceCoalescer` +
@@ -502,6 +552,21 @@ and guarantees they don't outlive the app even across crashes.
     cleared by the matching `?…l`) and, in the alternate buffer, sends the wheel to the PTY as an SGR
     report (`ESC[<64|65;col;rowM`, one per ~100px) instead, so the app scrolls its own transcript.
     Ctrl+wheel is still zoom.
+  - **Copy.** `copytext.js` (`normalizeTerminalCopy`, pure and unit-tested through `node`) turns the selection
+    into clipboard text: NBSP → space, trailing spaces/tabs trimmed per line (Claude Code and ConPTY write
+    real padding spaces, which xterm faithfully keeps), trailing blank lines dropped, CRLF line ends;
+    rectangular (Alt-drag) selections only get their line ends normalised. `terminal.js` applies it in a
+    capture-phase `copy` listener, the context menu and Ctrl+Shift+C (always a copy, never `0x03`), and
+    clears the selection after copying. It also re-joins what Claude Code word-wrapped: Claude Code writes
+    every visual row itself (hard breaks, a 2-column margin on continuation rows), so a break is treated as
+    a soft wrap exactly when the next word would not have fitted on the previous row
+    (`len(prev) + 1 + len(first word) > columns - 4`; `columns` and the selection's start column come from
+    `terminal.js`). Only indented rows qualify and a row that starts a block (list item, heading, quote, table
+    row, fence) never joins; a row ending in `word-` joins without a space, as does a single token cut at the
+    edge. The `"● "`/`"> "` gutter is stripped from the rows that stay separate.
+  - **Geometry.** `refit()` (letterSpacing 0 → `fit()` → snap → send the resize) re-runs after WebGL
+    activation/context loss and on devicePixelRatio changes; `window.accelDiag()` dumps the live geometry
+    for diagnosing cell-width/last-column problems.
 - **Panel D file editor** (`FileViewerHost` in `MainWindow.xaml` + `ShowFileTabAsync` and friends in
   `MainWindow.xaml.cs`) — a single AvalonEdit `TextEditor` (`FileEditor`) layered over the terminal
   (Visibility-toggled, never tearing the PTY down) that renders `TabKind.File`/`TabKind.GitChange` tabs
@@ -635,15 +700,19 @@ and guarantees they don't outlive the app even across crashes.
     differ for a subfolder of a repo, and `.git` (where commits, pushes and checkouts show up) only
     exists at the root. Watcher-driven refreshes are skipped while `IsBusy`, since a command's own
     `.git` churn is exactly what the watcher is reporting.
-  - **The watcher-driven refresh reads git off the UI thread; the other two do not.** A refresh is
-    ~half a dozen `git` subprocesses (measured ~400ms on this repo), so `RefreshAsync` splits it into a
-    static `ReadDisplayState` (no ViewModel state touched — that is what makes it safe on a thread pool
-    thread) and a UI-thread `ApplyDisplayState`, with in-flight coalescing so ticks arriving mid-read
-    become one follow-up pass rather than another half-dozen processes each, and a captured-folder
-    staleness check so a focus change during a read is not overwritten by it. Focus changes and
-    commands stay synchronous: user-driven, rare, and expected to have landed on return. The *branch
-    list* is only re-read when the repo changed, a command ran, or the current branch is one the
-    ComboBox has never heard of — it was two more subprocesses per refresh otherwise.
+  - **Reading git is off the UI thread for the watcher, focus changes and folder expand/collapse; only the
+    panel's own commands stay synchronous.** A refresh is ~half a dozen `git` subprocesses (130-220 ms each
+    status on this machine, seconds on a big repo or under a virus scanner), so `RefreshAsync` splits it
+    into a static `ReadDisplayState` (no ViewModel state touched - that is what makes it safe on a thread
+    pool thread; it also resolves the watcher's repository root, another subprocess that used to run
+    inside the UI-thread apply) and a UI-thread `ApplyDisplayState`. A focus change used to run it inline,
+    i.e. every tab switch between projects froze the window; now `Rebuild` clears the lists, shows
+    "Reading git status: <folder>" and starts the read. In-flight coalescing turns calls arriving mid-read
+    into one follow-up pass, and a read whose target changed is dropped *and the loop re-reads* (the
+    queued pass), so a tab switch during a read ends on the latest folder. `_branchListRefreshQueued` carries
+    "re-read the branch list" across superseded passes; `LastRefreshTask` exposes the loop for tests
+    (`Settle(vm)`). The *branch list* is only re-read when the repo changed, a command ran, or the current
+    branch is one the ComboBox has never heard of.
 - **`McpSkillsPanelViewModel.cs`** (panel A, bottom third) — the focused session's MCP-tool and Skill
   hit counts as two flat lists (`ToolUsageRowViewModel`), most-used first. A third independent reader of
   the same `ITelemetryFeed`/`ISessionSelectionService` pair; all its data already rides on the pushed

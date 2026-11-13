@@ -138,6 +138,38 @@ public class TabsPlacementAndRestoreTests
     }
 
     [Fact]
+    public void TabActivated_IsRaisedForEveryKindOfTab_WithTheTabItself()
+    {
+        var (tabs, _) = Build();
+        var activated = new List<(string Id, bool HasPty)>();
+        tabs.TabActivated += tab => activated.Add((tab.TabId, tab.HasPtySession));
+
+        tabs.AddTab("session-1", "s", ProjectA, ProjectA);
+        tabs.AddShellTab("shell-1", "t", ProjectA, ProjectA);
+        tabs.AddFileTab(@"C:\projects\a\README.md");
+
+        Assert.Equal(
+            new[] { ("session-1", true), ("shell-1", true), (@"C:\projects\a\README.md", false) },
+            activated);
+    }
+
+    [Fact]
+    public void TabActivated_IsRaisedWhenSwitchingBackToAnEarlierTab_ButNotWhenNothingIsSelected()
+    {
+        var (tabs, _) = Build();
+        tabs.AddTab("a", "a", ProjectA, ProjectA);
+        tabs.AddTab("b", "b", ProjectB, ProjectB);
+        var activated = new List<string>();
+        tabs.TabActivated += tab => activated.Add(tab.TabId);
+
+        tabs.SelectTab("a");
+        Assert.Equal(new[] { "a" }, activated);
+
+        tabs.SelectedTab = null;
+        Assert.Equal(new[] { "a" }, activated);
+    }
+
+    [Fact]
     public void TabSetChanged_FiresOnAddRemoveMoveAndSelection()
     {
         var (tabs, _) = Build();
