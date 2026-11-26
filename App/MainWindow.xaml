@@ -476,10 +476,10 @@
                                 -->
                                 <Setter Property="ToolTip" Value="{Binding TooltipText}" />
                                 <!--
-                                    Double-click: attach (resume) a sleeping session, or confirm-then-stop
-                                    a running one - see MainWindow.SessionRow_MouseDoubleClick, which
-                                    no-ops (and leaves the TreeView's own expand/collapse toggle alone) for
-                                    every row Kind other than Session.
+                                    Double-click: focus the session's tab if it is open, otherwise resume
+                                    the session - see MainWindow.SessionRow_MouseDoubleClick (rule:
+                                    SessionRowGesture), which no-ops (and leaves the TreeView's own
+                                    expand/collapse toggle alone) for every row Kind other than Session.
                                 -->
                                 <EventSetter Event="MouseDoubleClick" Handler="SessionRow_MouseDoubleClick" />
                                 <Setter Property="ContextMenu">
@@ -765,14 +765,23 @@
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="Auto" />
                                         <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="Auto" />
                                         <ColumnDefinition Width="*" />
                                     </Grid.ColumnDefinitions>
+                                    <!--
+                                        Working / idle: a turning accent ring while the session's main agent or a
+                                        sub-agent is busy, a still hollow ring while it waits for the next prompt
+                                        (see ActivityIndicator). Collapsed, and takes no room, for every row with
+                                        nothing to show (roots, sleeping sessions, placeholders).
+                                    -->
+                                    <controls:ActivityIndicator Grid.Column="0" State="{Binding Activity, Mode=OneWay}" Margin="0,0,7,0" />
+
                                     <!--
                                         Model badge: letter-in-chip (O/S/H/F/?), coloured by model
                                         family - see ModelBadgeTable. Hidden for root/placeholder
                                         rows (ShowModelBadge=false), which have no model.
                                     -->
-                                    <Border Grid.Column="0" Width="18" Height="18" CornerRadius="4" Margin="0,0,8,0"
+                                    <Border Grid.Column="1" Width="18" Height="18" CornerRadius="4" Margin="0,0,8,0"
                                             Background="{Binding ModelBadge.ColorHex, Converter={StaticResource HexToBrush}}"
                                             Visibility="{Binding ShowModelBadge, Converter={StaticResource BoolToVis}}">
                                         <TextBlock Text="{Binding ModelBadge.Letter}" Foreground="White" FontSize="10" FontWeight="Bold"
@@ -783,7 +792,7 @@
                                         Effort bars: 1-4 stacked signal bars next to the model
                                         badge - see EffortBarLevel/EffortBarsControl.
                                     -->
-                                    <controls:EffortBarsControl Grid.Column="1" Level="{Binding EffortLevel}" Margin="0,0,10,0"
+                                    <controls:EffortBarsControl Grid.Column="2" Level="{Binding EffortLevel}" Margin="0,0,10,0"
                                                                  VerticalAlignment="Center"
                                                                  Visibility="{Binding ShowEffortBars, Converter={StaticResource BoolToVis}}" />
 
@@ -802,7 +811,7 @@
                                         Run right after the bold path (RootSummarySuffix is empty for
                                         every non-root row).
                                     -->
-                                    <TextBlock Grid.Column="2" TextTrimming="CharacterEllipsis"
+                                    <TextBlock Grid.Column="3" TextTrimming="CharacterEllipsis"
                                                Style="{StaticResource TreeRowNameTextStyle}">
                                         <Run Text="{Binding DisplayText, Mode=OneWay}" />
                                         <Run Text="{Binding RootSummarySuffix, Mode=OneWay}"
@@ -987,6 +996,12 @@
                                                 glyph/colour rather than one per kind, so a fifth kind
                                                 later only needs a new switch arm, not new XAML.
                                             -->
+                                            <!--
+                                                Working / idle for a session tab, mirroring panel A's row (see
+                                                ActivityIndicator). Collapsed, taking no room, for every other kind
+                                                of tab and for an ended session.
+                                            -->
+                                            <controls:ActivityIndicator State="{Binding ShownActivity, Mode=OneWay}" Margin="0,0,6,0" />
                                             <TextBlock Text="{Binding IconGlyph}" FontFamily="Segoe MDL2 Assets" FontSize="11"
                                                        Margin="0,0,6,0" VerticalAlignment="Center"
                                                        Foreground="{Binding IconColorHex, Converter={StaticResource HexToBrush}}"

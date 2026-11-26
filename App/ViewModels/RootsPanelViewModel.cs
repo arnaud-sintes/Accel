@@ -54,12 +54,22 @@ public sealed partial class RootsPanelNodeViewModel : ObservableObject
         long? consumedTokens = null,
         DateTime? waitingSinceUtc = null,
         bool isWaiting = false,
-        string cwd = "")
+        string cwd = "",
+        SessionActivity activity = SessionActivity.None)
     {
         Key = key ?? string.Empty;
         Text = text ?? string.Empty;
         Kind = kind;
         State = state;
+
+        // A running sub-agent is working by definition (a live agent row exists only while it is); a session's
+        // activity comes from the tree. Anything else has nothing to indicate.
+        Activity = kind switch
+        {
+            RootsPanelNodeKind.Agent => state == MonitorNodeState.Live ? SessionActivity.Working : SessionActivity.None,
+            RootsPanelNodeKind.Session => state == MonitorNodeState.Live ? activity : SessionActivity.None,
+            _ => SessionActivity.None,
+        };
         Columns = columns ?? MonitorRowColumns.Empty;
         ProjectDir = projectDir ?? string.Empty;
         Cwd = cwd ?? string.Empty;
@@ -122,8 +132,49 @@ public sealed partial class RootsPanelNodeViewModel : ObservableObject
     /// <summary>Live/Historical/Stale - P1-T4 turns this into glyphs/weights; P1-T2 only carries it.</summary>
     public MonitorNodeState State { get; }
 
-    /// <summary>The six-column projection (ID | Name | Type | Model | Effort | Context).</summary>
-    public MonitorRowColumns Columns { get; }
+    /// <summary>The six-column projection (ID | Name | Type | Model | Effort | Context) plus the duration and
+    /// token figures. Only the last two ever change in place (<see cref="UpdateVolatileFigures"/>).</summary>
+    public MonitorRowColumns Columns { get; private set; }
+
+    /// <summary>Working / idle for a running session; working for a running sub-agent; none otherwise. Part of the
+    /// panel's content signature, so a change rebuilds the rows.</summary>
+    public SessionActivity Activity { get; }
+
+    /// <summary>For <c>MainWindow.xaml</c>'s triggers: the session or agent is busy.</summary>
+    public bool IsWorking => Activity == SessionActivity.Working;
+
+    /// <summary>For <c>MainWindow.xaml</c>'s triggers: the session is waiting for its next prompt.</summary>
+    public bool IsIdle => Activity == SessionActivity.Idle;
+
+    /// <summary>Whether this row shows an activity indicator at all.</summary>
+    public bool HasActivity => Activity != SessionActivity.None;
+
+    /// <summary>
+    /// Refreshes the figures that change every tick of a running session - duration and consumed tokens - on an
+    /// existing row, without rebuilding it (see <see cref="RootsPanelViewModel.Rebuild"/>). They appear only in the
+    /// tooltip, which is why they can be patched in place while everything the row actually draws is compared by
+    /// signature.
+    /// </summary>
+    internal void UpdateVolatileFigures(MonitorRowColumns columns, long? durationMs, long? consumedTokens)
+    {
+        if (Columns == columns && DurationMs == durationMs && ConsumedTokens == consumedTokens)
+        {
+            return;
+        }
+
+        Columns = columns;
+        DurationMs = durationMs;
+        ConsumedTokens = consumedTokens;
+        OnPropertyChanged(nameof(DurationText));
+        OnPropertyChanged(nameof(TokensText));
+
+        string tooltip = BuildTooltipText();
+        if (!string.Equals(tooltip, TooltipText, StringComparison.Ordinal))
+        {
+            TooltipText = tooltip;
+            OnPropertyChanged(nameof(TooltipText));
+        }
+    }
 
     /// <summary>
     /// The transcript's project slug (empty for root/agent/placeholder rows) - carried through from
@@ -152,10 +203,10 @@ public sealed partial class RootsPanelNodeViewModel : ObservableObject
     /// <see cref="DurationText"/>/<see cref="TokensText"/> - null for rows with no data (root/
     /// placeholder rows, or a session/agent whose start time couldn't be resolved), distinct
     /// from a real <c>0</c>, mirroring <see cref="MonitorSessionNode"/>/<see cref="MonitorAgentNode"/>.</summary>
-    public long? DurationMs { get; }
+    public long? DurationMs { get; private set; }
 
     /// <summary>See <see cref="DurationMs"/>.</summary>
-    public long? ConsumedTokens { get; }
+    public long? ConsumedTokens { get; private set; }
 
     /// <summary>The already-formatted duration string (e.g. "7m 04s", or "—" when unknown) - binding
     /// symmetry with the existing <see cref="Columns"/>-derived surface.</summary>
@@ -255,7 +306,7 @@ public sealed partial class RootsPanelNodeViewModel : ObservableObject
     /// available on <see cref="Columns"/> (e.g. "Session 5604b0d8… — Sonnet 5 — effort=high — 12.3%
     /// of 1M (assumed)") - the detail <see cref="DisplayText"/> deliberately no longer bakes into the
     /// row's own label.</summary>
-    public string TooltipText { get; }
+    public string TooltipText { get; private set; }
 
     public ObservableCollection<RootsPanelNodeViewModel> Children { get; } = new();
 
@@ -283,8 +334,16 @@ public sealed partial class RootsPanelNodeViewModel : ObservableObject
             _ => "Row",
         };
 
+        // The working/idle state is spoken, not only drawn (the indicator is colour + shape + motion; this is the text).
+        string activity = Activity switch
+        {
+            SessionActivity.Working => " Working.",
+            SessionActivity.Idle => " Idle.",
+            _ => string.Empty,
+        };
+
         return Kind is RootsPanelNodeKind.Session or RootsPanelNodeKind.Agent
-            ? $"{kindLabel}: {Text}. {VisualState.AutomationName}."
+            ? $"{kindLabel}: {Text}. {VisualState.AutomationName}.{activity}"
             : $"{kindLabel}: {Text}.";
     }
 
@@ -317,6 +376,16 @@ public sealed partial class RootsPanelNodeViewModel : ObservableObject
         if (!string.IsNullOrEmpty(Columns.Tokens) && Columns.Tokens != noData)
         {
             tooltip += $" — {Columns.Tokens}";
+        }
+
+        // Appended only for a row that has an activity, so every other row's tooltip is byte-for-byte unchanged.
+        if (Activity == SessionActivity.Working)
+        {
+            tooltip += " — working";
+        }
+        else if (Activity == SessionActivity.Idle)
+        {
+            tooltip += " — idle";
         }
 
         return tooltip;
@@ -958,6 +1027,13 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
         }
     }
 
+    /// <summary>The activity panel A currently shows for the session <paramref name="sessionId"/> (case-insensitive),
+    /// or <see cref="SessionActivity.None"/> when there is no such running session row. What panel C's tabs mirror.</summary>
+    public SessionActivity ActivityOfSession(string? sessionId) =>
+        FindChain(sessionId) is { Count: > 0 } chain && chain[^1].Kind == RootsPanelNodeKind.Session
+            ? chain[^1].Activity
+            : SessionActivity.None;
+
     /// <summary>The rows from a top-level row down to the node keyed <paramref name="key"/> (inclusive,
     /// case-insensitive, any kind), or null if there is no such node. The view walks it to find the realised
     /// containers.</summary>
@@ -1121,6 +1197,9 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
         string signature = ContentSignature(tree);
         if (_haveAppliedSignature && string.Equals(signature, _lastAppliedSignature, StringComparison.Ordinal))
         {
+            // The rows are right. What the tooltips quote (duration, tokens) is not part of the signature, so
+            // those figures are patched into the existing rows instead.
+            PatchVolatileFigures(tree);
             UpdateCounters(snapshot);
             return;
         }
@@ -1220,6 +1299,50 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
     private string? _lastAppliedSignature;
     private bool _haveAppliedSignature;
 
+    /// <summary>Copies each session's and agent's current duration/token figures from <paramref name="tree"/> onto
+    /// the existing rows with the same key. Only called when the tree has the same rows as the one on screen, so
+    /// every key is expected to be there; a key that is not is simply left alone.</summary>
+    private void PatchVolatileFigures(MonitorTree tree)
+    {
+        var figures = new Dictionary<string, (MonitorRowColumns Columns, long? DurationMs, long? ConsumedTokens)>(StringComparer.Ordinal);
+
+        void Collect(MonitorRootNode root)
+        {
+            foreach (var session in root.Sessions)
+            {
+                figures[session.SessionId] = (session.Columns, session.DurationMs, session.ConsumedTokens);
+                foreach (var agent in session.Agents)
+                {
+                    figures[agent.AgentId] = (agent.Columns, agent.DurationMs, agent.ConsumedTokens);
+                }
+            }
+
+            foreach (var agent in root.OrphanAgents)
+            {
+                figures[agent.AgentId] = (agent.Columns, agent.DurationMs, agent.ConsumedTokens);
+            }
+        }
+
+        foreach (var root in tree.Roots)
+        {
+            Collect(root);
+        }
+
+        if (tree.Unattributed is not null)
+        {
+            Collect(tree.Unattributed);
+        }
+
+        foreach (var node in EnumerateAll(Roots))
+        {
+            if (node.Kind is RootsPanelNodeKind.Session or RootsPanelNodeKind.Agent
+                && figures.TryGetValue(node.Key, out var f))
+            {
+                node.UpdateVolatileFigures(f.Columns, f.DurationMs, f.ConsumedTokens);
+            }
+        }
+    }
+
     /// <summary>
     /// Everything about a tree that the panel renders or acts on, as one string: row identity and order, the
     /// label and tooltip text, the state glyph, the model/effort/context figures, and what "Remove" / "Resume" /
@@ -1250,7 +1373,8 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
             foreach (var s in r.Sessions)
             {
                 sb.Append('s').Append('\u001f').Append(s.SessionId).Append('\u001f').Append(s.Text).Append('\u001f').Append((int)s.State).Append('\u001f')
-                  .Append(s.ProjectDir).Append('\u001f').Append(s.Cwd).Append('\u001f').Append(s.WaitingSinceUtc?.Ticks).Append('\u001f');
+                  .Append(s.ProjectDir).Append('\u001f').Append(s.Cwd).Append('\u001f').Append(s.WaitingSinceUtc?.Ticks).Append('\u001f')
+                  .Append((int)s.Activity).Append('\u001f');
                 Columns(sb, s.Columns);
                 sb.Append('\u001e');
                 foreach (var a in s.Agents)
@@ -1422,7 +1546,7 @@ public sealed partial class RootsPanelViewModel : ObservableObject, IDisposable
         var node = new RootsPanelNodeViewModel(
             session.SessionId, session.Text, RootsPanelNodeKind.Session, session.State, session.Columns, this,
             projectDir: session.ProjectDir, durationMs: session.DurationMs, consumedTokens: session.ConsumedTokens,
-            waitingSinceUtc: session.WaitingSinceUtc, isWaiting: isWaiting, cwd: session.Cwd);
+            waitingSinceUtc: session.WaitingSinceUtc, isWaiting: isWaiting, cwd: session.Cwd, activity: session.Activity);
 
         foreach (var agent in session.Agents)
         {

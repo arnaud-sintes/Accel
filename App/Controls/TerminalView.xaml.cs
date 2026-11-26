@@ -80,6 +80,11 @@ public partial class TerminalView : UserControl, IDisposable
     /// </summary>
     public Task Initialization => initializationTcs.Task;
 
+    /// <summary>Raised (on the UI thread) when the user pressed Ctrl+Tab (<c>true</c>) or Ctrl+Shift+Tab
+    /// (<c>false</c>) while the terminal page had keyboard focus - the page reports it because WPF never sees keys
+    /// delivered to a WebView2. The window turns it into a tab switch.</summary>
+    public event Action<bool>? TabCycleRequested;
+
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
         Loaded -= OnLoaded;
@@ -234,6 +239,26 @@ public partial class TerminalView : UserControl, IDisposable
                         var level = root.TryGetProperty("level", out var levelProp) ? levelProp.GetString() : "log";
                         var text = root.TryGetProperty("message", out var messageProp) ? messageProp.GetString() : null;
                         Console.WriteLine($"[TerminalRenderer:{level}] {text}");
+                        break;
+                    }
+
+                    // Ctrl+Tab / Ctrl+Shift+Tab inside the page: xterm would send a plain Tab to the child, and WPF
+                    // never sees keys that go to a WebView2, so the page swallows the gesture and reports it here.
+                    case "terminal-key":
+                    {
+                        if (root.TryGetProperty("action", out var actionProp))
+                        {
+                            switch (actionProp.GetString())
+                            {
+                                case "next-tab":
+                                    TabCycleRequested?.Invoke(true);
+                                    break;
+                                case "previous-tab":
+                                    TabCycleRequested?.Invoke(false);
+                                    break;
+                            }
+                        }
+
                         break;
                     }
 

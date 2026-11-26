@@ -60,7 +60,9 @@ public sealed record MonitorSessionNode(string SessionId, string Text, MonitorNo
     // tracking for how this becomes the panel-A row highlight/window-flash, cleared once the
     // user focuses this session's tab rather than when this timestamp itself changes.
     DateTime? WaitingSinceUtc = null,
-    string Cwd = "");
+    string Cwd = "",
+    // Working / idle for a running session, None otherwise - see SessionActivityResolver.
+    SessionActivity Activity = SessionActivity.None);
 
 /// <summary>One rendered root-folder node. <see cref="OrphanAgents"/> is only ever non-empty for
 /// the synthetic "(unattributed)" root - a normal configured root's agents are always nested
@@ -165,7 +167,8 @@ public static class MonitorTreeBuilder
 
         return new MonitorSessionNode(
             session.SessionId ?? string.Empty, text, state, agents, columns, session.ProjectDir ?? string.Empty,
-            session.DurationMs, session.ConsumedTokens, session.WaitingSinceUtc, session.Cwd ?? string.Empty);
+            session.DurationMs, session.ConsumedTokens, session.WaitingSinceUtc, session.Cwd ?? string.Empty,
+            SessionActivityResolver.FromWire(session.Activity));
     }
 
     private static MonitorAgentNode BuildAgentNode(AgentTreeDto agent)

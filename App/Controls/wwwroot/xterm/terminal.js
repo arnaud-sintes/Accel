@@ -229,6 +229,25 @@
     // ("\x1b\r") sequence to tell a soft newline apart from a submit, so intercept Shift+Enter here
     // and send that instead, before xterm's own default handling emits a plain "\r" for it too.
     term.attachCustomKeyEventHandler(function (event) {
+      // Ctrl+Tab / Ctrl+Shift+Tab switch Accel's tabs, not the terminal's: xterm would send a plain Tab (0x09)
+      // for either, which Claude Code reads as autocomplete. WPF never sees keys that land in this page, so the
+      // gesture is reported to the host, which owns the tab strip. Every event type of the combination is
+      // swallowed (so no stray keypress/keyup reaches xterm), but only the first keydown acts - a held key would
+      // otherwise queue a re-attach per repeat.
+      if (event.ctrlKey && !event.altKey && event.key === "Tab") {
+        event.preventDefault();
+        if (event.type === "keydown" && !event.repeat) {
+          try {
+            if (window.chrome && window.chrome.webview) {
+              window.chrome.webview.postMessage({ source: "terminal-key", action: event.shiftKey ? "previous-tab" : "next-tab" });
+            }
+          } catch (bridgeError) {
+            // Best-effort - outside a WebView2 host there is no tab strip to switch.
+          }
+        }
+        return false;
+      }
+
       // Returning false only tells xterm's OWN keydown handler to skip its default terminal-sequence
       // processing for this key - it does NOT call event.preventDefault(), so without doing that
       // ourselves the browser's native default action (e.g. inserting a real newline / firing its

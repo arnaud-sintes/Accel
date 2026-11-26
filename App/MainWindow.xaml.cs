@@ -302,6 +302,10 @@ public partial class MainWindow : Window
             // DetachTerminalAsync remarks).
             tabs.DetachTerminalAsync = () => Terminal.DetachPtyAsync();
 
+            // Ctrl+Tab / Ctrl+Shift+Tab pressed while the terminal page has keyboard focus (WPF never sees
+            // those keys; Window_PreviewKeyDown handles the same gesture everywhere else).
+            Terminal.TabCycleRequested += forward => tabs.CycleTab(forward);
+
             // Panel D's file-viewer hooks (a file/git-change tab's TabId is the file's own full path - see
             // TabViewModel.ForFile/ForGitChange/ForGitDiff). The pty stays attached underneath rather
             // than being detached and reattached on every flip between a file/git tab and a session
@@ -397,6 +401,15 @@ public partial class MainWindow : Window
             rootsPanel.TreeRebuilding += OnRootsTreeRebuilding;
             rootsPanel.TreeRebuilt += OnRootsTreeRebuilt;
             rootsPanel.RevealRequested += OnRootsRevealRequested;
+
+            // Panel C's tabs show the same working/idle state as panel A's rows. A change of activity is a
+            // visible change of the tree, so it always arrives as a rebuild; a tab that appears later (a new or
+            // restored session) is covered by the tab-set event.
+            if (tabs is not null)
+            {
+                rootsPanel.TreeRebuilt += _ => ApplyTabActivity();
+                tabs.TabSetChanged += ApplyTabActivity;
+            }
         }
 
         Closed += (_, _) =>
@@ -1146,6 +1159,24 @@ public partial class MainWindow : Window
             placeNextToProject);
     }
 
+    /// <summary>Copies panel A's working/idle state for each session onto its tab (see
+    /// <see cref="TabViewModel.Activity"/>). A tab whose session has no running row in panel A yet shows none.</summary>
+    private void ApplyTabActivity()
+    {
+        if (Tabs is null || RootsPanel is null)
+        {
+            return;
+        }
+
+        foreach (var tab in Tabs.Tabs)
+        {
+            if (tab.Kind == TabKind.Session)
+            {
+                tab.Activity = RootsPanel.ActivityOfSession(tab.TabId);
+            }
+        }
+    }
+
     /// <summary>The project a folder belongs to for tab placement: the configured root that contains it,
     /// or the folder itself when no root does.</summary>
     private string? ProjectPathFor(string? workingDirectory) =>
@@ -1707,7 +1738,7 @@ public partial class MainWindow : Window
                     SavedTabKind.Shell when Directory.Exists(tab.WorkingDirectory) =>
                         CreateShellSessionCore(tab.WorkingDirectory!, placeNextToProject: false, silent: true),
                     SavedTabKind.File when File.Exists(tab.Id) =>
-                        Tabs?.AddFileTab(tab.Id),
+                        Tabs?.AddFileTab(tab.Id, RootsPanel?.RootPathContaining(tab.Id), placeNextToProject: false),
                     _ => null,
                 };
             }
@@ -1837,7 +1868,8 @@ public partial class MainWindow : Window
             return;
         }
 
-        Tabs?.AddFileTab(node.Key);
+        // Opens beside the tabs of the project the file belongs to (the root that contains it), not at the end.
+        Tabs?.AddFileTab(node.Key, RootsPanel?.RootPathContaining(node.Key));
     }
 
     /// <summary>
@@ -3126,14 +3158,29 @@ public partial class MainWindow : Window
     /// </summary>
     private void Window_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
     {
+        var modifiers = System.Windows.Input.Keyboard.Modifiers;
+        bool control = (modifiers & System.Windows.Input.ModifierKeys.Control) != 0;
+        bool shift = (modifiers & System.Windows.Input.ModifierKeys.Shift) != 0;
+
+        // Ctrl+Tab / Ctrl+Shift+Tab cycle the tab strip from anywhere in the window (the terminal page, which
+        // WPF never sees keys for, reports the same gesture through TerminalView.TabCycleRequested). Handled
+        // before the find-bar logic below, which needs a document tab to be showing. Key repeat is ignored: each
+        // switch re-attaches the terminal, so a held key would queue a pile of them.
+        if (e.Key == System.Windows.Input.Key.Tab && control && (modifiers & System.Windows.Input.ModifierKeys.Alt) == 0)
+        {
+            if (!e.IsRepeat)
+            {
+                Tabs?.CycleTab(forward: !shift);
+            }
+
+            e.Handled = true;
+            return;
+        }
+
         if (ActiveDocumentSearchBar() is not { } bar)
         {
             return;
         }
-
-        var modifiers = System.Windows.Input.Keyboard.Modifiers;
-        bool control = (modifiers & System.Windows.Input.ModifierKeys.Control) != 0;
-        bool shift = (modifiers & System.Windows.Input.ModifierKeys.Shift) != 0;
 
         switch (e.Key)
         {
@@ -3556,11 +3603,12 @@ public partial class MainWindow : Window
     private static SolidColorBrush GetSyntaxBrush(string colorHex) => SyntaxBrushCache.Get(colorHex);
 
     /// <summary>
-    /// Panel A's session-row double-click gesture: a sleeping (not <see cref="RootsPanelNodeViewModel.IsRunning"/>)
-    /// session attaches - i.e. resumes in place, exactly <see cref="ResumeSession_Click"/>'s action, including
-    /// its "already open? select instead" guard - while an active session stops, exactly
-    /// <see cref="TabItem_MouseDoubleClick"/>'s confirm-then-stop gesture on the strip. Root/Agent/Placeholder
-    /// rows fall through untouched so the TreeView's own default double-click-to-expand keeps working there.
+    /// Panel A's session-row double-click gesture (the rule is <see cref="SessionRowGesture"/>): a session that
+    /// already has a live tab in Accel is brought to the front; one that is not open resumes in place, exactly
+    /// <see cref="ResumeSession_Click"/>'s action (a tab whose process ended is resumed into). It never stops a
+    /// session - that is <see cref="TabItem_MouseDoubleClick"/>'s confirm-then-stop gesture on the tab strip.
+    /// Root/Agent/Placeholder rows fall through untouched so the TreeView's own default
+    /// double-click-to-expand keeps working there.
     /// </summary>
     private void SessionRow_MouseDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
@@ -3571,30 +3619,17 @@ public partial class MainWindow : Window
 
         e.Handled = true;
 
-        if (!node.IsRunning)
+        var tab = Tabs?.Tabs.FirstOrDefault(t => string.Equals(t.TabId, node.Key, StringComparison.OrdinalIgnoreCase));
+        switch (SessionRowGesture.OnDoubleClick(hasLiveTab: tab is { HasEnded: false }, sessionIsRunning: node.IsRunning))
         {
-            ResumeSessionCore(node, fork: false);
-            return;
+            case SessionRowAction.FocusTab:
+                Tabs?.SelectTab(tab!.TabId);
+                break;
+
+            case SessionRowAction.Resume:
+                ResumeSessionCore(node, fork: false);
+                break;
         }
-
-        var tab = Tabs?.Tabs.FirstOrDefault(t => t.TabId == node.Key);
-        if (tab is null || tab.HasEnded)
-        {
-            return;
-        }
-
-        bool confirmedStop = AccelMessageDialog.ShowConfirm(
-            this,
-            $"Stop \"{tab.Title}\"? The session's process will be terminated. The tab stays open so you can still see its output.",
-            "Stop session",
-            AccelDialogIcon.Warning);
-
-        if (!confirmedStop)
-        {
-            return;
-        }
-
-        Tabs?.StopTabCommand.Execute(tab);
     }
 
     /// <summary>

@@ -354,19 +354,53 @@ public sealed partial class TabViewModel : ObservableObject
         _ => "Editable, saved.",
     };
 
+    /// <summary>
+    /// Whether the session behind this tab is working (the main agent or a sub-agent is busy) or idle (waiting for
+    /// the next prompt). Pushed in by <c>MainWindow</c> from panel A's tree, which is where Accel knows it; only a
+    /// <see cref="TabKind.Session"/> tab whose process is still running ever shows one.
+    /// </summary>
+    [ObservableProperty]
+    private Accel.Metrics.SessionActivity _activity;
+
+    /// <summary>Whether the tab shows an activity indicator at all.</summary>
+    public bool ShowsActivity => Kind == TabKind.Session && !HasEnded && Activity != Accel.Metrics.SessionActivity.None;
+
+    /// <summary>What the tab's indicator shows: <see cref="Activity"/> for a running session tab, none for every
+    /// other tab and for an ended session.</summary>
+    public Accel.Metrics.SessionActivity ShownActivity => ShowsActivity ? Activity : Accel.Metrics.SessionActivity.None;
+
+    /// <summary>For XAML triggers: shown as working.</summary>
+    public bool IsWorking => ShowsActivity && Activity == Accel.Metrics.SessionActivity.Working;
+
+    /// <summary>For XAML triggers: shown as idle.</summary>
+    public bool IsIdle => ShowsActivity && Activity == Accel.Metrics.SessionActivity.Idle;
+
+    private string ActivitySuffix => IsWorking ? " Working." : IsIdle ? " Idle." : string.Empty;
+
     /// <summary>Accessible description of the whole tab, for <c>AutomationProperties.Name</c>.</summary>
     public string AutomationDescription => Kind switch
     {
         TabKind.File => $"File tab: {Title}. {EditStateSuffix}",
         TabKind.GitChange => $"Git change tab: {Title}. {EditStateSuffix}",
         TabKind.Shell => HasEnded ? $"Terminal tab: {Title}. Ended {StatusSuffix}." : $"Terminal tab: {Title}. Running.",
-        _ => HasEnded ? $"Session tab: {Title}. Ended {StatusSuffix}." : $"Session tab: {Title}. Running.",
+        _ => HasEnded ? $"Session tab: {Title}. Ended {StatusSuffix}." : $"Session tab: {Title}. Running.{ActivitySuffix}",
     };
+
+    partial void OnActivityChanged(Accel.Metrics.SessionActivity value) => NotifyActivityChanged();
+
+    private void NotifyActivityChanged()
+    {
+        OnPropertyChanged(nameof(ShowsActivity));
+        OnPropertyChanged(nameof(ShownActivity));
+        OnPropertyChanged(nameof(IsWorking));
+        OnPropertyChanged(nameof(IsIdle));
+        OnPropertyChanged(nameof(AutomationDescription));
+    }
 
     partial void OnHasEndedChanged(bool value)
     {
         OnPropertyChanged(nameof(StatusSuffix));
-        OnPropertyChanged(nameof(AutomationDescription));
+        NotifyActivityChanged(); // an ended tab shows no indicator
     }
 
     partial void OnExitCodeChanged(int? value)
@@ -805,8 +839,43 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
     /// path that already has a tab, exactly like <see cref="AddTab"/> is for a tabId - re-opening the
     /// same file selects its existing tab instead of duplicating it.
     /// </summary>
-    public TabViewModel AddFileTab(string filePath) =>
-        AddOrSelectReadOnlyTab(filePath, () => TabViewModel.ForFile(filePath));
+    /// <param name="projectPath">The project (configured root) the file belongs to, when known. A new file tab
+    /// is inserted right after the rightmost tab of that project - its session/terminal tabs and the file tabs
+    /// opened before it - so a file opens beside the work it belongs to instead of at the far end of the strip.
+    /// With no project, or none of its tabs open, it appends.</param>
+    /// <param name="placeNextToProject">False when restoring a saved tab set, so the saved order comes back
+    /// verbatim.</param>
+    public TabViewModel AddFileTab(string filePath, string? projectPath = null, bool placeNextToProject = true) =>
+        AddOrSelectReadOnlyTab(
+            filePath,
+            () =>
+            {
+                var tab = TabViewModel.ForFile(filePath);
+                tab.ProjectPath = projectPath;
+                return tab;
+            },
+            placeNextToProject ? () => IndexAfterRelatedTabs(projectPath) : null);
+
+    /// <summary>The strip index just right of the rightmost tab of <paramref name="projectPath"/> of any kind
+    /// that carries one (session, terminal, file); the end of the strip when there is none.</summary>
+    private int IndexAfterRelatedTabs(string? projectPath)
+    {
+        if (string.IsNullOrEmpty(projectPath))
+        {
+            return Tabs.Count;
+        }
+
+        int last = -1;
+        for (int i = 0; i < Tabs.Count; i++)
+        {
+            if (ProjectPaths.AreSame(Tabs[i].ProjectPath, projectPath))
+            {
+                last = i;
+            }
+        }
+
+        return last < 0 ? Tabs.Count : last + 1;
+    }
 
     /// <summary>
     /// Opens (or, if already open, selects) a tab for a new/removed file from panel B's GIT section
@@ -828,7 +897,7 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
         string filePath, string title, string gitRepoRootPath, string gitRelativePath, GitDiffSide oldSide, GitDiffSide newSide) =>
         AddOrSelectReadOnlyTab(filePath, () => TabViewModel.ForGitDiff(filePath, title, gitRepoRootPath, gitRelativePath, oldSide, newSide));
 
-    private TabViewModel AddOrSelectReadOnlyTab(string tabId, Func<TabViewModel> factory)
+    private TabViewModel AddOrSelectReadOnlyTab(string tabId, Func<TabViewModel> factory, Func<int>? insertionIndex = null)
     {
         ArgumentException.ThrowIfNullOrEmpty(tabId);
 
@@ -840,10 +909,31 @@ public sealed partial class TabsViewModel : ObservableObject, IDisposable
         }
 
         var tab = factory();
-        Tabs.Add(tab);
+        Tabs.Insert(insertionIndex?.Invoke() ?? Tabs.Count, tab);
         OnPropertyChanged(nameof(IsEmpty));
         SelectedTab = tab;
         return tab;
+    }
+
+    /// <summary>
+    /// Ctrl+Tab / Ctrl+Shift+Tab: selects the next (or previous) tab in strip order, wrapping around at the ends -
+    /// every kind of tab, as the strip shows them. With nothing selected it starts at the first (or last) tab; with
+    /// zero or one tab there is nothing to switch to.
+    /// </summary>
+    public void CycleTab(bool forward)
+    {
+        int count = Tabs.Count;
+        if (count < 2)
+        {
+            return;
+        }
+
+        int current = SelectedTab is null ? -1 : Tabs.IndexOf(SelectedTab);
+        int next = current < 0
+            ? (forward ? 0 : count - 1)
+            : (current + (forward ? 1 : -1) + count) % count;
+
+        SelectedTab = Tabs[next];
     }
 
     /// <summary>Selects the tab for <paramref name="tabId"/> if there is one; a no-op otherwise (a stale

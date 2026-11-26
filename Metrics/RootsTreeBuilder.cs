@@ -62,7 +62,7 @@ public sealed class RootsTreeBuilder
     private static readonly IReadOnlyDictionary<string, SessionOverride> EmptySessionOverrides =
         new Dictionary<string, SessionOverride>();
 
-    private sealed record TailCacheEntry(long Length, DateTime LastWriteUtc, TranscriptAssistantEntry? Entry, string? AiTitle);
+    private sealed record TailCacheEntry(long Length, DateTime LastWriteUtc, TranscriptTailSummary Summary);
 
     /// <summary>
     /// Builds the full tree document for the given configured <paramref name="roots"/> (in the
@@ -230,6 +230,9 @@ public sealed class RootsTreeBuilder
                 sessions[i] = session with
                 {
                     Agents = agents.Select(a => ToAgentDto(a, subagentsDir, nowUtc)).OrderByDescending(a => a.AsOf).ToArray(),
+
+                    // A live sub-agent is the session in work, whatever the main transcript says.
+                    Activity = SessionActivityResolver.ToWire(SessionActivity.Working),
                 };
             }
         }
@@ -394,6 +397,16 @@ public sealed class RootsTreeBuilder
             skillUsage = Array.Empty<ToolHitCountDto>();
         }
 
+        // Working / idle, for a running session only (sub-agents are folded in by AttachAgents, which is where
+        // they become known). Reads the same cached tail the name and historical metrics come from.
+        SessionActivity activity = SessionActivity.None;
+        if (isLive)
+        {
+            var tailSummary = GetTailSummaryCached(filePath, out DateTime transcriptLastWriteUtc);
+            activity = SessionActivityResolver.Resolve(
+                isLive, tailSummary.Turn, snapshot?.WaitingSinceUtc, transcriptLastWriteUtc, hasLiveAgents: false);
+        }
+
         return new SessionTreeDto(
             SessionId: sessionId,
             Name: name,
@@ -420,7 +433,8 @@ public sealed class RootsTreeBuilder
             ConsumedTokensIsContextOnly: true,
             McpUsage: mcpUsage,
             SkillUsage: skillUsage,
-            WaitingSinceUtc: snapshot?.WaitingSinceUtc);
+            WaitingSinceUtc: snapshot?.WaitingSinceUtc,
+            Activity: SessionActivityResolver.ToWire(activity));
     }
 
     // Sorted by count descending, then name ascending, per project-ui.md's display convention
@@ -578,13 +592,21 @@ public sealed class RootsTreeBuilder
     /// sharing the exact same (length, mtime)-keyed <see cref="_tailCache"/> entry as the
     /// assistant-tail read - per P1-T4b this must not add a second, separate caching mechanism.
     /// </summary>
-    private string? GetAiTitleCached(string path)
-    {
-        _ = GetTailEntryCached(path, out _, out string? aiTitle);
-        return aiTitle;
-    }
+    private string? GetAiTitleCached(string path) => GetTailSummaryCached(path, out _).AiTitle;
 
     private TranscriptAssistantEntry? GetTailEntryCached(string path, out DateTime lastWriteTimeUtc, out string? aiTitle)
+    {
+        var summary = GetTailSummaryCached(path, out lastWriteTimeUtc);
+        aiTitle = summary.AiTitle;
+        return summary.LastAssistant;
+    }
+
+    /// <summary>
+    /// The one place a transcript's tail is read: a single read and a single JSON pass per line produce the
+    /// assistant entry, the ai-title and the turn state together, cached on (length, mtime) so an unchanged file
+    /// costs a stat. (This used to be two separate reads, one per question.)
+    /// </summary>
+    private TranscriptTailSummary GetTailSummaryCached(string path, out DateTime lastWriteTimeUtc)
     {
         long length;
         DateTime mtime;
@@ -594,8 +616,7 @@ public sealed class RootsTreeBuilder
             if (!fi.Exists)
             {
                 lastWriteTimeUtc = default;
-                aiTitle = null;
-                return null;
+                return TranscriptTailSummary.Empty;
             }
 
             length = fi.Length;
@@ -604,23 +625,19 @@ public sealed class RootsTreeBuilder
         catch
         {
             lastWriteTimeUtc = default;
-            aiTitle = null;
-            return null;
+            return TranscriptTailSummary.Empty;
         }
 
         lastWriteTimeUtc = mtime;
 
         if (_tailCache.TryGetValue(path, out var cached) && cached.Length == length && cached.LastWriteUtc == mtime)
         {
-            aiTitle = cached.AiTitle;
-            return cached.Entry;
+            return cached.Summary;
         }
 
-        TranscriptAssistantEntry? entry = TranscriptReader.TryReadLastAssistantEntry(path);
-        string? title = TranscriptReader.TryReadLastAiTitle(path);
-        _tailCache[path] = new TailCacheEntry(length, mtime, entry, title);
-        aiTitle = title;
-        return entry;
+        var summary = TranscriptReader.ReadTailSummary(path);
+        _tailCache[path] = new TailCacheEntry(length, mtime, summary);
+        return summary;
     }
 
     private static double? ComputePercentage(long? usedTokens, long? windowSize)
@@ -793,7 +810,10 @@ public sealed record SessionTreeDto(
     [property: JsonPropertyName("consumed_tokens_is_context_only")] bool ConsumedTokensIsContextOnly = false,
     [property: JsonPropertyName("mcp_usage")] ToolHitCountDto[]? McpUsage = null,
     [property: JsonPropertyName("skill_usage")] ToolHitCountDto[]? SkillUsage = null,
-    [property: JsonPropertyName("waiting_since_utc")] DateTime? WaitingSinceUtc = null);
+    [property: JsonPropertyName("waiting_since_utc")] DateTime? WaitingSinceUtc = null,
+    // "working" while the main agent or a sub-agent is busy, "idle" while the session waits for the next
+    // prompt, null for a session that is not running. See SessionActivityResolver.
+    [property: JsonPropertyName("activity")] string? Activity = null);
 
 /// <summary>One MCP tool or Skill's hit count for a live session - see
 /// <see cref="SessionState.GetToolUsage"/>.</summary>

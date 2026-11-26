@@ -457,6 +457,22 @@ and guarantees they don't outlive the app even across crashes.
   id app-wide via `ISessionSelectionWriter` obtained once from `SessionSelectionService.AcquireWriter()`
   (a second call throws). Polls the focused tab's `ClaudeSessionStatusFile` (default 1s) to catch
   in-session `/clear`/`/compact` session-id drift.
+  **Where a new tab lands:** a terminal goes right of the rightmost session/terminal tab of its project
+  (`IndexAfterProjectTabs`, file tabs do not anchor it); a file opened from the FILES panel goes right of the
+  rightmost tab of *its* project of any kind that carries one - sessions, terminals and the file tabs opened
+  before it, so files keep their opening order (`AddFileTab(path, projectPath)` -> `IndexAfterRelatedTabs`; the
+  project is the configured root containing the file, `RootsPanelViewModel.RootPathContaining`). With no
+  project or none of its tabs open it appends, and restoring a saved set passes `placeNextToProject: false` so
+  the saved order comes back verbatim. File tabs therefore carry `ProjectPath`.
+  **Panel A session double-click** (`SessionRowGesture`): a session with a live tab in Accel selects that tab;
+  one that is not open (or whose tab's process ended) is resumed (`StartResumedSession`); one running outside
+  Accel is left alone. It never stops a session - stop is the tab strip's own double-click.
+  **Ctrl+Tab / Ctrl+Shift+Tab** (`TabsViewModel.CycleTab(forward)`): next/previous tab in strip order, every
+  kind of tab, wrapping. Two entry points because keys landing in the WebView2 never reach WPF:
+  `MainWindow.Window_PreviewKeyDown` (everywhere else; ignores key repeat, each switch re-attaches the terminal)
+  and `terminal.js`'s custom key handler, which swallows the combination (xterm would send a plain Tab to the
+  child) and posts `{source: "terminal-key", action: "next-tab" | "previous-tab"}` -> `TerminalView.TabCycleRequested`.
+  The markdown preview is a second WebView2 with no such bridge, so the shortcut does not work while it has focus.
 - **`RootsPanelViewModel.cs`** (panel A) — owns the folder/session/agent tree, fed exclusively by
   `ITelemetryFeed` (never touches `SessionState.Changed`, a `FileSystemWatcher`, or HTTP directly).
   Rebuild-and-diff: captures expanded keys/selection before clearing, re-expands via
@@ -479,6 +495,27 @@ and guarantees they don't outlive the app even across crashes.
   churn, no `TreeRebuilding/Rebuilt`, expansion/selection untouched. Only a visible change rebuilds, so a row
   under a right-click is no longer destroyed by the next transcript write. Because identical ticks do not
   rebuild, the retry budgets (`MaxSelectFocusedAttempts`) count *changing* snapshots.
+  The duration/token figures the rows' tooltips quote are *patched in place* on such a tick
+  (`PatchVolatileFigures` -> `RootsPanelNodeViewModel.UpdateVolatileFigures`, which raises `TooltipText`), so
+  the tooltip of a running session keeps moving without a single row being rebuilt.
+  **Working / idle indicator** (`SessionActivity`, no extra hook). `TranscriptReader.ReadTailSummary` reads a
+  transcript's tail once (assistant entry + ai-title + turn state in one JSON pass, cached on length/mtime in
+  `RootsTreeBuilder`) and classifies the newest *conversation* entry: an assistant entry that is not asking for
+  a tool (`end_turn`...), the `turn_duration`/`stop_hook_summary` system entries after it, and the "[Request
+  interrupted by user]" entry an Esc leaves behind mean the turn is over; a prompt, a tool call
+  (`stop_reason` `tool_use` or still streaming) or a tool result mean it is open. Bookkeeping entries
+  (`api-request`, `attachment`, `mode`, sidechain entries, built-in slash-command echoes) are skipped.
+  `SessionActivityResolver` combines that with live sub-agents (any live agent -> working) and the Stop hook
+  timestamp (a Stop newer than the last transcript write overrides an open turn); a session that is not running
+  has none. It travels as `SessionTreeDto.Activity` ("working"/"idle"/null) -> `MonitorSessionNode.Activity`
+  -> `RootsPanelNodeViewModel.Activity` (a live agent row is working by definition), is part of
+  `ContentSignature` (a change rebuilds the rows) and is mirrored onto panel C's session tabs by
+  `MainWindow.ApplyTabActivity` (`TabViewModel.Activity`/`ShownActivity`, on every `TreeRebuilt` and tab-set
+  change). Drawn by `App/Controls/ActivityIndicator`: a turning accent arc = working, a still hollow ring =
+  idle, collapsed = nothing to show; the turning runs only while the element is visible and loaded, and not at
+  all when Windows animations are off; the state is also in the tooltip and the automation name. Known limit:
+  a pending permission prompt looks like a tool call still running (working), since only a Notification hook
+  would tell them apart.
 - **`ITelemetryFeed`** — production stack: `EventServerTelemetrySource` wraps the in-process `EventServer`
   and calls the *same* `RootsTreeBuilder.Build` the Kestrel `/roots/tree` route calls (guaranteeing the UI
   and the HTTP route render byte-identical trees, with zero HTTP round-trip for the UI). `TelemetryFeed`
